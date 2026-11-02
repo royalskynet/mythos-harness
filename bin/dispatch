@@ -8,7 +8,8 @@ set -u
 
 MYTHOS_DIR="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-DCQ="${DCQ_BIN:-/Users/51mini/.local/bin/dcq}"
+# dcq 來自 orchestrator（github.com/royalskynet/orchestrator）
+DCQ="${DCQ_BIN:-$(command -v dcq || echo "$HOME/.local/bin/dcq")}"
 
 task="${1:-}"
 cwd="${2:-}"
