@@ -5,21 +5,21 @@
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>HOME</key>
-		<string>/Users/51mini</string>
+		<string>__HOME__</string>
 		<key>PATH</key>
-		<string>/Users/51mini/.local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+		<string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
 	</dict>
 	<key>Label</key>
 	<string>ai.mythos.dispatch-watch</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>/bin/bash</string>
-		<string>/Users/51mini/bots/mythos/bin/dispatch-watch</string>
+		<string>__REPO__/bin/dispatch-watch</string>
 	</array>
 	<key>StandardErrorPath</key>
-	<string>/Users/51mini/bots/mythos/logs/dispatch-watch.err.log</string>
+	<string>__REPO__/logs/dispatch-watch.err.log</string>
 	<key>StandardOutPath</key>
-	<string>/Users/51mini/bots/mythos/logs/dispatch-watch.out.log</string>
+	<string>__REPO__/logs/dispatch-watch.out.log</string>
 	<key>StartInterval</key>
 	<integer>120</integer>
 </dict>
