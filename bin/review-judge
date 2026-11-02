@@ -14,8 +14,15 @@ MAX_TASK_CHARS="${REVIEW_JUDGE_TASK_CHARS:-3000}"
 # 每棒硬砍：local-llm 自己的 timeout 是 600s；dispatch-watch 每 2 分鐘跑一次且持鎖，
 # 判斷拖太久會壓住同一輪的 PASS／FAIL 回報。兩棒最壞 ~80s，全敗就 UNKNOWN 照舊喚醒。
 LLM_TIMEOUT_S="${REVIEW_JUDGE_TIMEOUT_S:-40}"
-TO=""
-command -v timeout >/dev/null 2>&1 && TO="timeout $LLM_TIMEOUT_S"
+# macOS 原生沒有 timeout（coreutils 才有）。沒有就用系統內建 perl：子行程開新 process group，逾時整組砍
+# （只砍 exec 的那支不夠，孫行程握著 stdout，$(…) 會一直等；11-03 CI 抓到）
+run_to() {
+  if command -v timeout >/dev/null 2>&1; then timeout "$LLM_TIMEOUT_S" "$@"; return; fi
+  perl -e '$t = shift; $p = fork; die "fork" unless defined $p;
+    if (!$p) { setpgrp(0, 0); exec @ARGV or exit 127 }
+    $SIG{ALRM} = sub { kill "TERM", -$p; sleep 1; kill "KILL", -$p; exit 124 };
+    alarm $t; waitpid($p, 0); exit($? & 127 ? 128 + ($? & 127) : $? >> 8)' "$LLM_TIMEOUT_S" "$@"
+}
 
 task="${1:-}"
 progress="${2:-}"
@@ -55,7 +62,7 @@ why="沒有可用的棒"
 for leg in $LEGS; do
   [ -x "$leg" ] || { why="$(basename "$leg") 不存在"; continue; }
   # 不接 pipe 到 tr：那會讓 tr 的 exit code 蓋掉模型失敗，模型掛掉卻被當成「輸出看不懂」（fix 11636 同類）
-  if ! out="$(printf '%s' "$prompt" | $TO "$leg" 2>/dev/null)"; then
+  if ! out="$(printf '%s' "$prompt" | run_to "$leg" 2>/dev/null)"; then
     why="$(basename "$leg") 不通或逾時"
     continue
   fi
