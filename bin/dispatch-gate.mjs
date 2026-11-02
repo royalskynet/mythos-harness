@@ -15,14 +15,17 @@ const STATE = path.join(MYTHOS, 'state')
 const LOGS = path.join(MYTHOS, 'logs')
 const CACHE = path.join(STATE, 'dispatch-gate.json')
 const HANDSON = path.join(STATE, 'dispatch-gate-handson')
-const TRIAGE = process.env.DISPATCH_GATE_TRIAGE || '~/dev/dispatch-router/bin/triage'
+// triage 來自 orchestrator（github.com/royalskynet/orchestrator 的 bin/triage）；本機預設路徑不在就找 PATH
+const TRIAGE_DEFAULT = path.join(os.homedir(), 'dev/dispatch-router/bin/triage')
+const TRIAGE = process.env.DISPATCH_GATE_TRIAGE || (fs.existsSync(TRIAGE_DEFAULT) ? TRIAGE_DEFAULT : 'triage')
 
 const ALLOW_PREFIXES = [
   '/tmp/',
-  '~/bots/mythos/state/',
-  '~/bots/mythos/memory/',
-  '~/bots/mythos/trips/',
-  '~/.claude/projects/-Users-mac-mini-bots-mythos/',
+  // 依安裝位置推算（11-03 公開版）：bot 自己的 state／memory／trips＋它的 Claude Code transcript 目錄
+  path.join(MYTHOS, 'state') + '/',
+  path.join(MYTHOS, 'memory') + '/',
+  path.join(MYTHOS, 'trips') + '/',
+  path.join(os.homedir(), '.claude/projects', MYTHOS.replace(/[^A-Za-z0-9]/g, '-')) + '/',
 ]
 
 const WHITELIST = new Set([
@@ -209,8 +212,7 @@ function subAllowed(cmd, args) {
       if (script) {
         const abs = path.isAbsolute(script) ? script : path.resolve(MYTHOS, script)
         const binDir = path.join(MYTHOS, 'bin') + path.sep
-        const literalBin = '~/bots/mythos/bin/'
-        if (!(abs.startsWith(binDir) || abs.startsWith(literalBin))) return false
+        if (!abs.startsWith(binDir)) return false
       }
     }
   } else if (cmd === 'curl') {

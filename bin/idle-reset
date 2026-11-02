@@ -6,7 +6,9 @@
 # 10-28～11-02 每天 04:00 都判 active (0h)。改成短閒置＋多試幾個整點，Mythos 還在寫計畫就等下一點。
 IDLE_MIN=${IDLE_MIN:-30}
 TMUX=${TMUX_BIN:-/opt/homebrew/bin/tmux}
-PROJ=${PROJ:-$HOME/.claude/projects/-Users-mac-mini-bots-mythos}
+BOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
+# Claude Code 的 transcript 目錄＝工作目錄路徑把非英數字換成 -
+PROJ=${PROJ:-$HOME/.claude/projects/$(printf '%s' "$BOT_DIR" | sed 's/[^A-Za-z0-9]/-/g')}
 STAMP=${STAMP:-$(dirname "$0")/../state/idle-reset.stamp}
 today=$(date +%F)
 [ "$(cat "$STAMP" 2>/dev/null)" = "$today" ] && { echo "$(date '+%F %T') already cleared today -> skip"; exit 0; }

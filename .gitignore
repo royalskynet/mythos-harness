@@ -7,6 +7,7 @@
 !/launchd/
 !/bin/
 !/tests/
+!/router/
 /bin/*
 !/bin/dispatch
 !/bin/dispatch-cancel
@@ -25,5 +26,6 @@
 !/tests/test_idle_reset.sh
 !/tests/test_dispatch_deep.sh
 !/tests/test_dispatch_watch.sh
+!/tests/test_router_template.sh
 *.bak*
 __pycache__/
