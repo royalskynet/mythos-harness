@@ -1,0 +1,233 @@
+#!/usr/bin/env bash
+# 派工回報：dcq 結果 + deep 停滯／抽查。Mythos pane 閒置才打進去。
+set -u
+
+MYTHOS_DIR="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+DCQ_HOME="${DCQ_HOME:-$HOME/.dcq}"
+TMUX_BIN="${TMUX_BIN:-tmux}"
+TIMEOUT_MIN="${DISPATCH_TIMEOUT_MIN:-90}"
+DEEP_STALL_MIN="${DEEP_STALL_MIN:-15}"
+DEEP_REVIEW_MIN="${DEEP_REVIEW_MIN:-30}"
+# 抽查兩段過濾（11-02）：fast path 是這支腳本的 mtime／間隔判斷，slow path 交免費模型，
+# 只有 OFF_TRACK／STUCK／看不懂才喚醒 Mythos。沒這支或不可執行＝退回舊行為（每次抽查都喚醒）。
+REVIEW_JUDGE="${REVIEW_JUDGE:-$MYTHOS_DIR/bin/review-judge}"
+# deepclaude 用自己的 CLAUDE_CONFIG_DIR，transcript 不在 ~/.claude/projects（11-02 實查）
+CLAUDE_PROJECTS_DIR="${CLAUDE_PROJECTS_DIR:-$HOME/.deepclaude/config/projects}"
+TSV="$MYTHOS_DIR/state/dispatch-jobs.tsv"
+
+[ -f "$TSV" ] || exit 0
+mkdir -p "$MYTHOS_DIR/state" 2>/dev/null || exit 0
+mkdir -p "$MYTHOS_DIR/state/deep" 2>/dev/null || true
+
+LOCK="$MYTHOS_DIR/state/.dispatch-watch.lock"
+mkdir "$LOCK" 2>/dev/null || exit 0
+
+EVENTS="$(mktemp "${TMPDIR:-/tmp}/dispatch-watch-events.XXXXXX")" || { rmdir "$LOCK" 2>/dev/null; exit 0; }
+OUT="$(mktemp "${TMPDIR:-/tmp}/dispatch-watch-tsv.XXXXXX")" || { rm -f "$EVENTS"; rmdir "$LOCK" 2>/dev/null; exit 0; }
+cleanup() { rm -f "$EVENTS" "$OUT"; rmdir "$LOCK" 2>/dev/null; }
+trap cleanup EXIT
+
+now="$(date +%s)"
+
+# queued updates for deep last-* (deferred until pane idle + send success)
+LASTSTALL_UPDATES=()
+LASTREVIEW_UPDATES=()
+
+mtime_of() {
+  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0
+}
+
+slug_of() { printf '%s' "$1" | sed 's/[\/.]/-/g'; }
+
+while IFS=$'\t' read -r id tier task epoch status cwd; do
+  [ -n "$id" ] || continue
+  [ "$status" = pending ] || continue
+
+  case "$id" in
+    deep-*)
+      rcfile="$MYTHOS_DIR/state/deep/$id.rc"
+      outfile="$MYTHOS_DIR/state/deep/$id.out"
+      if [ -f "$rcfile" ]; then
+        rc="$(tr -d '[:space:]' < "$rcfile")"
+        if [ "$rc" = "0" ]; then
+          st=PASS
+        else
+          st=FAIL
+        fi
+        extra=""
+        if [ "$st" = FAIL ]; then
+          extra="$(tail -n 3 "$outfile" 2>/dev/null | tr '\t\n' '  ' | cut -c1-300)"
+        fi
+        case "$st" in
+          PASS) guide="請重跑工單驗收並看改動範圍後收尾" ;;
+          FAIL) guide="看 state/deep/$id.out，判斷後用 bin/dispatch-retry $id \"<補充指示>\" 重派" ;;
+        esac
+        printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$task" "$extra" "$guide" >> "$EVENTS"
+        continue
+      fi
+
+      # no rc yet
+      stall_min="$DEEP_STALL_MIN"
+      review_min="$DEEP_REVIEW_MIN"
+      slug="$(slug_of "$cwd")"
+      dir="$CLAUDE_PROJECTS_DIR/$slug"
+      latest_jsonl=""
+      if [ -d "$dir" ]; then
+        latest_jsonl="$(ls -t "$dir"/*.jsonl 2>/dev/null | head -1)"
+      fi
+
+      max_mtime=0
+      if [ -n "$latest_jsonl" ] && [ -f "$latest_jsonl" ]; then
+        m="$(mtime_of "$latest_jsonl")"; [ -n "$m" ] && max_mtime="$m"
+      fi
+      if [ -f "$outfile" ]; then
+        m="$(mtime_of "$outfile")"; [ -n "$m" ] && [ "$m" -gt "$max_mtime" ] 2>/dev/null && max_mtime="$m"
+      fi
+
+      stall_reported=0
+      if [ "$max_mtime" -gt 0 ]; then
+        age=$((now - max_mtime))
+        if [ "$age" -ge $((stall_min * 60)) ]; then
+          last_stall_file="$MYTHOS_DIR/state/deep/$id.last-stall"
+          allow=1
+          if [ -f "$last_stall_file" ]; then
+            last="$(tr -d '[:space:]' < "$last_stall_file")"
+            case "$last" in ''|*[!0-9]*) allow=1 ;; *) 
+              if [ $((now - last)) -lt $((stall_min * 60)) ]; then allow=0; fi ;;
+            esac
+          fi
+          if [ "$allow" = 1 ]; then
+            st=STALL
+            extra=""
+            guide="判斷是否卡死；卡死就 bin/dispatch-cancel $id 再 bin/dispatch-retry"
+            printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$task" "$extra" "$guide" >> "$EVENTS"
+            LASTSTALL_UPDATES+=("$last_stall_file|$now")
+            stall_reported=1
+          fi
+        fi
+      fi
+
+      if [ "$stall_reported" = 0 ]; then
+        last_review_file="$MYTHOS_DIR/state/deep/$id.last-review"
+        baseline="$epoch"
+        case "$baseline" in ''|*[!0-9]*) baseline="$now" ;; esac
+        if [ -f "$last_review_file" ]; then
+          lr="$(tr -d '[:space:]' < "$last_review_file")"
+          case "$lr" in ''|*[!0-9]*) ;; *) baseline="$lr" ;; esac
+        fi
+        age_review=$((now - baseline))
+        if [ "$age_review" -ge $((review_min * 60)) ]; then
+          # progress
+          progress=""
+          if [ -n "$latest_jsonl" ] && [ -f "$latest_jsonl" ]; then
+            while IFS=$'\t' read -r tname tval; do
+              [ -n "$tname" ] || continue
+              short="${tval:0:60}"
+              item="$tname $short"
+              if [ -z "$progress" ]; then progress="$item"; else progress="${progress}；${item}"; fi
+            done < <(jq -r 'select(.type=="assistant" and .message) | .message.content[]? | select(.type=="tool_use") | [.name, (.input.file_path // .input.command // .input.path // "")] | @tsv' "$latest_jsonl" 2>/dev/null | tail -n 8)
+          fi
+          if [ -z "$progress" ]; then progress="讀不到進度"; fi
+          progress="${progress:0:500}"
+
+          verdict=""
+          if [ -x "$REVIEW_JUDGE" ]; then
+            # 不接 pipe：judge 非零退出要算失敗（照舊喚醒），不能被 head 的 0 蓋掉
+            if verdict="$("$REVIEW_JUDGE" "$task" "$progress" 2>/dev/null)"; then
+              verdict="$(printf '%s\n' "$verdict" | head -1)"
+            else
+              verdict=""
+            fi
+          fi
+          case "$verdict" in
+            ON_TRACK*)
+              # 沒跑歪就不吵 Mythos；間隔立刻往前，下一輪才重判（省免費模型呼叫）
+              printf '%s\n' "$now" > "$last_review_file"
+              continue
+              ;;
+          esac
+
+          st=REVIEW
+          extra="$progress"
+          if [ -n "$verdict" ]; then extra="${verdict}｜${progress}"; fi
+          guide="對照工單目標判斷有無跑歪；歪了就 bin/dispatch-cancel $id 再 bin/dispatch-retry $id \"<導正指示>\"，沒歪不用回覆"
+          printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$task" "$extra" "$guide" >> "$EVENTS"
+          LASTREVIEW_UPDATES+=("$last_review_file|$now")
+        fi
+      fi
+      continue
+      ;;
+    *)
+      # dcq row
+      if [ -f "$DCQ_HOME/done/$id.job" ]; then
+        st=PASS
+      elif [ -f "$DCQ_HOME/failed/$id.job" ]; then
+        st=FAIL
+      elif [ -f "$DCQ_HOME/running/$id.job" ]; then
+        case "$epoch" in '' | *[!0-9]*) continue ;; esac
+        if [ $((now - epoch)) -ge $((TIMEOUT_MIN * 60)) ]; then
+          st=TIMEOUT
+        else
+          continue
+        fi
+      else
+        continue
+      fi
+      printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$task" "" "" >> "$EVENTS"
+      ;;
+  esac
+done < "$TSV"
+
+[ -s "$EVENTS" ] || exit 0
+
+pane="$("$TMUX_BIN" -L mythos capture-pane -p -t mythos 2>/dev/null)" || exit 0
+if printf '%s\n' "$pane" | tail -15 | grep -q 'esc to interrupt'; then
+  exit 0
+fi
+
+parts=''
+while IFS=$'\t' read -r id st task extra guide; do
+  base="${task##*/}"
+  item="[派工回報] $id $st $base"
+  if [ -n "$extra" ]; then item="${item}；${extra}"; fi
+  if [ -n "$guide" ]; then item="${item}；${guide}"; fi
+  if [ -z "$parts" ]; then
+    parts="$item"
+  else
+    parts="${parts}；${item}"
+  fi
+done < "$EVENTS"
+
+msg="$parts"
+"$TMUX_BIN" -L mythos send-keys -t mythos -l -- "$msg" || exit 0
+"$TMUX_BIN" -L mythos send-keys -t mythos Enter || exit 0
+
+# apply deferred last-* updates
+for u in ${LASTSTALL_UPDATES[@]+"${LASTSTALL_UPDATES[@]}"}; do
+  f="${u%%|*}"; v="${u##*|}"
+  printf '%s\n' "$v" > "$f"
+done
+for u in ${LASTREVIEW_UPDATES[@]+"${LASTREVIEW_UPDATES[@]}"}; do
+  f="${u%%|*}"; v="${u##*|}"
+  printf '%s\n' "$v" > "$f"
+done
+
+while IFS= read -r line || [ -n "$line" ]; do
+  id="$(printf '%s\n' "$line" | cut -f1)"
+  status="$(printf '%s\n' "$line" | cut -f5)"
+  new=''
+  if [ "$status" = pending ]; then
+    act="$(awk -F'\t' -v id="$id" '$1 == id { print $2; exit }' "$EVENTS")"
+    case "$act" in
+      PASS) new=notified-PASS ;;
+      FAIL) new=notified-FAIL ;;
+      TIMEOUT) new=timeout-notified ;;
+    esac
+  fi
+  if [ -n "$new" ]; then
+    line="$(printf '%s\n' "$line" | awk -F'\t' -v s="$new" 'BEGIN { OFS="\t" } { $5=s; print }')"
+  fi
+  printf '%s\n' "$line" >> "$OUT"
+done < "$TSV"
+
+mv "$OUT" "$TSV"

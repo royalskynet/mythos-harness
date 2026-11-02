@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -u
+
+MYTHOS_DIR="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+TSV="$MYTHOS_DIR/state/dispatch-jobs.tsv"
+
+id="${1:-}"
+extra="${2:-}"
+
+if [ -z "$id" ] || [ -z "$extra" ]; then
+  echo "用法：bin/dispatch-retry <id> \"<補充指示>\"" >&2
+  exit 2
+fi
+
+if [ ! -f "$TSV" ]; then
+  echo "找不到 $TSV" >&2
+  exit 1
+fi
+
+row="$(awk -F'\t' -v id="$id" '$1 == id { print; exit }' "$TSV")"
+if [ -z "$row" ]; then
+  echo "找不到工單：$id" >&2
+  exit 1
+fi
+
+task="$(printf '%s\n' "$row" | cut -f3)"
+cwd="$(printf '%s\n' "$row" | cut -f6)"
+tier="$(printf '%s\n' "$row" | cut -f2)"
+if [ -z "$cwd" ]; then
+  # maybe dcq row has no cwd; cannot retry
+  echo "找不到 cwd：$id" >&2
+  exit 1
+fi
+
+# root name
+base="$(basename "$task")"
+root="${base%.md}"
+root="$(printf '%s' "$root" | sed 's/-r[0-9][0-9]*$//')"
+
+count="$(awk -F'\t' -v root="$root" '
+{
+  t=$3; sub(/.*\//,"",t); sub(/\.md$/,"",t); sub(/-r[0-9]+$/,"",t);
+  if (t==root) c++
+} END { print c+0 }
+' "$TSV")"
+N="${count:-0}"
+if [ "$N" -lt 1 ]; then N=1; fi
+
+if [ "$N" -gt 3 ]; then
+  echo "已重派 3 次，回報使用者" >&2
+  exit 1
+fi
+
+mkdir -p /tmp/dc-worker
+newtask="/tmp/dc-worker/${root}-r${N}.md"
+ts="$(date '+%Y-%m-%d %H:%M')"
+{
+  if [ -f "$task" ]; then cat "$task"; else printf '%s\n' "$task"; fi
+  printf '\n\n## 追加指示（第 %s 次重派，%s）\n\n%s\n' "$N" "$ts" "$extra"
+} > "$newtask"
+
+"$ROOT_DIR/bin/dispatch" "$newtask" "$cwd" "$tier"

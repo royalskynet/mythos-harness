@@ -1,0 +1,15 @@
+name: test
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: node --test tests/test_dispatch_gate.mjs
+      - run: bash tests/test-review-judge.sh
+      - run: bash tests/test-dispatch-route.sh
+      - run: bash tests/test_idle_reset.sh
+      - run: bash tests/test_dispatch_deep.sh
+      - run: bash tests/test_dispatch_watch.sh

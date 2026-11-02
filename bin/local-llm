@@ -1,0 +1,30 @@
+#!/usr/bin/env python3
+# 背景 LLM 出口：摘要、批次整理、背景判斷等消耗型工作走 :4000 PII 閘道的 nim-first（OmniRoute 純免費：nim-pool → or-free）。
+# 用法：echo "<prompt>" | local-llm [max_tokens]   → stdout 印模型回覆
+# 2026-10-20 本機 Gemma 4 E4B（llama-server :18080）移除，改走 chain-a；10-20 chain-a 刪除，改 nim-first；:4000 閘道會先洗 PII（鐵則 6）。
+# 名稱沿用 local-llm，呼叫端（daily-log、cabinet radar／mkt_trends、state-digest）不用改。
+import json, os, shutil, subprocess, sys, urllib.error, urllib.request
+
+URL = os.environ.get("LOCAL_LLM_URL", "http://127.0.0.1:4000/v1/chat/completions")
+MODEL = os.environ.get("LOCAL_LLM_MODEL", "nim-first")
+KEY = os.environ.get("LOCAL_LLM_KEY", "sk-poc-master")  # 本機閘道的固定 POC key（ensure.sh 同值），不是外部憑證
+body = {"model": MODEL, "messages": [{"role": "user", "content": sys.stdin.read()}],
+        # 雲端免費池常落在推理模型，思考也吃 max_tokens；給太少正文會是空的（10-20 實測 50→空、200→有），所以設下限
+        "max_tokens": max(int(sys.argv[1]) if len(sys.argv) > 1 else 2000, 1024),
+        "temperature": 0.2, "stream": False}
+headers = {"Content-Type": "application/json", "Authorization": f"Bearer {KEY}"}
+req = urllib.request.Request(URL, json.dumps(body).encode(), headers)
+try:
+    d = json.load(urllib.request.urlopen(req, timeout=600))
+except urllib.error.HTTPError as e:
+    sys.exit(f"local-llm HTTP {e.code}: {e.read()[:300].decode(errors='replace')}")
+except OSError as e:  # 閘道沒起來：明說，不要靜默改走別處
+    sys.exit(f"local-llm unreachable ({URL}): {e}")
+out = d["choices"][0]["message"]["content"]
+if not (out or "").strip():
+    sys.exit("local-llm returned empty content")
+OPENCC = shutil.which("opencc") or ("/opt/homebrew/bin/opencc" if os.path.exists("/opt/homebrew/bin/opencc") else None)  # launchd PATH 常缺 homebrew（fix 11081）
+if OPENCC:  # 雲端模型常混簡體，零 token 轉台灣繁體；沒裝就原樣輸出
+    r = subprocess.run([OPENCC, "-c", "s2twp"], input=out, capture_output=True, text=True)
+    out = r.stdout if r.returncode == 0 and r.stdout.strip() else out
+print(out)
