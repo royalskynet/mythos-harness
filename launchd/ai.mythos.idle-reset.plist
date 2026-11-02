@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>~</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/bin:/bin</string>
+	</dict>
+	<key>Label</key>
+	<string>ai.mythos.idle-reset</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>~/bots/mythos/bin/idle-reset</string>
+	</array>
+	<key>StandardErrorPath</key>
+	<string>~/bots/mythos/logs/idle-reset.err.log</string>
+	<key>StandardOutPath</key>
+	<string>~/bots/mythos/logs/idle-reset.out.log</string>
+	<key>StartCalendarInterval</key>
+	<array>
+		<dict>
+			<key>Hour</key>
+			<integer>4</integer>
+			<key>Minute</key>
+			<integer>0</integer>
+		</dict>
+		<dict>
+			<key>Hour</key>
+			<integer>5</integer>
+			<key>Minute</key>
+			<integer>0</integer>
+		</dict>
+		<dict>
+			<key>Hour</key>
+			<integer>6</integer>
+			<key>Minute</key>
+			<integer>0</integer>
+		</dict>
+	</array>
+</dict>
+</plist>

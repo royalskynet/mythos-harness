@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# review-judge — 派工抽查的 slow path：對照工單目標判 worker 有沒有跑歪，零 Mythos token。
+# 用法：bin/review-judge <task.md 絕對路徑> <progress 字串>
+# 印一行：ON_TRACK ／ OFF_TRACK <理由> ／ STUCK <理由> ／ UNKNOWN <原因>
+# fail-open：讀不到工單、免費模型不通、輸出看不懂一律 UNKNOWN，由呼叫端照舊喚醒 Mythos。
+set -u
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+# 免費鏈（11-02）：一棒一個讀 stdin 印答案的執行檔，前一棒失敗／逾時／答非所問就換下一棒。
+# 預設兩棒刻意不同體系：opencode-go/beam-free（CLI，11-02 實測 7s 判對）先，
+# 掛了換 :4000→OmniRoute nim-first（nim-pool→or-free；同日 trivial prompt 90s 逾時，所以排第二）。
+LEGS="${REVIEW_JUDGE_LLM:-$HERE/oc-free-ask $HERE/local-llm}"
+MAX_TASK_CHARS="${REVIEW_JUDGE_TASK_CHARS:-3000}"
+# 每棒硬砍：local-llm 自己的 timeout 是 600s；dispatch-watch 每 2 分鐘跑一次且持鎖，
+# 判斷拖太久會壓住同一輪的 PASS／FAIL 回報。兩棒最壞 ~80s，全敗就 UNKNOWN 照舊喚醒。
+LLM_TIMEOUT_S="${REVIEW_JUDGE_TIMEOUT_S:-40}"
+TO=""
+command -v timeout >/dev/null 2>&1 && TO="timeout $LLM_TIMEOUT_S"
+
+task="${1:-}"
+progress="${2:-}"
+
+if [ -z "$task" ] || [ ! -r "$task" ]; then
+  echo "UNKNOWN 讀不到工單 ${task:-(空)}"
+  exit 0
+fi
+if [ -z "$progress" ] || [ "$progress" = "讀不到進度" ]; then
+  echo "UNKNOWN 讀不到進度"
+  exit 0
+fi
+
+# Inline & Spill：工單只給前 N 字，超出的截掉（判跑歪用不到尾段細節）
+body="$(cut -c1-"$MAX_TASK_CHARS" "$task" 2>/dev/null | head -c "$MAX_TASK_CHARS")"
+if [ -z "$body" ]; then
+  echo "UNKNOWN 工單是空的"
+  exit 0
+fi
+
+prompt="你是派工監看員。下面是一張工單，以及執行它的 agent 最近 8 個工具呼叫。
+只判一件事：這些動作是不是朝著工單目標與驗收條件前進。
+
+嚴格只輸出一行，開頭是下列標籤之一，後面接不超過 40 字的中文理由（ON_TRACK 不用理由）：
+ON_TRACK＝動作跟工單目標一致，照這樣下去會過驗收。
+OFF_TRACK＝動作明顯不是工單要的事（改錯檔案、做別的任務、改驗收本身）。
+STUCK＝同一件事反覆重試、或一直讀檔沒有任何寫入與驗證，沒有實質進展。
+看不出來就輸出 UNKNOWN，不要猜。
+
+=== 工單 ===
+$body
+
+=== 最近工具呼叫 ===
+$progress"
+
+why="沒有可用的棒"
+for leg in $LEGS; do
+  [ -x "$leg" ] || { why="$(basename "$leg") 不存在"; continue; }
+  # 不接 pipe 到 tr：那會讓 tr 的 exit code 蓋掉模型失敗，模型掛掉卻被當成「輸出看不懂」（fix 11636 同類）
+  if ! out="$(printf '%s' "$prompt" | $TO "$leg" 2>/dev/null)"; then
+    why="$(basename "$leg") 不通或逾時"
+    continue
+  fi
+  # 只認第一個非空行、標籤在行首（容許 markdown 的 *、`、#）：ON_TRACK 必須整行就是它，
+  # 否則 NOT_ON_TRACK／「UNKNOWN: expected ON_TRACK」會被誤判成沒跑歪而壓掉喚醒（11-02 Codex 審計）
+  line="$(printf '%s\n' "$out" | tr -d '\r' | grep -m1 -v -E '^[[:space:]]*$' | sed -E 's/^[[:space:]*`#>]+//')"
+  if printf '%s\n' "$line" | grep -q -E '^ON_TRACK[[:space:]*`.。]*$'; then echo "ON_TRACK"; exit 0; fi
+  if printf '%s\n' "$line" | grep -q -E '^(OFF_TRACK|STUCK)([[:space:]:：*`-]|$)'; then
+    printf '%s\n' "$(printf '%s' "$line" | tr '\t' ' ' | cut -c1-160)"; exit 0
+  fi
+  why="$(basename "$leg") 輸出看不懂"
+done
+echo "UNKNOWN 免費鏈全敗（最後一棒：${why}）"
+exit 0

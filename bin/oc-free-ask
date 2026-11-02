@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+# oc-free-ask — 一問一答走 opencode 免費模型（CLI，不打 API；OC 免費層只准 CLI，見 feedback_opencode_api_go_only）。
+# 用法：echo "<prompt>" | oc-free-ask [model]   → stdout 印模型回覆；預設 opencode-go/beam-free
+# 鐵則 6：opencode 不經 :4000，所以 prompt 先過 :4102/scrub 去識別；scrub 不通就不送（fail closed，exit 3）。
+# 在空的暫存目錄跑、--pure 不載外掛，模型就算想動工具也碰不到真檔案。
+import json, os, shutil, subprocess, sys, tempfile, urllib.request
+
+SCRUB = os.environ.get("OC_FREE_ASK_SCRUB", "http://127.0.0.1:4102/scrub")
+MODEL = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("OC_FREE_ASK_MODEL", "opencode-go/beam-free")
+OPENCODE = os.environ.get("OC_FREE_ASK_BIN") or shutil.which("opencode") or "/opt/homebrew/bin/opencode"
+
+prompt = sys.stdin.read()
+if not prompt.strip():
+    sys.exit("oc-free-ask: empty prompt")
+
+try:
+    req = urllib.request.Request(SCRUB, json.dumps({"texts": [prompt]}).encode(),
+                                 {"Content-Type": "application/json"})
+    prompt = json.load(urllib.request.urlopen(req, timeout=20))["texts"][0]
+except Exception as e:  # noqa: BLE001 - 去識別失敗就不送出機
+    print(f"oc-free-ask: scrub unavailable, not sending: {type(e).__name__}", file=sys.stderr)
+    sys.exit(3)
+
+with tempfile.TemporaryDirectory(prefix="oc-free-ask-") as d:
+    r = subprocess.run([OPENCODE, "run", "--pure", "-m", MODEL, "--dir", d, prompt],
+                       cwd=d, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+out = (r.stdout or "").strip()
+if r.returncode != 0 or not out:
+    print(f"oc-free-ask: opencode rc={r.returncode} {(r.stderr or '')[-200:]}", file=sys.stderr)
+    sys.exit(r.returncode or 1)
+print(out)

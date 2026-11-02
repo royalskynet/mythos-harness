@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# 派工入口：寫好工單後呼叫。路由只看難度，不分急緩（11-02 使用者定）：
+#   easy／mid → dcq 派of（DCQ_ORDER=free，只走免費層，全敗就 FAIL 回報，不扣訂閱）
+#   hard      → deep（OpenCode Go 訂閱，背景多步自主）
+# 用法：bin/dispatch <task.md 絕對路徑> <cwd 絕對路徑> <easy|mid|hard>
+# 舊的第四參數（urgent／later）照收不理，免得還沒重開的 Mythos 派工被 exit 2 擋掉。
+set -u
+
+MYTHOS_DIR="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+DCQ="${DCQ_BIN:-~/.local/bin/dcq}"
+
+task="${1:-}"
+cwd="${2:-}"
+tier="${3:-}"
+
+if [ -z "$task" ] || [ -z "$cwd" ] || [ -z "$tier" ]; then
+  echo "用法：bin/dispatch <task.md 絕對路徑> <cwd 絕對路徑> <easy|mid|hard>" >&2
+  exit 2
+fi
+
+case "$tier" in
+  easy | mid | hard) ;;
+  *) echo "難度只能是 easy／mid／hard：$tier" >&2; exit 2 ;;
+esac
+
+if [ "$tier" = hard ]; then route=deep; else route=dcq; export DCQ_ORDER=free; fi
+if [ "$route" = deep ]; then
+  epoch="$(date +%s)"
+  base="$(basename "$task")"
+  name="${base%.md}"
+  id="deep-${epoch}-${name}"
+  mkdir -p "$MYTHOS_DIR/state" "$MYTHOS_DIR/state/deep"
+  nohup "$ROOT_DIR/bin/dispatch-deep-run" "$id" "$task" "$cwd" >/dev/null 2>&1 &
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$tier" "$task" "$epoch" pending "$cwd" \
+    >> "$MYTHOS_DIR/state/dispatch-jobs.tsv"
+  echo "$id"
+  exit 0
+fi
+
+id="$("$DCQ" add "$task" "$cwd" "$tier")" || {
+  rc=$?
+  echo "dcq add 失敗（exit ${rc}）：${task}" >&2
+  exit "$rc"
+}
+
+id="$(printf '%s\n' "$id" | tail -1 | tr -d '[:space:]')"
+if [ -z "$id" ]; then
+  echo "dcq add 沒有回傳 job id" >&2
+  exit 1
+fi
+
+mkdir -p "$MYTHOS_DIR/state"
+printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$tier" "$task" "$(date +%s)" pending \
+  >> "$MYTHOS_DIR/state/dispatch-jobs.tsv"
+
+"$DCQ" start -j 4 >/dev/null 2>&1 || true
+
+echo "$id"

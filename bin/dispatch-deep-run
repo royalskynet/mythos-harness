@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -u
+
+MYTHOS_DIR="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+
+id="${1:-}"
+task="${2:-}"
+cwd="${3:-}"
+
+if [ -z "$id" ] || [ -z "$task" ] || [ -z "$cwd" ]; then
+  echo "用法：bin/dispatch-deep-run <id> <task> <cwd>" >&2
+  exit 2
+fi
+
+mkdir -p "$MYTHOS_DIR/state/deep"
+out="$MYTHOS_DIR/state/deep/$id.out"
+rcf="$MYTHOS_DIR/state/deep/$id.rc"
+pidf="$MYTHOS_DIR/state/deep/$id.pid"
+
+: > "$out"
+printf '%s\n' "$$" > "$pidf"
+
+"${DEEP_RUN_BIN:-deep-run}" "$task" "$cwd" > "$out" 2>&1
+rc=$?
+printf '%s\n' "$rc" > "$rcf"
+exit "$rc"

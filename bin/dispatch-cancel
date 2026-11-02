@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -u
+
+MYTHOS_DIR="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+TMUX_BIN="${TMUX_BIN:-tmux}"
+DEEP_TASK_DIR="${DEEP_TASK_DIR:-$HOME/.deepclaude/work/.deep}"
+TSV="$MYTHOS_DIR/state/dispatch-jobs.tsv"
+
+id="${1:-}"
+if [ -z "$id" ]; then
+  echo "用法：bin/dispatch-cancel <id>" >&2
+  exit 2
+fi
+case "$id" in
+  deep-*) ;;
+  *) echo "只接受 deep- 開頭 id：$id" >&2; exit 1 ;;
+esac
+
+pidf="$MYTHOS_DIR/state/deep/$id.pid"
+if [ -f "$pidf" ]; then
+  pid="$(tr -d '[:space:]' < "$pidf")"
+  if [ -n "$pid" ]; then
+    pkill -TERM -P "$pid" 2>/dev/null || true
+    kill "$pid" 2>/dev/null || true
+  fi
+fi
+
+# 找 EPOCH：.deep 下比 .pid 新的 *-task.md，內容與工單相同
+epoch=""
+task_path="$(awk -F'\t' -v id="$id" '$1 == id { print $3; exit }' "$TSV" 2>/dev/null)"
+if [ -d "$DEEP_TASK_DIR" ]; then
+  pid_mtime=0
+  if [ -f "$pidf" ]; then pid_mtime="$(stat -f %m "$pidf" 2>/dev/null || stat -c %Y "$pidf" 2>/dev/null)"; fi
+  : "${pid_mtime:=0}"
+  # 候選：*-task.md，mtime > pid_mtime，內容等於 task 檔
+  best=""
+  best_mtime=0
+  for cand in "$DEEP_TASK_DIR"/*-task.md; do
+    [ -f "$cand" ] || continue
+    cmtime="$(stat -f %m "$cand" 2>/dev/null || stat -c %Y "$cand" 2>/dev/null)"
+    : "${cmtime:=0}"
+    [ "$cmtime" -gt "$pid_mtime" ] 2>/dev/null || continue
+    if [ -n "$task_path" ] && [ -f "$task_path" ]; then
+      if ! cmp -s "$cand" "$task_path" 2>/dev/null; then continue; fi
+    fi
+    if [ "$cmtime" -gt "$best_mtime" ]; then
+      best="$cand"; best_mtime="$cmtime"
+    fi
+  done
+  if [ -n "$best" ]; then
+    epoch="$(basename "$best")"
+    epoch="${epoch%-task.md}"
+  else
+    # fallback：內容比對不到時，取比 pid 新的最新 *-task.md
+    best2=""; best2_mtime=0
+    for cand in "$DEEP_TASK_DIR"/*-task.md; do
+      [ -f "$cand" ] || continue
+      cmtime="$(stat -f %m "$cand" 2>/dev/null || stat -c %Y "$cand" 2>/dev/null)"
+      : "${cmtime:=0}"
+      [ "$cmtime" -gt "$pid_mtime" ] 2>/dev/null || continue
+      if [ "$cmtime" -gt "$best2_mtime" ]; then best2="$cand"; best2_mtime="$cmtime"; fi
+    done
+    if [ -n "$best2" ]; then
+      epoch="$(basename "$best2")"
+      epoch="${epoch%-task.md}"
+    fi
+  fi
+fi
+
+if [ -n "$epoch" ]; then
+  "$TMUX_BIN" -L deep kill-session -t "deep-$epoch" 2>/dev/null || true
+else
+  echo "警告：找不到 EPOCH，只殺程序" >&2
+fi
+
+printf '%s\n' 130 > "$MYTHOS_DIR/state/deep/$id.rc"
+
+if [ -f "$TSV" ]; then
+  tmp="$(mktemp "${TMPDIR:-/tmp}/dispatch-cancel.XXXXXX")"
+  awk -F'\t' -v id="$id" 'BEGIN{OFS="\t"} $1==id {$5="cancelled"} {print}' "$TSV" > "$tmp" && mv "$tmp" "$TSV"
+fi
+
+exit 0
