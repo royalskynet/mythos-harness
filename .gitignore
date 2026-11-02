@@ -27,5 +27,6 @@
 !/tests/test_dispatch_deep.sh
 !/tests/test_dispatch_watch.sh
 !/tests/test_router_template.sh
+!/tests/test_launchd_install.sh
 *.bak*
 __pycache__/

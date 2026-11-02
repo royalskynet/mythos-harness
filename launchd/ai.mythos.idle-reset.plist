@@ -5,7 +5,7 @@
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>HOME</key>
-		<string>~</string>
+		<string>__HOME__</string>
 		<key>PATH</key>
 		<string>/opt/homebrew/bin:/usr/bin:/bin</string>
 	</dict>
@@ -14,12 +14,12 @@
 	<key>ProgramArguments</key>
 	<array>
 		<string>/bin/sh</string>
-		<string>~/bots/mythos/bin/idle-reset</string>
+		<string>__REPO__/bin/idle-reset</string>
 	</array>
 	<key>StandardErrorPath</key>
-	<string>~/bots/mythos/logs/idle-reset.err.log</string>
+	<string>__REPO__/logs/idle-reset.err.log</string>
 	<key>StandardOutPath</key>
-	<string>~/bots/mythos/logs/idle-reset.out.log</string>
+	<string>__REPO__/logs/idle-reset.out.log</string>
 	<key>StartCalendarInterval</key>
 	<array>
 		<dict>

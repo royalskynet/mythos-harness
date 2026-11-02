@@ -44,7 +44,7 @@ router/start.sh                      # 不要 Telegram：CHANNELS= router/start.
 tmux -L mythos attach -t mythos
 ```
 
-背景監看用 launchd（`launchd/` 兩份範本，路徑改成你的 clone 位置後放進 `~/Library/LaunchAgents/`）。
+背景監看用 launchd：`bash launchd/install.sh` 把兩份範本的 `__REPO__`／`__HOME__` 換成 clone 位置與家目錄，寫進 `~/Library/LaunchAgents/` 並載入（`NO_LOAD=1` 只產檔）。
 
 ## 元件 / Components
 
@@ -66,6 +66,7 @@ bash tests/test_router_template.sh     # Sonnet＋Opus advisor＋派工閘真的
 node --test tests/test_dispatch_gate.mjs   # 36 項，含 Codex 審計的 10 個繞過反例
 bash tests/test-review-judge.sh && bash tests/test-dispatch-route.sh && bash tests/test_idle_reset.sh
 bash tests/test_dispatch_deep.sh && bash tests/test_dispatch_watch.sh
+bash tests/test_launchd_install.sh     # 範本無寫死路徑、換完是合法 plist
 ```
 
 ## 限制 / Limits
