@@ -576,6 +576,17 @@ case "$out" in *"身分不符，不送訊號：$pA"*) ;; *) fail "23s：沒印�
 [ "$(awk -F'\t' '$1=="deep-1-1-a"{print $5}' "$J23")" = pending ] || fail '23s：身分不符卻改了 ledger 狀態'
 [ "$(cat "$F/mythos/state/deep/deep-1-1-a.rc" 2>/dev/null)" != 130 ] || fail '23s：身分不符卻寫了 rc=130'
 jq -e 'select(.event_id=="deep-1-1-a-PASS") | .cancelled == null' "$F/mythos/state/events.jsonl" >/dev/null || fail '23s：身分不符卻撤銷了事件'
+# stale-handle＋session（正式 runner 格式）：pid 不符就整張拒絕，不殺 session、不寫 rc、不動 ledger
+printf 'pid=%s\npid_start=Thu Jan  1 00:00:00 1970\nsession=deep-111-1\n' "$pA" > "$F/mythos/state/deep/deep-1-1-a.handle"
+: > "$F/tmux.log"
+set +e; out="$(c23 deep-1-1-a 2>&1)"; rc=$?; set -e
+[ "$rc" = 1 ] || fail "23sf：stale handle（有 session）卻 exit ${rc}"
+kill -0 "$pA" 2>/dev/null || fail '23sf：start 不符還是殺了程序'
+case "$out" in *"身分不符，不送訊號：$pA"*) ;; *) fail "23sf：沒印身分不符：$out" ;; esac
+[ ! -s "$F/tmux.log" ] || fail "23sf：start 不符還動了 tmux：$(cat "$F/tmux.log")"
+[ ! -e "$F/mythos/state/deep/deep-1-1-a.rc" ] || fail '23sf：身分不符卻寫了 rc'
+[ "$(awk -F'\t' '$1=="deep-1-1-a"{print $5}' "$J23")" = pending ] || fail '23sf：身分不符卻改了 ledger 狀態'
+jq -e 'select(.event_id=="deep-1-1-a-PASS") | .cancelled == null' "$F/mythos/state/events.jsonl" >/dev/null || fail '23sf：身分不符卻撤銷了事件'
 : > "$F/tmux.log"
 set +e; out="$(c23 deep-3-3-a2 2>&1)"; rc=$?; set -e
 [ "$rc" = 1 ] || fail "23：沒 handle 卻沒 exit 1（rc=${rc}）"

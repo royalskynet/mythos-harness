@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Watchdog（C，零 token）：每 5 分鐘掃「活著但卡住」的情況，能修的先修，修不了的寫一行告警。
-# 告警出口照使用者規定：只寫 brief-lines 的 mythos-watchdog.tsv，由 Coco 08:00 晨報讀；不推 Telegram。
+# 告警出口照使用者規定：只寫 brief-lines 的 mythos-watchdog.tsv，由 08:00 晨報讀；不推 Telegram。
 # v2（11-04，計畫 state/workorders/watchdog-v2-plan.md）：
 #   L0 腳本（零 token）：原四項＋deep 停滯／背景 agent 卡權限提示＋log 錯誤行收進「待判」佇列
 #   L1 模型：只在待判非空時叫、每小時上限；出機前白名單→canary→scrub；退路鏈全敗才告警「判不了」
@@ -31,7 +31,7 @@ if ! jq -e '.alerted | type == "object"' "$STATE" >/dev/null 2>&1; then
   printf '%s\n' '{"alerted":{}}' > "$STATE" || { log "ERROR 無法建立 $STATE"; exit 1; }
 fi
 
-# 台灣時間 08:00 前發生的算當天，之後的算隔天（給 Coco 08:00 晨報讀）
+# 台灣時間 08:00 前發生的算當天，之後的算隔天（給 08:00 晨報讀）
 alert_date() {
   local d h
   d="$(TZ=Asia/Taipei date '+%Y-%m-%d')"
@@ -89,7 +89,7 @@ mtime_of() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 
 # 每棒硬砍（同 review-judge）：macOS 沒 timeout 就用內建 perl，逾時整個 process group 砍
 run_to() {
   local t="$1"; shift
-  if command -v timeout >/dev/null 2>&1; then timeout "$t" "$@"; return; fi
+  if command -v timeout >/dev/null 2>&1; then timeout -k 5 "$t" "$@"; return; fi
   perl -e '$t = shift; $p = fork; die "fork" unless defined $p;
     if (!$p) { setpgrp(0, 0); exec @ARGV or exit 127 }
     $SIG{ALRM} = sub { kill "TERM", -$p; sleep 1; kill "KILL", -$p; exit 124 };
@@ -425,7 +425,7 @@ while IFS= read -r sess; do
   if [ "$m" -gt 0 ] && [ $((now - m)) -ge $((deep_stall_min * 60)) ]; then
     alert "deep-stall-$sess-$m" "deep session ${sess}（job=${jid}）transcript $(( (now - m) / 60 )) 分鐘沒動"
   fi
-done < <(run_to 10 "$TMUX_BIN" ls -F '#{session_name}' 2>/dev/null)
+done < <(run_to 10 "$TMUX_BIN" -L deep ls -F '#{session_name}' 2>/dev/null)
 
 # 5b) claude agents 的背景 worker state=blocked（卡在權限提示）超過 BG_STALL_MIN 分鐘 → 告警
 #     blocked 沒有時間欄位，第一次看到記在 watchdog.json 的 bg_blocked，解除就移掉
