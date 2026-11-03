@@ -4,12 +4,12 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash|Write|Edit|MultiEdit|Agent",
+        "matcher": "*",
         "hooks": [
           {
             "type": "command",
             "command": "node \"$CLAUDE_PROJECT_DIR/bin/dispatch-gate.mjs\" pre",
-            "timeout": 40
+            "timeout": 10
           }
         ]
       }

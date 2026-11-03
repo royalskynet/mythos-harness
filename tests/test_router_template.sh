@@ -18,7 +18,7 @@ mkdir -p "$TMP/bot/state"
 call '{"tool_name":"Write","tool_input":{"file_path":"/opt/elsewhere/foo.js"},"transcript_path":"'"$TMP/t.jsonl"'"}' \
   | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null || fail "應擋 Router 親手寫檔"
 [ -z "$(call '{"tool_name":"Agent","tool_input":{"subagent_type":"dispatcher","prompt":"x"},"transcript_path":"'"$TMP/t.jsonl"'"}')" ] || fail "背景 Agent 應放行"
-jq -e '.hooks.PreToolUse[0].matcher | test("Agent")' "$S" >/dev/null || fail "matcher 要含 Agent"
+jq -e '.hooks.PreToolUse[0].matcher == "*"' "$S" >/dev/null || fail "派工閘 matcher 要是 *（整份白名單）"
 D="$ROOT/router/agents/dispatcher.md"
 [ "$(sed -n 2p "$D")" = "name: dispatcher" ] || fail "dispatcher agent 定義缺 name"
 grep -q 'agents/dispatcher.md' "$ROOT/router/start.sh" || fail "start.sh 沒裝 dispatcher agent"

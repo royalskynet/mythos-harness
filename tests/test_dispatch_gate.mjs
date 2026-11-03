@@ -40,50 +40,41 @@ function decision(out) {
 
 const PIN = '/Users/x/.claude/delegate-guard/p-123.sh'
 
-test('主 session：背景 Agent 放行、前景 Agent 擋', () => {
+test('主 session：背景 dispatcher 放行；前景、非 dispatcher、未指定類型都擋', () => {
   assert.equal(decision(pre('Agent', { subagent_type: 'dispatcher', prompt: 'x' })), null)
   assert.equal(decision(pre('Agent', { subagent_type: 'dispatcher', prompt: 'x', run_in_background: true })), null)
   assert.equal(decision(pre('Agent', { subagent_type: 'dispatcher', prompt: 'x', run_in_background: false })), 'deny')
+  assert.equal(decision(pre('Agent', { subagent_type: 'general-purpose', prompt: 'x' })), 'deny')
+  assert.equal(decision(pre('Agent', { prompt: 'x' })), 'deny')
 })
 
-test('主 session：Write 只准 /tmp、state、工單路徑', () => {
-  assert.equal(decision(pre('Write', { file_path: '/Users/51mini/dev/x.js' })), 'deny')
-  assert.equal(decision(pre('Edit', { file_path: path.join(MYTHOS, 'bin/dispatch') })), 'deny')
-  assert.equal(decision(pre('Write', { file_path: '/tmp/dc-worker/a-task.md' })), null)
-  assert.equal(decision(pre('Write', { file_path: path.join(MYTHOS, 'state/workorders/x.md') })), null)
-})
-
-for (const command of [
-  'bin/dispatch /tmp/a-task.md /tmp mid',
-  `${MYTHOS}/bin/dispatch-retry deep-1-x "補充"`,
-  'bin/dispatch-cancel deep-1-x',
-  'remind add "+30m" "看 x"',
-  'date && echo hi',
-  'FOO=1 bin/dispatch /tmp/a-task.md /tmp hard',
-]) {
-  test(`主 session Bash 放行：${command.slice(0, 40)}`, () => {
-    assert.equal(decision(pre('Bash', { command })), null)
+for (const tool of ['mcp__telegram__reply', 'mcp__telegram__react', 'mcp__telegram__download_attachment', 'ToolSearch', 'TaskStop']) {
+  test(`主 session 放行：${tool}`, () => {
+    assert.equal(decision(pre(tool, {})), null)
   })
 }
 
-for (const command of [
-  // 11-03 使用者 Telegram 實例：主 session 自己跑測試，佔住對話，「哈囉」沒人回
-  'bash tests/test_dispatch_deep.sh',
-  'ls -la',
-  'rg -n x /tmp',
-  'wo-verify /tmp/a.md | tail -5',
-  'git status',
-  'cd /tmp && bin/dispatch /tmp/a-task.md /tmp mid',
-  '/tmp/evil/dispatch x',
-  'bin/../../tmp/dispatch x',
-  'echo "$(rm -rf /tmp/z)"',
-  'echo `touch /tmp/v`',
-  'echo hi > /Users/51mini/dev/a',
-  'echo ok & touch /tmp/v',
-  "e'ch'o x; rm -rf /tmp/z",
+// 11-03 Codex 審計：舊閘只管 5 種工具，Read／Grep／WebFetch／TaskOutput 等照放，主 session 仍能自己忙
+for (const [tool, input] of [
+  ['Bash', { command: 'bin/dispatch /tmp/a-task.md /tmp mid' }],
+  ['Bash', { command: 'echo hi < /tmp/fifo' }],
+  ['Bash', { command: 'DCQ_BIN=/tmp/worker bin/dispatch /tmp/a-task.md /tmp mid' }],
+  ['Bash', { command: 'remind add "+30m" "看 x"' }],
+  ['Write', { file_path: '/tmp/dc-worker/a-task.md' }],
+  ['Write', { file_path: '/etc/wo/x' }],
+  ['Edit', { file_path: path.join(MYTHOS, 'state/x.md') }],
+  ['Read', { file_path: '/tmp/x' }],
+  ['Grep', { pattern: 'x' }],
+  ['Glob', { pattern: '*' }],
+  ['WebFetch', { url: 'https://example.com' }],
+  ['WebSearch', { query: 'x' }],
+  ['TaskOutput', { task_id: 'x' }],
+  ['Skill', { skill: 'x' }],
+  ['mcp__jev_gate__jev_evaluate', {}],
+  ['', {}],
 ]) {
-  test(`主 session Bash 擋：${command.slice(0, 40)}`, () => {
-    assert.equal(decision(pre('Bash', { command })), 'deny')
+  test(`主 session 擋：${tool || '(空)'} ${JSON.stringify(input).slice(0, 40)}`, () => {
+    assert.equal(decision(pre(tool, input)), 'deny')
   })
 }
 
@@ -91,6 +82,17 @@ test('11-03：使用者訊息含 #手動 不解鎖主 session 動手', () => {
   const tp = transcript('#手動 幫我改 launchd')
   assert.equal(decision(pre('Write', { file_path: '/Users/51mini/dev/x.js' }, tp)), 'deny')
   assert.equal(decision(pre('Bash', { command: 'launchctl list' }, tp)), 'deny')
+})
+
+test('fail-closed：payload 不是 JSON 時擋', () => {
+  const out = execFileSync(process.execPath, [GATE, 'pre'], { input: 'not json', env: { ...process.env, MYTHOS_DIR: MYTHOS } }).toString()
+  assert.equal(decision(out), 'deny')
+})
+
+test('子代理不能直接回使用者 Telegram', () => {
+  const extra = { agent_id: 'a1', agent_type: 'dispatcher' }
+  assert.equal(decision(pre('mcp__telegram__reply', { text: 'x' }, undefined, extra)), 'deny')
+  assert.equal(decision(pre('mcp__telegram__download_attachment', {}, undefined, extra)), null)
 })
 
 test('子代理（agent_id）：任意 Write／Bash 放行', () => {
@@ -110,7 +112,7 @@ test('pinGuard：主 session 與子代理都擋，#手動 才解，唯讀放行'
 
 test('transcript 不存在時：Agent 照放、主 session 動手照擋', () => {
   const tp = path.join(TMP, 'missing.jsonl')
-  assert.equal(decision(pre('Agent', { prompt: 'x' }, tp)), null)
+  assert.equal(decision(pre('Agent', { subagent_type: 'dispatcher', prompt: 'x' }, tp)), null)
   assert.equal(decision(pre('Bash', { command: 'ls' }, tp)), 'deny')
 })
 
