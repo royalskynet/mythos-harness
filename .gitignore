@@ -33,5 +33,6 @@
 !/tests/test_launchd_install.sh
 !/tests/test_p1_harness.sh
 !/tests/test-dispatch-gate-handson.sh
+!/tests/mk-path.sh
 *.bak*
 __pycache__/

@@ -17,4 +17,11 @@ for f in "$TMP"/*.plist; do
   [ "$(plutil -extract EnvironmentVariables.HOME raw "$f")" = "$HOME" ] || fail "$(basename "$f") HOME 沒換成本機"
 done
 [ "$n" -ge 2 ] || fail "應產出至少 2 份 plist，只有 $n"
+# ONLY：只處理那一份（11-04 Codex 二審：installer 不能重載全部）
+O="$TMP/only"; mkdir -p "$O"
+out="$(NO_LOAD=1 ONLY=ai.mythos.watchdog LAUNCH_AGENTS_DIR="$O" bash "$ROOT/launchd/install.sh")"
+[ "$(ls "$O" | wc -l | tr -d ' ')" = 1 ] || fail "ONLY 還是產了多份：$(ls "$O")"
+[ -f "$O/ai.mythos.watchdog.plist" ] || fail "ONLY 沒產 watchdog"
+printf '%s\n' "$out" | grep -q 'ai.mythos.watchdog.plist' || fail "ONLY 沒印產出檔"
+
 echo "LAUNCHD-INSTALL PASS"

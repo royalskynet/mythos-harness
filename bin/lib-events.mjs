@@ -15,17 +15,33 @@ if (cmd === 'scan') {
   if (!file || !transcript || !fs.existsSync(file) || !fs.existsSync(transcript)) process.exit(0)
   const now = Math.floor(Date.now() / 1000)
   const lines = fs.readFileSync(transcript, 'utf8').split('\n')
+  // 可信的收件紀錄：type:"user" 且內容是字串或純 text 區塊；tool_result／mixed 區塊不算，
+  // transcript 裡貼了事件文字的別的東西不能冒充 ACK
+  const texts = []
+  for (const l of lines) {
+    const i = l.indexOf('"type":"user"')  // 先做便宜的前置過濾，再 parse
+    if (i < 0) continue
+    let e; try { e = JSON.parse(l) } catch { continue }
+    if (!e || e.type !== 'user') continue
+    const c = e.message?.content ?? e.content
+    if (typeof c === 'string') { texts.push(c); continue }
+    if (!Array.isArray(c)) continue
+    if (c.some(x => x && x.type === 'tool_result')) continue
+    const t = c.filter(x => x && x.type === 'text').map(x => x.text || '').join('')
+    if (t) texts.push(t)
+  }
+  // event_id=<id> 後面必須是空白、；、全形空白或字串結尾：job-PASS 不配 job-PASS-x
+  const isAcked = id => texts.some(t => {
+    const needle = 'event_id=' + id
+    for (let at = t.indexOf(needle); at >= 0; at = t.indexOf(needle, at + 1)) {
+      const next = t[at + needle.length]
+      if (next === undefined || /[\s；]/.test(next)) return true
+    }
+    return false
+  })
   for (const row of read()) {
     if (row.acked_at) continue
-    const needle = 'event_id=' + row.event_id
-    const acked = lines.some(l => {
-      if (!l.includes(needle)) return false
-      try {
-        const e = JSON.parse(l)
-        return e && e.type === 'user' && JSON.stringify(e.message?.content ?? e.content ?? '').includes(needle)
-      } catch { return false }
-    })
-    if (acked) console.log(`${row.event_id}\t${now}`)
+    if (isAcked(row.event_id)) console.log(`${row.event_id}\t${now}`)
   }
 } else if (cmd === 'upsert') {
   const row = JSON.parse(args[0])

@@ -37,6 +37,6 @@ PATH="$TMP/path:$PATH" bash "$ROOT/router/start.sh" >/dev/null
 log="$(cat "$TMP/tmux.log")"
 case "$log" in *"-L mythos new-session"*) ;; *) fail "start.sh 沒用 tmux -L mythos：$log" ;; esac
 for a in "--settings" "router/settings.json" "--append-system-prompt-file" "router/ROUTER.md" "--channels" "plugin:telegram@claude-plugins-official"; do
-  case "$log" in *"$a"*) ;; *) fail "start.sh 少了 $a：$log" ;; esac
+  case "$log" in *"$a"*) ;; *) fail "start.sh 少了 ${a}：$log" ;; esac
 done
 echo "ROUTER-TEMPLATE PASS"

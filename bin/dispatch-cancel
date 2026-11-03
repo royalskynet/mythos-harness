@@ -6,6 +6,9 @@ TMUX_BIN="${TMUX_BIN:-tmux}"
 DCQ="${DCQ_BIN:-$(command -v dcq || echo "$HOME/.local/bin/dcq")}"
 DEEP_TASK_DIR="${DEEP_TASK_DIR:-$HOME/.deepclaude/work/.deep}"
 TSV="$MYTHOS_DIR/state/dispatch-jobs.tsv"
+EVENTS_FILE="$MYTHOS_DIR/state/events.jsonl"
+LIB_EVENTS="$(cd "$(dirname "$0")" && pwd)/lib-events.mjs"
+NODE_BIN="${NODE_BIN:-node}"
 . "$(cd "$(dirname "$0")" && pwd)/lib-ledger.sh"
 
 id="${1:-}"
@@ -21,17 +24,38 @@ case "$backend" in
   *) case "$id" in deep-*) backend=deep ;; *) backend=dcq ;; esac ;;
 esac
 
+# 取消後撤銷該票未 ACK 的事件（標 cancelled:true，dispatch-watch 的 pending_events 會排除）
+mark_events() {
+  [ -f "$EVENTS_FILE" ] || return 0
+  local ids
+  ids="$(jq -r --arg j "$id" 'select(.job_id==$j and .acked_at == null) | .event_id' "$EVENTS_FILE" 2>/dev/null)" || return 1
+  [ -n "$ids" ] || return 0
+  while IFS= read -r eid; do
+    [ -n "$eid" ] && "$NODE_BIN" "$LIB_EVENTS" set "$EVENTS_FILE" "$eid" '{"cancelled":true}' >/dev/null
+  done <<< "$ids"
+}
+
 mark_cancelled() {
   [ -f "$TSV" ] || return 0
   ledger_lock || { echo "拿不到 ledger 鎖" >&2; return 1; }
-  tmp="$(mktemp "${TMPDIR:-/tmp}/dispatch-cancel.XXXXXX")"
-  awk -F'\t' -v id="$id" 'BEGIN{OFS="\t"} {NF=8} $1==id {$5="cancelled"} {print}' "$TSV" | ledger_fields > "$tmp" && mv "$tmp" "$TSV"
+  local rc=0
+  tmp="$(mktemp "${TMPDIR:-/tmp}/dispatch-cancel.XXXXXX")" || { ledger_unlock; return 1; }
+  # 舊列不改寫：只有這張票被改成 cancelled，其餘原樣
+  awk -F'\t' -v id="$id" 'BEGIN{OFS="\t"} $1==id {$5="cancelled"; if (NF<8) NF=8} {print}' "$TSV" > "$tmp" \
+    && mv "$tmp" "$TSV" && mark_events || rc=1
+  [ "$rc" = 0 ] || rm -f "$tmp"
   ledger_unlock
+  return "$rc"
+}
+
+fail_ledger() {
+  echo "後端已取消：${id}；ledger 未更新（$1）：請稍後重跑 bin/dispatch-cancel $id 或手動確認" >&2
+  exit 1
 }
 
 if [ "$backend" = dcq ]; then
   "$DCQ" cancel "$id" || { echo "dcq cancel 失敗：$id" >&2; exit 1; }
-  mark_cancelled
+  mark_cancelled || fail_ledger "拿不到鎖或寫檔失敗"
   exit 0
 fi
 
@@ -80,7 +104,7 @@ else
   echo "警告：找不到內容相符的 task 檔，只殺程序、不動 tmux（用 $TMUX_BIN -L deep ls 確認後再處理）" >&2
 fi
 
-printf '%s\n' 130 > "$MYTHOS_DIR/state/deep/$id.rc"
-mark_cancelled
+printf '%s\n' 130 > "$MYTHOS_DIR/state/deep/$id.rc" || fail_ledger "寫 rc 失敗"
+mark_cancelled || fail_ledger "拿不到鎖或寫檔失敗"
 
 exit 0

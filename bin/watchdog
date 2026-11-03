@@ -10,13 +10,20 @@ LOG="$MYTHOS_DIR/logs/watchdog.log"
 EVENTS_FILE="$MYTHOS_DIR/state/events.jsonl"
 TSV="$MYTHOS_DIR/state/dispatch-jobs.tsv"
 STATE="$MYTHOS_DIR/state/watchdog.json"
-ROUTER_DIR="${MYTHOS_TRANSCRIPT_DIR:-${HOME}/.claude/projects/-Users-mac-mini-bots-mythos}"
+# transcript 目錄＝工作目錄路徑把非英數字換成 -（跟 dispatch-gate 同一條算式，去個人化）
+ROUTER_SLUG="$(printf '%s' "$MYTHOS_DIR" | sed 's/[^A-Za-z0-9]/-/g')"
+ROUTER_DIR="${MYTHOS_TRANSCRIPT_DIR:-${HOME}/.claude/projects/${ROUTER_SLUG}}"
 LOCK="$MYTHOS_DIR/state/.dispatch-watch.lock"
 NODE="${NODE_BIN:-node}"
 now="$(date +%s)"
 
 mkdir -p "$MYTHOS_DIR/logs" "$MYTHOS_DIR/state"
 log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG"; }
+
+# 去重狀態檔：不存在或不合法就重建（首次啟動不能每輪重複告警）
+if ! jq -e '.alerted | type == "object"' "$STATE" >/dev/null 2>&1; then
+  printf '%s\n' '{"alerted":{}}' > "$STATE" || { log "ERROR 無法建立 $STATE"; exit 1; }
+fi
 
 # 台灣時間 08:00 前發生的算當天，之後的算隔天（給 Coco 08:00 晨報讀）
 alert_date() {
@@ -31,7 +38,12 @@ alert() { # 同一條只記一次（記在 watchdog.json 的 alerted）
   [ "$seen" = true ] && return 0
   mkdir -p "$BRIEF_DIR"
   printf '%s\tMythos watchdog：⚠ %s\n' "$(alert_date)" "$text" >> "$BRIEF"
-  jq --arg k "$key" --argjson t "$now" '(.alerted[$k]) = $t' "$STATE" > "$STATE.tmp" 2>/dev/null && mv "$STATE.tmp" "$STATE"
+  if ! jq --arg k "$key" --argjson t "$now" '(.alerted[$k]) = $t' "$STATE" > "$STATE.tmp" 2>/dev/null; then
+    rm -f "$STATE.tmp"
+    log "ERROR 狀態檔更新失敗（${key}），告警已寫但下輪會重複"
+    exit 1
+  fi
+  mv "$STATE.tmp" "$STATE"
   log "ALERT $key $text"
 }
 
@@ -51,7 +63,7 @@ fi
 if [ -f "$EVENTS_FILE" ]; then
   while IFS=$'\t' read -r eid jid; do
     [ -n "$eid" ] || continue
-    alert "event-$eid" "派工回報 $eid（$jid）送了 5 次都沒有人處理，請看狀態或重新派工"
+    alert "event-$eid" "派工回報 $eid job=$jid 送了 5 次都沒有人處理，請看狀態或重新派工"
   done < <(jq -r 'select(.acked_at == null and .tries >= 5) | [.event_id, .job_id] | @tsv' "$EVENTS_FILE" 2>/dev/null)
 fi
 
@@ -62,15 +74,29 @@ if [ -n "$newest" ]; then
 const fs = require('fs')
 const lines = fs.readFileSync(process.argv[2], 'utf8').split('\n').filter(Boolean)
 let last = -1, replied = false
+const pending = new Set()  // 產生過、還沒看到結果的 reply tool_use id
 for (const l of lines) {
   let e; try { e = JSON.parse(l) } catch { continue }
-  if (e && e.type === 'user' && e.origin && e.origin.kind === 'channel') {
+  if (!e) continue
+  const c = e.message && e.message.content
+  // 只有成功的 reply 才算回過：tool_result 帶 is_error:true（或結果回來前）不算
+  if (e.type === 'user' && Array.isArray(c)) {
+    for (const x of c) {
+      if (x && x.type === 'tool_result' && pending.has(x.tool_use_id)) {
+        pending.delete(x.tool_use_id)
+        if (x.is_error !== true) replied = true
+      }
+    }
+  }
+  if (e.type === 'user' && e.origin && e.origin.kind === 'channel') {
     last = e.timestamp ? Date.parse(e.timestamp) : Date.now()
     replied = false
+    pending.clear()
     continue
   }
-  const c = e && e.message && e.message.content
-  if (e && e.type === 'assistant' && Array.isArray(c) && c.some(x => x && x.type === 'tool_use' && x.name === 'mcp__telegram__reply')) replied = true
+  if (e.type === 'assistant' && Array.isArray(c)) {
+    for (const x of c) if (x && x.type === 'tool_use' && x.name === 'mcp__telegram__reply') pending.add(x.id)
+  }
 }
 if (last < 0 || replied) process.exit(0)
 console.log(last)

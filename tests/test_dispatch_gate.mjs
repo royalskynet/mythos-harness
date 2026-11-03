@@ -48,7 +48,7 @@ test('主 session：背景 dispatcher 放行；前景、非 dispatcher、未指�
   assert.equal(decision(pre('Agent', { prompt: 'x' })), 'deny')
 })
 
-for (const tool of ['mcp__telegram__reply', 'mcp__telegram__react', 'mcp__telegram__download_attachment', 'ToolSearch', 'TaskStop']) {
+for (const tool of ['mcp__telegram__reply', 'mcp__telegram__react', 'mcp__telegram__edit_message', 'ToolSearch', 'TaskStop']) {
   test(`主 session 放行：${tool}`, () => {
     assert.equal(decision(pre(tool, {})), null)
   })
@@ -71,6 +71,9 @@ for (const [tool, input] of [
   ['TaskOutput', { task_id: 'x' }],
   ['Skill', { skill: 'x' }],
   ['mcp__jev_gate__jev_evaluate', {}],
+  // 11-04 Codex 二審：Telegram 只放精確三個，附件下載交子代理、未知 mcp__telegram__* 一律擋
+  ['mcp__telegram__download_attachment', { file_id: 'x' }],
+  ['mcp__telegram__foo', {}],
   ['', {}],
 ]) {
   test(`主 session 擋：${tool || '(空)'} ${JSON.stringify(input).slice(0, 40)}`, () => {
@@ -80,7 +83,7 @@ for (const [tool, input] of [
 
 test('11-03：使用者訊息含 #手動 不解鎖主 session 動手', () => {
   const tp = transcript('#手動 幫我改 launchd')
-  assert.equal(decision(pre('Write', { file_path: '~/dev/x.js' }, tp)), 'deny')
+  assert.equal(decision(pre('Write', { file_path: path.join(os.homedir(), 'dev/x.js') }, tp)), 'deny')
   assert.equal(decision(pre('Bash', { command: 'launchctl list' }, tp)), 'deny')
 })
 
@@ -97,7 +100,7 @@ test('子代理不能直接回使用者 Telegram', () => {
 
 test('子代理（agent_id）：任意 Write／Bash 放行', () => {
   const extra = { agent_id: 'a1', agent_type: 'dispatcher' }
-  assert.equal(decision(pre('Write', { file_path: '~/dev/x.js' }, undefined, extra)), null)
+  assert.equal(decision(pre('Write', { file_path: path.join(os.homedir(), 'dev/x.js') }, undefined, extra)), null)
   assert.equal(decision(pre('Bash', { command: 'bash tests/test_dispatch_deep.sh' }, undefined, extra)), null)
   assert.equal(decision(pre('Agent', { prompt: 'x', run_in_background: false }, undefined, extra)), null)
 })
