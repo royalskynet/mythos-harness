@@ -59,8 +59,8 @@ expect "e 子代理改派工憑證 → deny（pinGuard 不分主子）" deny \
 expect "f 主 session 前景 Agent（run_in_background:false）→ deny" deny \
   "$(decide "$CH_PLAIN" Agent '{"prompt":"x","run_in_background":false}')"
 expect "f2 主 session 背景 Agent（預設）→ allow" allow \
-  "$(decide "$CH_PLAIN" Agent '{"prompt":"x"}')"
-expect "f3 主 session 派工指令 → allow" allow \
+  "$(decide "$CH_PLAIN" Agent '{"subagent_type":"dispatcher","prompt":"x"}')"
+expect "f3 主 session 派工指令也交 dispatcher → deny" deny \
   "$(decide "$CH_PLAIN" Bash '{"command":"bin/dispatch /tmp/a-task.md /tmp mid"}')"
 
 # ---- dispatch-cancel：兩張並行票，取消 A（task 派後被改、比對不到）不得殺 B 的 tmux

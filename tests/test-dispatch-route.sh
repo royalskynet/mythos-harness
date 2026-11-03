@@ -29,6 +29,7 @@ run() { : > "$TMP/dcq.log"; : > "$TMP/deep.log"
 
 run easy;        grep -q 'order=free tier=easy' "$TMP/dcq.log" || fail "easy 應走 dcq free：$(cat "$TMP/dcq.log")"
 run mid;         grep -q 'order=free tier=mid' "$TMP/dcq.log" || fail "mid 應走 dcq free：$(cat "$TMP/dcq.log")"
+[ "$(tail -1 "$TMP/m/state/dispatch-jobs.tsv" | cut -f6)" = "$TMP" ] || fail "O 列要記 cwd（第 6 欄），dispatch-retry 才重派得了"
 [ -s "$TMP/deep.log" ] && fail "mid 不該叫 deep"
 run hard;        [ -s "$TMP/deep.log" ] || fail "hard 應走 deep"
 [ -s "$TMP/dcq.log" ] && fail "hard 不該進 dcq"
