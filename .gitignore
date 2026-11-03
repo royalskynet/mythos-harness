@@ -25,6 +25,7 @@
 /tests/*
 !/tests/test_dispatch_gate.mjs
 !/tests/test-review-judge.sh
+!/tests/test-watchdog.sh
 !/tests/test-dispatch-route.sh
 !/tests/test_idle_reset.sh
 !/tests/test_dispatch_deep.sh

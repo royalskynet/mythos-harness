@@ -19,7 +19,8 @@ chat with Sonnet; every request goes to a background dispatcher subagent that tr
         dispatch-watch（每 2 分、零 token）── 先落 events.jsonl；ACK＝Router 已收到事件，不代表處理完 ──▶ 打回 Router
                        │                 未 ACK 10 分鐘重送、上限 5 次；取消的票不再投遞
                        └─ 終態先投遞，抽查後跑 review-judge（免費模型，timeout 硬砍 90 秒）：ON_TRACK 不打擾 Router
-        watchdog（每 5 分、零 token）── 死鎖、重送用盡、Router 未回、pending 逾 6 小時 → brief-lines
+        watchdog（每 5 分）── L0 零 token：死鎖、重送用盡、Router 未回、pending 逾 6 小時、deep 停滯、背景 agent 卡權限 → brief-lines
+                      └─ log 錯誤行進待判 → L1 免費模型（每小時上限；白名單→canary→scrub）→ 退路鏈 → 規則表 → 判不了才告警
 ```
 
 ## 對照文章 / Mapping
@@ -56,7 +57,7 @@ tmux -L mythos attach -t mythos
 | `router/settings.json`、`ROUTER.md`、`start.sh` | Router 層：模型分層、派工閘 hook、Router 規則、tmux 啟動 |
 | `bin/dispatch-gate.mjs` | 主 session 全工具白名單（Telegram 只放 reply／react／edit_message）；子代理不能直接回 Telegram；pinGuard、fail-closed |
 | `bin/lib-ledger.sh`、`lib-events.mjs` | 共同 ledger 鎖（flock，行程死了自動釋放；ledger 與 events 同一把）、8 欄 schema、事件佇列（原子替換寫入）與精確 ACK 比對 |
-| `bin/watchdog` | 死鎖、重送用盡、Router 未回（只認成功的 reply 結果）、pending 逾 6 小時 |
+| `bin/watchdog` | L0：死鎖、重送用盡、Router 未回（只認成功的 reply 結果）、pending 逾 6 小時、deep transcript 停滯、`claude agents` 背景 worker blocked；L1：log 錯誤行交免費模型判 KNOWN／NEW／NOISE（出機前欄位白名單＋sensitive-canary＋scrub 每日自檢，退路鏈 beam-free→OC Go 次選→local-llm→`state/watchdog-known.tsv`）；L2：只提議白名單旋鈕，兩棒不同體系同值才套用；`bin/watchdog ask "<問題>"` |
 | `bin/dispatch`、`dispatch-retry`、`dispatch-cancel`、`dispatch-deep-run` | 派工（先持鎖登錄再啟動後端）、重派、取消（deep 只照 `state/deep/<id>.handle`）、deep 背景執行 |
 | `bin/dispatch-watch` | 回報＋停滯／抽查，pane 閒置才打進去 |
 | `bin/review-judge`、`oc-free-ask`、`local-llm` | 免費模型判 Worker 有沒有跑歪；判不出來或格式不對一律 UNKNOWN＝照舊喚醒 Router |
@@ -72,6 +73,7 @@ node --test tests/test_dispatch_gate.mjs   # 36 項，含 Codex 審計的 10 個
 bash tests/test-review-judge.sh && bash tests/test-dispatch-route.sh && bash tests/test_idle_reset.sh
 bash tests/test_dispatch_deep.sh && bash tests/test_dispatch_watch.sh
 bash tests/test_launchd_install.sh     # 範本無寫死路徑、換完是合法 plist、ONLY= 只產一份
+bash tests/test-watchdog.sh            # watchdog v2：L0 不叫模型、上限、白名單／canary（含突變）、scrub 自檢、退路、L2
 ```
 
 ## 限制 / Limits

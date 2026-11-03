@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
-# Watchdog（C，零 token）：每 5 分鐘掃「活著但卡住」的四種情況，能修的先修，修不了的寫一行告警。
+# Watchdog（C，零 token）：每 5 分鐘掃「活著但卡住」的情況，能修的先修，修不了的寫一行告警。
 # 告警出口照使用者規定：只寫 brief-lines 的 mythos-watchdog.tsv，由 Coco 08:00 晨報讀；不推 Telegram。
+# v2（11-04，計畫 state/workorders/watchdog-v2-plan.md）：
+#   L0 腳本（零 token）：原四項＋deep 停滯／背景 agent 卡權限提示＋log 錯誤行收進「待判」佇列
+#   L1 模型：只在待判非空時叫、每小時上限；出機前白名單→canary→scrub；退路鏈全敗才告警「判不了」
+#   L2：模型只能提議白名單旋鈕，兩棒不同體系同值且在上下限內才套用，否則寫 proposals
+# 用法：bin/watchdog            一輪巡檢（launchd 每 5 分鐘）
+#       bin/watchdog ask "<問題>"  讀近 200 行 log＋狀態快照，走同一條白名單＋退路鏈回答，印 stdout
 set -u
 
 MYTHOS_DIR="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -46,6 +52,267 @@ alert() { # 同一條只記一次（記在 watchdog.json 的 alerted）
   mv "$STATE.tmp" "$STATE"
   log "ALERT $key $text"
 }
+
+# ======================= v2 設定與共用函式 =======================
+HERE="$(cd "$(dirname "$0")" && pwd)"
+TMUX_BIN="${TMUX_BIN:-tmux}"
+CLAUDE_BIN="${WATCHDOG_CLAUDE_BIN:-claude}"
+# deepclaude 用自己的 CLAUDE_CONFIG_DIR（跟 dispatch-watch 同一個預設）
+CLAUDE_PROJECTS_DIR="${CLAUDE_PROJECTS_DIR:-$HOME/.deepclaude/config/projects}"
+KNOBS="$MYTHOS_DIR/state/watchdog-knobs.env"
+KNOWN="$MYTHOS_DIR/state/watchdog-known.tsv"
+QUEUE="$MYTHOS_DIR/state/watchdog-pending.jsonl"
+OFFSETS="$MYTHOS_DIR/state/watchdog-offsets.tsv"
+SEEN="$MYTHOS_DIR/state/watchdog-seen.tsv"
+PROPOSALS="$MYTHOS_DIR/state/watchdog-proposals"
+L1_MAX="${WATCHDOG_L1_MAX_PER_HOUR:-6}"
+L1_BATCH="${WATCHDOG_L1_BATCH:-10}"
+QUEUE_MAX="${WATCHDOG_QUEUE_MAX:-200}"
+# 每棒硬砍秒數（沿用 review-judge 的 run_to 寫法）
+LLM_TIMEOUT_S="${WATCHDOG_LLM_TIMEOUT_S:-40}"
+# 退路鏈：beam-free → OC Go 次選免費模型 → local-llm（:4000 閘道，含 Presidio）；以 ; 分隔，每棒可帶參數
+LLM_ALT="${WATCHDOG_LLM_ALT:-opencode-go/iceman-contributor-free}"
+LEGS="${WATCHDOG_LLM_LEGS:-$HERE/oc-free-ask;$HERE/oc-free-ask $LLM_ALT;$HERE/local-llm}"
+# L2 兩棒刻意不同體系（opencode CLI vs :4000 閘道）
+L2_LEGS="${WATCHDOG_L2_LEGS:-$HERE/oc-free-ask;$HERE/local-llm}"
+SCRUB_URL="${OC_FREE_ASK_SCRUB:-http://127.0.0.1:4102/scrub}"
+SCRUB_CMD="${WATCHDOG_SCRUB_CMD:-}"     # 測試用：讀 {"texts":[…]} 印同格式；空＝curl SCRUB_URL
+# sensitive-canary：預設由 $HOME 組出 plugin 目錄、取最新版的 user-prompt-submit-hook.ts（跟
+# canary-allowlist.mjs 轉呼叫的 pre-tool-use-hook.ts 同一份 lib/rules.ts 規則）；WATCHDOG_CANARY_CMD 可換整支
+CANARY_CMD="${WATCHDOG_CANARY_CMD:-}"
+CANARY_DIR="${WATCHDOG_CANARY_DIR:-$HOME/.claude/plugins/cache/coo-quack/sensitive-canary}"
+today="$(TZ=Asia/Taipei date '+%F')"
+mkdir -p "$PROPOSALS"
+
+mtime_of() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
+
+# 每棒硬砍（同 review-judge）：macOS 沒 timeout 就用內建 perl，逾時整個 process group 砍
+run_to() {
+  local t="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$t" "$@"; return; fi
+  perl -e '$t = shift; $p = fork; die "fork" unless defined $p;
+    if (!$p) { setpgrp(0, 0); exec @ARGV or exit 127 }
+    $SIG{ALRM} = sub { kill "TERM", -$p; sleep 1; kill "KILL", -$p; exit 124 };
+    alarm $t; waitpid($p, 0); exit($? & 127 ? 128 + ($? & 127) : $? >> 8)' "$t" "$@"
+}
+
+st_update() { # jq 參數…（最後一個是 filter）；失敗不中斷巡檢，只記 log
+  if jq "$@" "$STATE" > "$STATE.tmp" 2>/dev/null; then mv "$STATE.tmp" "$STATE"
+  else rm -f "$STATE.tmp"; log "ERROR 狀態檔更新失敗（v2）"; return 1; fi
+}
+
+# ---- 旋鈕（L2 白名單）：只認 NAME=整數，且在上下限內；其他一律用預設 ----
+knob_bounds() {
+  case "$1" in
+    DEEP_STALL_MIN) echo "5 120" ;;
+    BG_STALL_MIN)   echo "5 120" ;;
+    REVIEW_EVERY)   echo "10 240" ;;
+    *) return 1 ;;
+  esac
+}
+knob_in_bounds() { # name value
+  local lo hi
+  read -r lo hi <<EOF
+$(knob_bounds "$1")
+EOF
+  [ -n "${lo:-}" ] && printf '%s' "$2" | grep -qE '^[0-9]+$' && [ "$2" -ge "$lo" ] && [ "$2" -le "$hi" ]
+}
+knob_get() { # name default
+  local v
+  v="$(grep -E "^$1=[0-9]+$" "$KNOBS" 2>/dev/null | tail -1 | cut -d= -f2)"
+  if [ -n "$v" ] && knob_in_bounds "$1" "$v"; then echo "$v"; else echo "$2"; fi
+}
+knob_set() { # name value（原子改寫，保留其他行）
+  local tmp="$KNOBS.tmp.$$"
+  { grep -vE "^$1=" "$KNOBS" 2>/dev/null; printf '%s=%s\n' "$1" "$2"; } > "$tmp" && mv "$tmp" "$KNOBS"
+}
+
+# ---- 出機白名單 ----
+# 合規助理專案、合規、~/.claude/**、憑證相關路徑的行：整行丟，不出機（大小寫不分）
+SENSITIVE_RE='carrie|compliance|合規|\.claude/|\.creds|\.ssh/|\.aws/|\.gnupg|\.netrc|keychain|auth\.json|credential|(^|[/[:space:]])\.env([.[:space:]]|$)'
+wl_line() { # 一行文字 → 遮 ${HOME}、壓掉 canary allow tag；敏感整行丟（回 1）
+  local s="$1" t='~'
+  if [ -n "${HOME:-}" ] && [ "$HOME" != / ]; then s="${s//"$HOME"/$t}"; fi
+  printf '%s' "$s" | grep -qiE "$SENSITIVE_RE" && return 1
+  # log 裡若出現 [allow-…] 會讓 canary 自己放行，先改寫掉，送出去的跟掃的是同一份
+  s="${s//\[allow-/[allow_}"
+  printf '%s' "$s" | tr '\t\r' '  ' | cut -c1-400
+}
+# 工單 ## 目標 段（前 3000 字），每行也過白名單
+task_goal() {
+  local task="$1" l
+  [ -r "$task" ] || return 0
+  wl_line "$task" >/dev/null || return 0
+  awk '/^##[[:space:]]*目標/{f=1;next} f&&/^##[[:space:]]/{exit} f' "$task" 2>/dev/null | head -c 3000 |
+    while IFS= read -r l; do wl_line "$l" && echo; done
+}
+# 待判一項 → 只由白名單欄位組成的文字：log 行＋（對得到 ledger 才有）job_id/backend/status/age_s/目標段
+build_item() { # src line
+  local l row jid tier task ep st cwd th be goal
+  l="$(wl_line "[$1] $2")" || return 1
+  printf 'log 行：%s\n' "$l"
+  [ -f "$TSV" ] || return 0
+  row="$(awk -F'\t' -v L="$2" 'length($1)>=4 && index(L,$1){print; exit}' "$TSV" 2>/dev/null)"
+  [ -n "$row" ] || return 0
+  IFS=$'\t' read -r jid tier task ep st cwd th be <<EOF
+$row
+EOF
+  case "$ep" in ''|*[!0-9]*) ep="$now" ;; esac
+  printf 'job_id=%s backend=%s status=%s age_s=%s\n' "$jid" "${be:-?}" "${st:-?}" "$((now - ep))"
+  goal="$(task_goal "$task")"
+  [ -n "$goal" ] && printf '工單目標：\n%s\n' "$goal"
+  return 0
+}
+
+# ---- sensitive-canary 掃描（0＝乾淨；非 0＝命中或掃不了，一律當命中＝不送）----
+builtin_scan() { # 找不到 canary 入口時的最小 regex：私鑰頭、sk-/ghp_/AKIA 前綴、長 KEY=VALUE
+  local pk='PRIV''ATE KEY'
+  printf '%s' "$1" | grep -qE -- "-----BEGIN [A-Z ]*${pk}|sk-[A-Za-z0-9_-]{16,}|gh[p]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|[A-Z_]{3,}=[^[:space:]]{12,}" && return 1
+  return 0
+}
+canary_scan() {
+  local text="$1" v script
+  if [ -n "$CANARY_CMD" ]; then
+    printf '%s' "$text" | jq -Rs '{prompt:.}' | run_to 20 "$CANARY_CMD" >/dev/null 2>&1
+    return
+  fi
+  v="$(ls "$CANARY_DIR" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)"
+  script="$CANARY_DIR/$v/src/user-prompt-submit-hook.ts"
+  if [ -n "$v" ] && [ -f "$script" ] && command -v "$NODE" >/dev/null 2>&1; then
+    printf '%s' "$text" | jq -Rs '{prompt:.}' | run_to 20 "$NODE" --experimental-strip-types "$script" >/dev/null 2>&1
+    return
+  fi
+  builtin_scan "$text"
+}
+
+# ---- scrub 自檢：每天第一次叫模型前送固定假 PII，回來還含原值＝scrub 失效 ----
+# 回 0＝通過；1＝失效（當天 L1 全停）；2＝連不上（不算數，下輪再驗；oc-free-ask 本身 fail-closed）
+FAKE_PII_PHONE='0912-345-678'
+FAKE_PII_WALLET='0x52908400098527886E0F7030069857D2E4169EE7'
+FAKE_PII_EMAIL='wd-canary@example.com'
+scrub_selfcheck() {
+  local body out v
+  body="$(jq -cn --arg t "watchdog 自檢假資料：電話 ${FAKE_PII_PHONE}、錢包 ${FAKE_PII_WALLET}、信箱 ${FAKE_PII_EMAIL}" '{texts:[$t]}')"
+  if [ -n "$SCRUB_CMD" ]; then
+    out="$(printf '%s' "$body" | run_to 25 "$SCRUB_CMD" 2>/dev/null)" || return 2
+  else
+    out="$(printf '%s' "$body" | run_to 25 curl -sS -m 20 -H 'Content-Type: application/json' --data-binary @- "$SCRUB_URL" 2>/dev/null)" || return 2
+  fi
+  out="$(printf '%s' "$out" | jq -r '.texts[0] // empty' 2>/dev/null)"   # 只看 texts，mapping 本來就含原值
+  [ -n "$out" ] || return 2
+  for v in "$FAKE_PII_PHONE" "$FAKE_PII_WALLET" "$FAKE_PII_EMAIL"; do
+    case "$out" in *"$v"*) return 1 ;; esac
+  done
+  return 0
+}
+# 今天能不能叫模型：0＝可以；1＝今天 scrub 失效、L1 停
+l1_gate_today() {
+  local d ok rc
+  d="$(jq -r '.scrub_check.date // ""' "$STATE" 2>/dev/null)"
+  ok="$(jq -r '.scrub_check.ok // false' "$STATE" 2>/dev/null)"
+  if [ "$d" = "$today" ]; then [ "$ok" = true ]; return; fi
+  scrub_selfcheck; rc=$?
+  case "$rc" in
+    0) st_update --arg d "$today" '.scrub_check = {date:$d, ok:true}'; log "SELFCHECK scrub ok"; return 0 ;;
+    1) st_update --arg d "$today" '.scrub_check = {date:$d, ok:false}'
+       alert "scrub-fail-$today" "scrub 失效：自檢假 PII 原樣回來，今天 L1 模型判讀全停"
+       return 1 ;;
+    *) log "SELFCHECK scrub 連不上，延到下輪再驗（oc-free-ask 會 fail-closed）"; return 0 ;;
+  esac
+}
+
+# ---- 退路鏈：一棒一個讀 stdin 印答案的執行檔；結果放 CHAIN_OUT／CHAIN_LEG ----
+CHAIN_OUT=''; CHAIN_LEG=''
+ask_chain() { # legs("a;b c;d") validator prompt
+  local legs_s="$1" validator="$2" prompt="$3" leg out label
+  local -a legs cmd
+  CHAIN_OUT=''; CHAIN_LEG=''
+  IFS=';' read -r -a legs <<EOF
+$legs_s
+EOF
+  for leg in "${legs[@]}"; do
+    set -f; cmd=($leg); set +f
+    [ "${#cmd[@]}" -gt 0 ] || continue
+    label="$(basename "${cmd[0]}")${cmd[1]:+ ${cmd[1]}}"
+    [ -x "${cmd[0]}" ] || { log "CHAIN $label 不存在"; continue; }
+    if ! out="$(printf '%s' "$prompt" | run_to "$LLM_TIMEOUT_S" "${cmd[@]}" 2>/dev/null)"; then
+      log "CHAIN $label 不通或逾時"; continue
+    fi
+    if ! "$validator" "$out"; then log "CHAIN $label 輸出看不懂"; continue; fi
+    CHAIN_OUT="$out"; CHAIN_LEG="$label"
+    return 0
+  done
+  return 1
+}
+
+# ---- 腳本規則表 state/watchdog-known.tsv：regex<TAB>已知類型（# 開頭為註解）----
+known_match() { # text → 印類型；沒命中回 1
+  local re ty
+  [ -f "$KNOWN" ] || return 1
+  while IFS=$'\t' read -r re ty; do
+    case "$re" in ''|'#'*) continue ;; esac
+    if printf '%s' "$1" | grep -qE -- "$re" 2>/dev/null; then printf '%s' "${ty:-known}"; return 0; fi
+  done < "$KNOWN"
+  return 1
+}
+# 模型判不了（或不准送）的一項走腳本規則表，再不行才告警。why＝原因；safe_excerpt 空＝不把內容寫進 brief
+fallback_item() { # sig src raw_line why safe_excerpt
+  local ty
+  if ty="$(known_match "$3")"; then
+    log "FALLBACK KNOWN $ty [$2]（$4）"
+    return 0
+  fi
+  if [ -n "$5" ]; then
+    alert "unjudged-$1" "Watchdog 判不了：[$2] $(printf '%s' "$5" | sed 's/^log 行：\[[^]]*\] //' | cut -c1-160)（$4）"
+  else
+    alert "unjudged-$1" "Watchdog 判不了：[$2] 該行含敏感內容未送模型（$4）"
+  fi
+}
+
+# ---- 每小時上限：.l1_calls 只留一小時內的 epoch ----
+l1_calls_last_hour() { jq --argjson now "$now" '[(.l1_calls // [])[] | select(. > $now - 3600)] | length' "$STATE" 2>/dev/null || echo 0; }
+l1_record_call() { st_update --argjson now "$now" '.l1_calls = ([(.l1_calls // [])[] | select(. > $now - 3600)] + [$now])'; }
+
+# ======================= bin/watchdog ask "<問題>" =======================
+ask_valid() { [ -n "$(printf '%s' "$1" | tr -d '[:space:]')" ]; }
+if [ "${1:-}" = ask ]; then
+  q="${2:-}"
+  [ -n "$q" ] || { echo "用法：bin/watchdog ask \"<問題>\"" >&2; exit 2; }
+  qline="$(wl_line "$q")" || { echo "Watchdog：問題含敏感路徑，不送模型"; log "ASK 問題含敏感路徑，未送"; exit 1; }
+  snap="$(jq -c --argjson now "$now" '{scrub_check, l1_calls_last_hour: ([(.l1_calls // [])[] | select(. > $now - 3600)] | length), bg_blocked: ((.bg_blocked // {}) | length), alerted_24h: ([(.alerted // {})[] | select(. > $now - 86400)] | length)}' "$STATE" 2>/dev/null)"
+  qn=0; [ -f "$QUEUE" ] && qn="$(wc -l < "$QUEUE" | tr -d ' ')"
+  ctx="$(tail -n 200 "$LOG" 2>/dev/null | while IFS= read -r l; do wl_line "$l" && echo; done)"
+  prompt="你是 Mythos watchdog 的值班說明員。根據下面的狀態快照與 watchdog log，用繁體中文簡短回答問題（10 行內）。看不出來就說看不出來，不要猜。
+
+=== 問題 ===
+$qline
+
+=== 狀態快照 ===
+待判佇列：${qn} 項；旋鈕：DEEP_STALL_MIN=$(knob_get DEEP_STALL_MIN 15) BG_STALL_MIN=$(knob_get BG_STALL_MIN 10) REVIEW_EVERY=$(knob_get REVIEW_EVERY 30)
+${snap}
+
+=== watchdog log（最近 200 行，已遮家目錄、丟敏感行）===
+$ctx"
+  sig="ask-$(printf '%s' "$q" | shasum | cut -c1-12)"
+  if ! canary_scan "$prompt"; then
+    log "ASK canary 命中，不送模型"
+    if ty="$(known_match "$q")"; then echo "Watchdog（規則表）：$ty"; exit 0; fi
+    echo "Watchdog 判不了：內容含敏感資料（canary 命中），未送模型"; exit 1
+  fi
+  if ! l1_gate_today; then
+    if ty="$(known_match "$q")"; then echo "Watchdog（規則表）：$ty"; exit 0; fi
+    echo "Watchdog 判不了：今天 scrub 自檢失效，模型判讀停用"; exit 1
+  fi
+  if ask_chain "$LEGS" ask_valid "$prompt"; then
+    log "ASK leg=${CHAIN_LEG} 已回答"
+    printf '%s\n' "$CHAIN_OUT"
+    exit 0
+  fi
+  if ty="$(known_match "$q")"; then log "ASK FALLBACK KNOWN $ty"; echo "Watchdog（規則表）：$ty"; exit 0; fi
+  alert "$sig" "Watchdog 判不了：ask「$(printf '%s' "$qline" | cut -c1-80)」退路鏈全敗"
+  echo "Watchdog 判不了：退路鏈全敗（模型都不通，規則表也沒命中）"
+  exit 1
+fi
 
 # 1) dispatch-watch 的死鎖：超過 10 分鐘且持有 pid 已不在 → 刪鎖
 if [ -d "$LOCK" ]; then
@@ -116,6 +383,216 @@ if [ -f "$TSV" ]; then
     [ -n "$id" ] || continue
     alert "pending-$id" "派工 $id 卡在 pending 超過 6 小時"
   done < <(awk -F'\t' -v now="$now" '$5=="pending" && $4 ~ /^[0-9]+$/ && now-$4 >= 21600 {print $1"\t"$4}' "$TSV")
+fi
+
+# 5a) deep tmux session 還在，但對應 transcript 超過 DEEP_STALL_MIN 分鐘沒動 → 告警
+#     session 名對 state/deep/<job>.handle 的 session=，再從 ledger 取 cwd 算 transcript 目錄（同 dispatch-watch）
+deep_stall_min="$(knob_get DEEP_STALL_MIN 15)"
+while IFS= read -r sess; do
+  case "$sess" in deep-*) ;; *) continue ;; esac
+  hf="$(grep -l -x "session=$sess" "$MYTHOS_DIR"/state/deep/*.handle 2>/dev/null | head -1)"
+  [ -n "$hf" ] || { log "L0 deep session $sess 對不到 handle，略過"; continue; }
+  jid="$(basename "$hf" .handle)"
+  cwd="$(awk -F'\t' -v j="$jid" '$1==j{print $6; exit}' "$TSV" 2>/dev/null)"
+  [ -n "$cwd" ] || continue
+  dir="$CLAUDE_PROJECTS_DIR/$(printf '%s' "$cwd" | sed 's/[\/.]/-/g')"
+  latest="$(ls -t "$dir"/*.jsonl 2>/dev/null | head -1)"
+  [ -n "$latest" ] || continue   # transcript 還沒出現：交 dispatch-watch 判
+  m="$(mtime_of "$latest")"
+  if [ "$m" -gt 0 ] && [ $((now - m)) -ge $((deep_stall_min * 60)) ]; then
+    alert "deep-stall-$sess-$m" "deep session ${sess}（job=${jid}）transcript $(( (now - m) / 60 )) 分鐘沒動"
+  fi
+done < <(run_to 10 "$TMUX_BIN" ls -F '#{session_name}' 2>/dev/null)
+
+# 5b) claude agents 的背景 worker state=blocked（卡在權限提示）超過 BG_STALL_MIN 分鐘 → 告警
+#     blocked 沒有時間欄位，第一次看到記在 watchdog.json 的 bg_blocked，解除就移掉
+bg_stall_min="$(knob_get BG_STALL_MIN 10)"
+if command -v "$CLAUDE_BIN" >/dev/null 2>&1 \
+  && bg_json="$(run_to 20 "$CLAUDE_BIN" agents --json --all 2>/dev/null)" \
+  && printf '%s' "$bg_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+  blocked="$(printf '%s' "$bg_json" | jq -c '[.[] | select(.kind == "background" and .state == "blocked") | (.id // .sessionId // empty) | tostring]')"
+  st_update --argjson b "$blocked" --argjson now "$now" \
+    '(.bg_blocked // {}) as $old | .bg_blocked = (reduce $b[] as $x ({}; .[$x] = ($old[$x] // $now)))'
+  while IFS=$'\t' read -r bid since; do
+    [ -n "$bid" ] || continue
+    if [ $((now - since)) -ge $((bg_stall_min * 60)) ]; then
+      alert "bg-blocked-$bid-$since" "背景 agent $bid 卡在權限提示（state=blocked）超過 ${bg_stall_min} 分鐘"
+    fi
+  done < <(jq -r '(.bg_blocked // {}) | to_entries[] | [.key, (.value | tostring)] | @tsv' "$STATE" 2>/dev/null)
+else
+  log "L0 claude agents 讀不到，略過背景 worker 檢查"
+fi
+
+# 6) logs/*.log 本輪新增行出現 ERROR|Traceback|rc=[1-9] → 收進待判佇列（不直接告警）
+#    offset 記 inode＋位元組；第一次看到的檔從尾巴開始（不翻舊帳）；輪替／截斷從頭；只吃到最後一個換行
+touch "$OFFSETS" "$SEEN"
+awk -F'\t' -v d="$today" '$1==d' "$SEEN" > "$SEEN.tmp" && mv "$SEEN.tmp" "$SEEN"   # 去重只看當天
+for f in "$MYTHOS_DIR"/logs/*.log; do
+  [ -f "$f" ] || continue
+  b="$(basename "$f")"
+  case "$b" in watchdog*) continue ;; esac   # 不讀自己的 log，免得自我餵食
+  size="$(stat -f %z "$f" 2>/dev/null || stat -c %s "$f" 2>/dev/null || echo 0)"
+  ino="$(stat -f %i "$f" 2>/dev/null || stat -c %i "$f" 2>/dev/null || echo 0)"
+  prev="$(awk -F'\t' -v b="$b" '$1==b{x=$2" "$3} END{print x}' "$OFFSETS")"
+  prev_ino="${prev%% *}"; prev_off="${prev##* }"
+  if [ -z "$prev" ]; then off="$size"
+  elif [ "$prev_ino" != "$ino" ] || [ "$size" -lt "$prev_off" ]; then off=0
+  else off="$prev_off"; fi
+  if [ "$size" -gt "$off" ]; then
+    used="$(tail -c +$((off + 1)) "$f" | head -c $((size - off)) | perl -0777 -ne 'my $i = rindex($_, "\n"); print $i + 1')"
+    case "$used" in ''|*[!0-9]*) used=0 ;; esac
+    if [ "$used" -gt 0 ]; then
+      while IFS= read -r line; do
+        sig="$(printf '%s|%s' "$b" "$line" | sed 's/[0-9]//g' | shasum | cut -c1-12)"
+        grep -q -F "$(printf '%s\t%s' "$today" "$sig")" "$SEEN" && continue   # 同類錯誤今天已收過
+        printf '%s\t%s\n' "$today" "$sig" >> "$SEEN"
+        jq -cn --arg src "$b" --arg line "$line" --arg sig "$sig" --argjson ts "$now" \
+          '{src:$src, line:$line, sig:$sig, ts:$ts}' >> "$QUEUE"
+      done < <(tail -c +$((off + 1)) "$f" | head -c "$used" | grep -E 'ERROR|Traceback|rc=[1-9]' | head -n 20)
+    fi
+    off=$((off + used))
+  fi
+  { awk -F'\t' -v b="$b" '$1!=b' "$OFFSETS"; printf '%s\t%s\t%s\n' "$b" "$ino" "$off"; } > "$OFFSETS.tmp" && mv "$OFFSETS.tmp" "$OFFSETS"
+done
+if [ -f "$QUEUE" ] && [ "$(wc -l < "$QUEUE" | tr -d ' ')" -gt "$QUEUE_MAX" ]; then
+  tail -n "$QUEUE_MAX" "$QUEUE" > "$QUEUE.tmp" && mv "$QUEUE.tmp" "$QUEUE"
+  log "L0 待判佇列超過 ${QUEUE_MAX}，丟掉最舊的"
+fi
+
+# ======================= L1：待判非空才叫模型 =======================
+L1_N=0
+l1_pick() { # 編號 輸出 → 印「KNOWN x／NEW x／NOISE」
+  printf '%s\n' "$2" | tr -d '\r' | sed -E 's/^[[:space:]*`#>-]+//' |
+    grep -m1 -E "^$1[.:)、：]?[[:space:]]+(KNOWN|NEW|NOISE)([[:space:]:：]|$)" |
+    sed -E "s/^$1[.:)、：]?[[:space:]]+//" | tr '\t' ' ' | cut -c1-200
+}
+l1_valid() { local i=1; while [ "$i" -le "$L1_N" ]; do [ -n "$(l1_pick "$i" "$1")" ] && return 0; i=$((i + 1)); done; return 1; }
+
+# L2：旋鈕提議。兩棒不同體系各自獨立回值，同值且在上下限內才套用；否則寫 proposals＋brief 一行
+l2_propose_file() { # name proposed reason detail
+  local ts f
+  # mktemp 保證唯一（同一秒多份提議、子 shell 的 RANDOM 可能相同）
+  f="$(mktemp "$PROPOSALS/$(date '+%Y%m%d-%H%M%S')-XXXXXX")" || return 1
+  mv "$f" "$f.md"; f="$f.md"; ts="$(basename "$f" .md)"
+  printf '# watchdog 提議 %s\n\n- 旋鈕／項目：%s\n- 提議值：%s\n- 未套用原因：%s\n\n## 細節\n%s\n' \
+    "$ts" "$1" "$2" "$3" "$4" > "$f"
+  alert "proposal-$ts" "Watchdog 提議 $1=$2 未套用（$3），見 state/watchdog-proposals/$ts.md"
+}
+l2_handle() { # L1 輸出 items_text
+  local out="$1" items="$2" name val lo leg vals detail cur
+  local -a legs cmd
+  # 非旋鈕的建議（prompt／CLAUDE.md／gate 規則）一律只提議
+  printf '%s\n' "$out" | grep -E '^[[:space:]*`#>-]*PROPOSE[[:space:]]' | head -n 3 | while IFS= read -r lo; do
+    l2_propose_file "PROPOSE" "-" "非旋鈕建議只提議不套用" "$(printf '%s' "$lo" | cut -c1-300)"
+  done
+  printf '%s\n' "$out" | grep -oE 'KNOB[[:space:]]+[A-Z_]+=[0-9]+' | head -n 3 | while IFS= read -r lo; do
+    name="$(printf '%s' "$lo" | sed -E 's/^KNOB[[:space:]]+//; s/=.*//')"
+    val="${lo##*=}"
+    if ! knob_bounds "$name" >/dev/null; then
+      l2_propose_file "$name" "$val" "不在旋鈕白名單" "$lo"; continue
+    fi
+    # 兩棒各自問一次，不看彼此答案
+    vals=''; detail=''
+    IFS=';' read -r -a legs <<EOF
+$L2_LEGS
+EOF
+    for leg in "${legs[@]}"; do
+      set -f; cmd=($leg); set +f
+      [ "${#cmd[@]}" -gt 0 ] || continue
+      v=''
+      if [ -x "${cmd[0]}" ]; then
+        v="$(printf '你是 Mythos watchdog 的門檻調整員。看下面的待判項，判斷監看門檻 %s（分鐘，允許 %s）該設多少。\n只輸出一行：KNOB %s=<整數>；不需要調就輸出 NONE。\n\n=== 待判 ===\n%s\n' \
+          "$name" "$(knob_bounds "$name" | tr ' ' '~')" "$name" "$items" |
+          run_to "$LLM_TIMEOUT_S" "${cmd[@]}" 2>/dev/null | grep -oE "KNOB[[:space:]]+$name=[0-9]+" | head -1 | sed 's/.*=//')"
+      fi
+      vals="$vals ${v:-NONE}"
+      detail="$detail
+- $(basename "${cmd[0]}")：${v:-NONE}"
+    done
+    set -- $vals
+    if [ "$#" -ge 2 ] && [ "$1" != NONE ] && [ "$1" = "$2" ] && [ "$1" = "$val" ] && knob_in_bounds "$name" "$1"; then
+      cur="$(knob_get "$name" '-')"
+      knob_set "$name" "$1"
+      log "L2 APPLY $name ${cur}→$1（兩棒同值）"
+      alert "knob-$name-$1-$now" "Watchdog 已調 ${name}：${cur}→$1（beam-free 與 local-llm 同值、在上下限內）"
+    else
+      l2_propose_file "$name" "$val" "兩棒不一致或超界（L1=${val}；L2=$(printf '%s' "$vals" | sed 's/^ //')）" "$lo$detail"
+    fi
+  done
+}
+
+if [ -s "$QUEUE" ]; then
+  head -n "$L1_BATCH" "$QUEUE" > "$QUEUE.batch"
+  tail -n +$((L1_BATCH + 1)) "$QUEUE" > "$QUEUE.rest"
+  : > "$QUEUE.keep"
+  calls="$(l1_calls_last_hour)"
+  l1_open=1
+  [ "$calls" -ge "$L1_MAX" ] && { l1_open=0; log "L1 本小時已叫 ${calls} 次（上限 ${L1_MAX}），可送模型的待判留到下輪"; }
+  C_SIG=(); C_SRC=(); C_RAW=(); C_TXT=()
+  while IFS= read -r q; do
+    src="$(printf '%s' "$q" | jq -r '.src // "?"')"
+    raw="$(printf '%s' "$q" | jq -r '.line // ""')"
+    sig="$(printf '%s' "$q" | jq -r '.sig // "x"')"
+    if ! txt="$(build_item "$src" "$raw")"; then
+      fallback_item "$sig" "$src" "$raw" "白名單丟棄、不出機" ""
+      continue
+    fi
+    blocked=0
+    canary_scan "$txt" || blocked=1   # canary 掃描：命中＝不送，轉退路
+    if [ "$blocked" = 1 ]; then
+      log "CANARY 命中 [$src]，不送模型"
+      fallback_item "$sig" "$src" "$raw" "canary 命中" ""
+      continue
+    fi
+    if [ "$l1_open" = 0 ]; then printf '%s\n' "$q" >> "$QUEUE.keep"; continue; fi
+    C_SIG+=("$sig"); C_SRC+=("$src"); C_RAW+=("$raw"); C_TXT+=("$txt")
+  done < "$QUEUE.batch"
+  L1_N="${#C_SIG[@]}"
+
+  if [ "$L1_N" -gt 0 ]; then
+    if ! l1_gate_today; then
+      i=0; while [ "$i" -lt "$L1_N" ]; do
+        fallback_item "${C_SIG[$i]}" "${C_SRC[$i]}" "${C_RAW[$i]}" "scrub 失效，今天 L1 停" "${C_TXT[$i]%%$'\n'*}"; i=$((i + 1))
+      done
+    else
+      types="$(cut -f2 "$KNOWN" 2>/dev/null | grep -v '^$' | sort -u | tr '\n' '、' | sed 's/、$//')"
+      items=''; i=0
+      while [ "$i" -lt "$L1_N" ]; do items="$items
+$((i + 1)). ${C_TXT[$i]}"; i=$((i + 1)); done
+      prompt="你是 Mythos watchdog 的判讀員。下面每一項是背景程序 log 新出現的錯誤行（可能附派工狀態與工單目標）。
+逐項判斷，每項嚴格輸出一行，開頭是編號：
+<編號> KNOWN <已知類型>　／　<編號> NEW <一句根因假設，40 字內>　／　<編號> NOISE
+已知類型：${types:-（無）}
+不判 worker 有沒有跑歪（那是別的監看員的事）。
+若認為監看門檻要調，另起一行：KNOB <名稱>=<整數>，名稱只能是 DEEP_STALL_MIN、BG_STALL_MIN、REVIEW_EVERY。
+其他建議（改 prompt、規則）另起一行：PROPOSE <一句>。
+
+=== 待判 ===$items"
+      l1_record_call
+      if ask_chain "$LEGS" l1_valid "$prompt"; then
+        log "L1 leg=${CHAIN_LEG} 判 ${L1_N} 項"
+        i=0
+        while [ "$i" -lt "$L1_N" ]; do
+          v="$(l1_pick $((i + 1)) "$CHAIN_OUT")"
+          case "$v" in
+            KNOWN*) log "L1 $v [${C_SRC[$i]}]" ;;
+            NOISE*) log "L1 NOISE [${C_SRC[$i]}]" ;;
+            NEW*)   alert "new-${C_SIG[$i]}" "Watchdog 新問題（${CHAIN_LEG}）：[${C_SRC[$i]}] $(printf '%s' "${C_TXT[$i]%%$'\n'*}" | sed 's/^log 行：\[[^]]*\] //' | cut -c1-120) → $(printf '%s' "$v" | sed -E 's/^NEW[[:space:]:：]*//')" ;;
+            *)      fallback_item "${C_SIG[$i]}" "${C_SRC[$i]}" "${C_RAW[$i]}" "模型沒判這項" "${C_TXT[$i]%%$'\n'*}" ;;
+          esac
+          i=$((i + 1))
+        done
+        l2_handle "$CHAIN_OUT" "$items"
+      else
+        log "L1 退路鏈全敗，改走規則表"
+        i=0; while [ "$i" -lt "$L1_N" ]; do
+          fallback_item "${C_SIG[$i]}" "${C_SRC[$i]}" "${C_RAW[$i]}" "退路鏈全敗" "${C_TXT[$i]%%$'\n'*}"; i=$((i + 1))
+        done
+      fi
+    fi
+  fi
+  cat "$QUEUE.keep" "$QUEUE.rest" > "$QUEUE.tmp" && mv "$QUEUE.tmp" "$QUEUE"
+  rm -f "$QUEUE.batch" "$QUEUE.rest" "$QUEUE.keep"
 fi
 
 log "done"
