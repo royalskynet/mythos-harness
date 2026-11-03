@@ -96,15 +96,11 @@ test('mid 時 Bash 白名單與子指令限制', () => {
   }
 })
 
-test('handson 檔 30 分鐘內放行、31 分鐘前 deny', () => {
-  clearHandson()
-  const tp = transcript('handson turn')
-  fs.writeFileSync(HANDSON, '')
-  assert.equal(pre('Write', { file_path: '~/dev/x.js' }, tp, { TRIAGE_OUT: 'mid' }).trim(), '')
-  const old = new Date(Date.now() - 31 * 60 * 1000)
-  fs.utimesSync(HANDSON, old, old)
-  assert.equal(decision(pre('Write', { file_path: '~/dev/x.js' }, tp)), 'deny')
-  clearHandson()
+test('11-03：子代理（agent_id）mid 輪 Write 任意路徑放行、主 session 照擋', () => {
+  const tp = transcript('subagent turn')
+  assert.equal(decision(pre('Write', { file_path: '~/dev/x.js' }, tp, { TRIAGE_OUT: 'mid' })), 'deny')
+  const out = run('pre', { tool_name: 'Write', tool_input: { file_path: '~/dev/x.js' }, transcript_path: tp, agent_id: 'a1', agent_type: 'general-purpose' })
+  assert.equal(out.trim(), '')
 })
 
 test('同一則使用者訊息第二次呼叫不再跑 triage', () => {
@@ -123,12 +119,10 @@ test('transcript 不存在時放行', () => {
   assert.equal(out.trim(), '')
 })
 
-test('fail 模式 command 含 wo-verify 建立 handson 檔', () => {
+test('11-03：fail 模式已移除，照收不建 handson 檔', () => {
   clearHandson()
-  assert.equal(fs.existsSync(HANDSON), false)
   run('fail', { tool_name: 'Bash', tool_input: { command: 'wo-verify /tmp/x.md' }, transcript_path: '' })
-  assert.equal(fs.existsSync(HANDSON), true)
-  clearHandson()
+  assert.equal(fs.existsSync(HANDSON), false)
 })
 
 test('11-02 補洞：mid 時 node -e／python3 -c／find -delete／curl -o／tmux send-keys deny，cd 放行', () => {

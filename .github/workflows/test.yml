@@ -15,3 +15,4 @@ jobs:
       - run: bash tests/test_dispatch_deep.sh
       - run: bash tests/test_dispatch_watch.sh
       - run: bash tests/test_launchd_install.sh
+      - run: bash tests/test-dispatch-gate-handson.sh

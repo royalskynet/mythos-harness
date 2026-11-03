@@ -1,6 +1,8 @@
 #!/usr/bin/env node
-// Mythos 的 PreToolUse／PostToolUseFailure hook：本輪使用者訊息不是 easy 時，只准派工，不准自己動手。
-// 判斷順序：easy 放行 → 30 分鐘小修窗口放行 → Write/Edit 看路徑、Bash 看白名單。
+// Mythos 的 PreToolUse hook：本輪使用者訊息不是 easy 時，主 session 只准派工，不准自己動手。
+// 動手的一律是子代理（payload 帶 agent_id，harness 填、模型偽造不了）：主 session 派背景 Agent 或 bin/dispatch，
+// 自己繼續跟使用者聊（11-03 對齊 DeepSeek Harness 兩層架構，取代 30 分鐘親手窗口）。
+// 判斷順序：pinGuard（不分主子）→ 子代理放行 → easy 放行 → 前景 Agent 擋 → Write/Edit 看路徑、Bash 看白名單。
 // fail-open：任何例外一律放行，只記 log；deny 也記 log。
 import fs from 'node:fs'
 import os from 'node:os'
@@ -14,7 +16,6 @@ const MYTHOS = process.env.MYTHOS_DIR || path.dirname(HERE)
 const STATE = path.join(MYTHOS, 'state')
 const LOGS = path.join(MYTHOS, 'logs')
 const CACHE = path.join(STATE, 'dispatch-gate.json')
-const HANDSON = path.join(STATE, 'dispatch-gate-handson')
 // triage 來自 orchestrator（github.com/royalskynet/orchestrator 的 bin/triage）；本機預設路徑不在就找 PATH
 const TRIAGE_DEFAULT = path.join(os.homedir(), 'dev/dispatch-router/bin/triage')
 const TRIAGE = process.env.DISPATCH_GATE_TRIAGE || (fs.existsSync(TRIAGE_DEFAULT) ? TRIAGE_DEFAULT : 'triage')
@@ -53,7 +54,7 @@ function allow() {
 }
 
 function deny(tier, why) {
-  const reason = `本輪 Laya 判 ${tier}，Mythos 只能派工；寫工單（含 ## 驗收）後用 bin/dispatch <task.md> <cwd> <tier> 派出（easy／mid＝派of、hard＝deep）；驗收失敗後 30 分鐘內才可親手小修。${why ? `（${why}）` : ''}`
+  const reason = `本輪 Laya 判 ${tier}，Mythos 主 session 只能派工：要動手（含唯讀診斷驗收為何失敗、改 ~/.claude／launchd／Carrie 這類不能出機的活）就用 Agent 工具派背景子代理（run_in_background 不設或 true），子代理的工具呼叫不受此閘；量大低難度的寫工單（含 ## 驗收）用 bin/dispatch <task.md> <cwd> <tier>（easy／mid＝派of、hard＝deep）。派完繼續回使用者。${why ? `（${why}）` : ''}`
   log(`DENY tier=${tier} ${why}`)
   fs.writeSync(1, JSON.stringify({
     hookSpecificOutput: {
@@ -100,7 +101,9 @@ function lastUserText(transcriptPath) {
   }
   for (let i = entries.length - 1; i >= 0; i--) {
     const e = entries[i]
-    if (!e || e.type !== 'user' || e.isMeta) continue
+    // Telegram channel 訊息被 harness 記成 isMeta:true＋origin.kind=channel（11-03 實測 36/36），
+    // 舊版一律跳過 isMeta → #手動 從沒讀到、tier 也拿 [派工回報] 之類的舊文字判
+    if (!e || e.type !== 'user' || (e.isMeta && e.origin?.kind !== 'channel')) continue
     const text = textOf(e.message?.content ?? e.content)
     if (typeof text === 'string' && text.trim()) return text
   }
@@ -139,15 +142,6 @@ function tierOf(text) {
   const tier = ['easy', 'mid', 'hard'].includes(raw) ? raw : 'mid'
   saveCache({ key, tier, at: Math.floor(Date.now() / 1000) })
   return tier
-}
-
-function handsonFresh() {
-  try {
-    const st = fs.statSync(HANDSON)
-    return Date.now() - st.mtimeMs <= 30 * 60 * 1000
-  } catch {
-    return false
-  }
 }
 
 function allowedPath(p) {
@@ -282,7 +276,7 @@ function bashAllowed(command) {
 }
 
 // 派工憑證保護（11-02）：delegate-guard 的 p-*.sh／p-*.md／ledger-*.json 是派工當下的驗收 pin，
-// 事後改它＝自己改考卷。不分 tier、不吃 handson，Write／Edit／非唯讀 Bash 一律擋；只有使用者打 #手動 能解。
+// 事後改它＝自己改考卷。不分 tier、不分主 session 或子代理，Write／Edit／非唯讀 Bash 一律擋；只有使用者打 #手動 能解。
 const PIN_RE = /delegate-guard\/(p-[^\s'"]*\.(sh|md)|ledger-[^\s'"]*)/
 const PIN_READONLY = /^\s*(cat|ls|stat|head|tail|grep|wc|diff|node\s+\S*delegate-guard\/scripts\/verify\.mjs)\b[^;&|><`$]*$/
 function pinGuard(tool, input) {
@@ -306,12 +300,15 @@ function pre(payload) {
   // 使用者明說 #手動＝本輪解鎖（只有使用者打得出來，模型無法自己繞）
   if (text.includes('#手動')) allow()
   pinGuard(String(payload.tool_name || ''), payload.tool_input || {})
+  if (payload.agent_id) allow()
   const tier = tierOf(text)
   if (tier === 'easy') allow()
-  if (handsonFresh()) allow()
 
   const tool = String(payload.tool_name || '')
   const input = payload.tool_input || {}
+
+  // 前景 Agent 會卡住主 session，派工期間沒法回使用者
+  if (tool === 'Agent' && input.run_in_background === false) return deny(tier, 'Agent 不可 run_in_background:false')
 
   if (tool === 'Write' || tool === 'Edit' || tool === 'MultiEdit') {
     if (allowedPath(input.file_path)) allow()
@@ -327,26 +324,13 @@ function pre(payload) {
   allow()
 }
 
-function fail(payload) {
-  const tool = String(payload?.tool_name || '')
-  const command = String(payload?.tool_input?.command || '')
-  if (tool === 'Bash' && (command.includes('wo-verify') || command.includes('dcq wait'))) {
-    try {
-      fs.mkdirSync(STATE, { recursive: true })
-      fs.writeFileSync(HANDSON, '')
-    } catch (e) {
-      log(`FAIL-OPEN cannot touch handson: ${e.message}`)
-    }
-  }
-}
-
 function main() {
   const mode = process.argv[2]
   const payload = readPayload()
   if (!payload) allow()
   try {
-    if (mode === 'fail') fail(payload)
-    else if (mode === 'pre') pre(payload)
+    // fail 模式（舊 PostToolUseFailure）已移除，照收不做事，免得還沒重開的 session 報錯
+    if (mode === 'pre') pre(payload)
   } catch (e) {
     log(`FAIL-OPEN ${mode}: ${e.message}`)
     allow()
