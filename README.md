@@ -20,7 +20,7 @@ chat with Sonnet; every request goes to a background dispatcher subagent that tr
                        │                 未 ACK 10 分鐘重送、上限 5 次；取消的票不再投遞
                        └─ 終態先投遞，抽查後跑 review-judge（免費模型，timeout 硬砍 90 秒）：ON_TRACK 不打擾 Router
         watchdog（每 5 分）── L0 零 token：死鎖、重送用盡、Router 未回、pending 逾 6 小時、deep 停滯、背景 agent 卡權限 → brief-lines
-                      └─ log 錯誤行進待判 → L1 免費模型（每小時上限；白名單→canary→scrub）→ 退路鏈 → 規則表 → 判不了才告警
+                      └─ log 錯誤行進待判 → L1 免費模型（每小時上限；白名單→scrub 去識別→canary）→ 退路鏈 → 規則表 → 判不了才告警
 ```
 
 ## 對照文章 / Mapping
@@ -57,7 +57,7 @@ tmux -L mythos attach -t mythos
 | `router/settings.json`、`ROUTER.md`、`start.sh` | Router 層：模型分層、派工閘 hook、Router 規則、tmux 啟動 |
 | `bin/dispatch-gate.mjs` | 主 session 全工具白名單（Telegram 只放 reply／react／edit_message）；子代理不能直接回 Telegram；pinGuard、fail-closed |
 | `bin/lib-ledger.sh`、`lib-events.mjs` | 共同 ledger 鎖（flock，行程死了自動釋放；ledger 與 events 同一把）、8 欄 schema、事件佇列（原子替換寫入）與精確 ACK 比對 |
-| `bin/watchdog` | L0：死鎖、重送用盡、Router 未回（只認成功的 reply 結果）、pending 逾 6 小時、deep transcript 停滯、`claude agents` 背景 worker blocked；L1：log 錯誤行交免費模型判 KNOWN／NEW／NOISE（出機前欄位白名單＋sensitive-canary＋scrub 每日自檢，退路鏈 beam-free→OC Go 次選→local-llm→`state/watchdog-known.tsv`）；L2：只提議白名單旋鈕，兩棒不同體系同值才套用；`bin/watchdog ask "<問題>"` |
+| `bin/watchdog` | L0：死鎖、重送用盡、Router 未回（只認成功的 reply 結果）、pending 逾 6 小時、deep transcript 停滯、`claude agents` 背景 worker blocked；L1：log 錯誤行交免費模型判 KNOWN／NEW／NOISE（出機前欄位白名單→scrub 去識別→sensitive-canary 掃去識別後文字，scrub 每日自檢，退路鏈 beam-free→OC Go 次選→local-llm→`state/watchdog-known.tsv`）；L2：只提議白名單旋鈕，兩棒不同體系同值才套用；`bin/watchdog ask "<問題>"` |
 | `bin/dispatch`、`dispatch-retry`、`dispatch-cancel`、`dispatch-deep-run` | 派工（先持鎖登錄再啟動後端）、重派、取消（deep 只照 `state/deep/<id>.handle`）、deep 背景執行 |
 | `bin/dispatch-watch` | 回報＋停滯／抽查，pane 閒置才打進去 |
 | `bin/review-judge`、`oc-free-ask`、`local-llm` | 免費模型判 Worker 有沒有跑歪；判不出來或格式不對一律 UNKNOWN＝照舊喚醒 Router |
@@ -83,8 +83,10 @@ bash tests/test-watchdog.sh            # watchdog v2：L0 不叫模型、上限�
 
 ## 狀態 / Status
 
-- 每輪由 Codex 對照文章審計，主 session 逐條裁決後修補。第 3 輪（2026-11-04）：必修從 9 降到 2，剩 deep 取消前驗證程序身分（PID 重用）、judge 逾時強制 KILL，修補中。
-- Each round is audited by Codex against the article; findings are adjudicated item by item before fixing. Round 3 (2026-11-04): must-fix dropped from 9 to 2 — process-identity check before cancelling a deep job (PID reuse) and a hard KILL after the judge timeout. Fixes in progress.
+- 每輪由 Codex 對照文章審計，主 session 逐條裁決（可部分同意）後修補。必修 P0／P1：第 1 輪 10 → 9 → 2 → 3 → **第 5 輪（2026-11-04）0，VERDICT: PASS**，重啟、載入 watchdog、公開 push 三件事皆 GO。
+- 剩下的是 P2：真實 Telegram 長工期間的回覆延遲實測、thread 程式直通與多對多訂閱、同 repo 並行寫入協調、旋鈕門檻對事件時序的行為測試。
+- Each round Codex audits the repo against the article; the main session adjudicates every finding (partial agreement allowed) before fixing. Must-fix P0/P1 went 10 → 9 → 2 → 3 → **0 in round 5 (2026-11-04), VERDICT: PASS**; restart, watchdog install and public push were all cleared.
+- Remaining P2 items: measuring real Telegram reply latency during long jobs, programmatic thread pass-through and many-to-many subscriptions, coordinating concurrent writes to the same repo, and a behavioural test that knob changes shift event timing.
 
 ## English summary
 
@@ -92,7 +94,7 @@ bash tests/test-watchdog.sh            # watchdog v2：L0 不叫模型、上限�
 
 **Results and supervision (zero Router tokens).**
 - `bin/dispatch-watch` (every 2 min) writes worker results to `state/events.jsonl` first, then delivers them to the Router pane; un-ACKed events are resent every 10 min, up to 5 times. Terminal states are delivered before any review; `bin/review-judge` (free model, hard time budget) filters out ON_TRACK spot checks so they never wake the Router.
-- `bin/watchdog` (every 5 min): **L0** zero-token checks — stale locks, exhausted resends, Router not replying, jobs pending > 6 h, stalled deep transcripts, background agents blocked on permission prompts. **L1** only for what L0 cannot classify (new error lines in logs): a free model labels them KNOWN / NEW / NOISE. Payloads leaving the machine are field-whitelisted, PII-scrubbed and scanned with sensitive-canary rules; the scrubber is self-tested daily with fake PII. Fallback chain: beam-free → second OC Go free model → local LLM gateway → rule table → plain alert. **L2** may only propose whitelisted knobs, applied when two different model families agree and the value is within bounds. `bin/watchdog ask "<question>"` answers questions about recent watchdog activity.
+- `bin/watchdog` (every 5 min): **L0** zero-token checks — stale locks, exhausted resends, Router not replying, jobs pending > 6 h, stalled deep transcripts, background agents blocked on permission prompts. **L1** only for what L0 cannot classify (new error lines in logs): a free model labels them KNOWN / NEW / NOISE. Payloads leaving the machine are field-whitelisted, then PII-scrubbed, then the scrubbed text is scanned with sensitive-canary rules (scrub down = nothing is sent); the scrubber is self-tested daily with fake PII. Fallback chain: beam-free → second OC Go free model → local LLM gateway → rule table → plain alert. **L2** may only propose whitelisted knobs, applied when two different model families agree and the value is within bounds. `bin/watchdog ask "<question>"` answers questions about recent watchdog activity.
 
 **State.** One ledger (`state/dispatch-jobs.tsv`, 8 columns) and the event queue share a single `flock` lock that is released automatically if the holder dies. Deep jobs are cancelled only through their recorded handle, never by guessing.
 
