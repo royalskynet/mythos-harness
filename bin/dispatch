@@ -30,54 +30,59 @@ case "$tier" in
 esac
 
 if [ "$tier" = hard ]; then route=deep; else route=dcq; export DCQ_ORDER=free; fi
+mkdir -p "$MYTHOS_DIR/state"
+# 順序（P0，11-04）：持鎖寫 pending 列 → 放鎖 → 才啟動後端。拿不到鎖就什麼都不派，
+# 不再有「後端已在跑、ledger 卻沒持鎖就追加」的路徑。
+nolock() { echo "拿不到 ledger 鎖，未派出：${task}" >&2; exit 1; }
+
 if [ "$route" = deep ]; then
   epoch="$(date +%s)"
   base="$(basename "$task")"
   name="${base%.md}"
-  id="deep-${epoch}-${name}"
-  mkdir -p "$MYTHOS_DIR/state" "$MYTHOS_DIR/state/deep"
-  nohup "$ROOT_DIR/bin/dispatch-deep-run" "$id" "$task" "$cwd" >/dev/null 2>&1 &
+  # 加 $$：同一秒、同檔名（不同目錄）的兩張票由不同行程派出，id 不撞
+  id="deep-${epoch}-$$-${name}"
+  mkdir -p "$MYTHOS_DIR/state/deep"
   row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$id" "$tier" "$task" "$epoch" pending "$cwd" "$thread" deep)"
-  # 已啟動才拿不到鎖：不能直接退出把這張票弄丟，不持鎖追加並記 WARN 到 logs/dispatch.log
-  if ! ledger_lock; then
-    mkdir -p "$MYTHOS_DIR/logs"
-    printf '%s %s\n' "$(date '+%F %T')" "WARN unlocked append $id" >> "$MYTHOS_DIR/logs/dispatch.log"
-    printf '%s\n' "$row" >> "$MYTHOS_DIR/state/dispatch-jobs.tsv"
-    echo "$id"
-    exit 0
-  fi
-  printf '%s\n' "$row" >> "$MYTHOS_DIR/state/dispatch-jobs.tsv"
+  ledger_lock || nolock
+  printf '%s\n' "$row" >> "$MYTHOS_DIR/state/dispatch-jobs.tsv" || { ledger_unlock; echo "寫 ledger 失敗，未派出：${task}" >&2; exit 1; }
   ledger_unlock
+  handle="$MYTHOS_DIR/state/deep/$id.handle"
+  # 9>&-：長壽子行程不繼承 ledger 鎖的 fd（這裡已放鎖，仍防呆）
+  nohup "$ROOT_DIR/bin/dispatch-deep-run" "$id" "$task" "$cwd" >/dev/null 2>&1 9>&- &
+  # 等 runner 寫好 handle 才回：派完馬上 cancel 也有 handle 可用（最多約 5 秒）
+  n=0
+  while [ ! -s "$handle" ] && [ "$n" -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
+  [ -s "$handle" ] || echo "警告：runner 沒在 5 秒內寫好 handle：$handle" >&2
   echo "$id"
   exit 0
 fi
 
-id="$("$DCQ" add "$task" "$cwd" "$tier")" || {
+# dcq 的 id 由 dcq add 回傳：持鎖期間呼叫 dcq add 並寫列（dcq add 是秒級）
+ledger_lock || nolock
+id="$("$DCQ" add "$task" "$cwd" "$tier" 9>&-)" || {
   rc=$?
+  ledger_unlock
   echo "dcq add 失敗（exit ${rc}）：${task}" >&2
   exit "$rc"
 }
 
 id="$(printf '%s\n' "$id" | tail -1 | tr -d '[:space:]')"
 if [ -z "$id" ]; then
+  ledger_unlock
   echo "dcq add 沒有回傳 job id" >&2
   exit 1
 fi
 
-mkdir -p "$MYTHOS_DIR/state"
 # 統一 8 欄（D）：id tier task epoch status cwd thread backend。
 # 第 6 欄 cwd：dispatch-retry 靠它重派（11-03 Codex 審計：O 列少這欄，retry 一律「找不到 cwd」）
 row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$id" "$tier" "$task" "$(date +%s)" pending "$cwd" "$thread" dcq)"
-# dcq 已經接手這張票：拿不到鎖也不退出，不持鎖追加並記一行 WARN（鎖本身幾乎不會壞，壞了也不能丟登錄）
-if ! ledger_lock; then
-  mkdir -p "$MYTHOS_DIR/logs"
-  printf '%s %s\n' "$(date '+%F %T')" "WARN unlocked append $id" >> "$MYTHOS_DIR/logs/dispatch.log"
-  printf '%s\n' "$row" >> "$MYTHOS_DIR/state/dispatch-jobs.tsv"
-else
-  printf '%s\n' "$row" >> "$MYTHOS_DIR/state/dispatch-jobs.tsv"
+printf '%s\n' "$row" >> "$MYTHOS_DIR/state/dispatch-jobs.tsv" || {
   ledger_unlock
-fi
+  echo "寫 ledger 失敗：${id}（dcq 已收件，用 dcq cancel ${id} 撤回）" >&2
+  exit 1
+}
+ledger_unlock
 
-"$DCQ" start -j 4 >/dev/null 2>&1 || true
+"$DCQ" start -j 4 >/dev/null 2>&1 9>&- || true
 
 echo "$id"

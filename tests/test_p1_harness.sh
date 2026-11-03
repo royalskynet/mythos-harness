@@ -62,6 +62,18 @@ chmod +x "$DEEP_RUN_BIN"
 watch() { bash "$ROOT/bin/dispatch-watch"; }
 status_of() { awk -F'\t' -v id="$1" '$1 == id { print $5 }' "$TSV"; }
 
+# 背景持 ledger 鎖：<MYTHOS_DIR> <ready 檔>。持鎖者用 exec sleep（沒有殘留子行程，被殺鎖就放），pid 在 $HOLDER
+hold_lock() {
+  rm -f "$2"
+  MYTHOS_DIR="$1" bash -c '. "$0/bin/lib-ledger.sh"; ledger_lock || exit 3; : > "$1"; exec sleep 60' "$ROOT" "$2" &
+  HOLDER=$!
+  for _ in $(seq 1 50); do [ -f "$2" ] && return 0; sleep 0.1; done
+  return 1
+}
+release_lock() { kill -9 "$HOLDER" 2>/dev/null || true; wait "$HOLDER" 2>/dev/null || true; }
+# 試拿一次鎖（不等）：拿得到 exit 0 並立刻放掉
+try_lock() { MYTHOS_DIR="$1" LEDGER_LOCK_TRIES="${2:-1}" bash -c '. "$0/bin/lib-ledger.sh"; ledger_lock || exit 1; ledger_unlock' "$ROOT"; }
+
 # ---------- A：終態只寫事件，ACK 才改 notified ----------
 printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' 'o-a1' mid '/tmp/a1-task.md' "$(now)" pending "$TMP" t-x dcq > "$TSV"
 : > "$DCQ_HOME/done/o-a1.job"
@@ -115,7 +127,8 @@ for i in 1 2 3 4 5 6 7 8; do bash "$ROOT/bin/dispatch" "$TMP/old5-task.md" "$TMP
 wait
 [ "$(wc -l < "$TSV" | tr -d ' ')" -eq 12 ] || fail "D：並行寫 ledger 掉列：$(wc -l < "$TSV") 行（應 12）"
 [ -z "$(awk -F'\t' '$1 != "o-old5" && NF != 8 { print NR }' "$TSV")" ] || fail "D：ledger 有不是 8 欄的列：$(awk -F'\t' 'NF != 8' "$TSV")"
-[ ! -d "$MYTHOS_DIR/state/.ledger.lock" ] || fail 'D：ledger 鎖沒放掉'
+# flock 版：鎖沒放掉＝別人拿不到（舊版斷言是鎖目錄不存在）
+try_lock "$MYTHOS_DIR" || fail 'D：ledger 鎖沒放掉'
 
 # ---------- B：gate ----------
 printf '%s\n' '{"type":"user","message":{"role":"user","content":"hi"}}' > "$TRANSCRIPT"
@@ -289,7 +302,8 @@ printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' 'o-term' mid "$TMP/term-task.md" "$(no
 : > "$DCQ_HOME/done/o-term.job"
 : > "$TMUX_LOG"
 t0="$(now)"
-# 真的 judge 在每棒自帶上限（2 棒約 80s）；假 judge 不會，這裡讓 path 沒有 timeout，逼它走 perl 砍法
+# 真的 judge 在每棒自帶上限（2 棒約 80s）；假 judge 不會。這裡 PATH 沒有 timeout／gtimeout：
+# 11-04 起不再用 perl 砍，judge 直接跳過（REVIEW 照投），所以更不能拖住投遞；有 timeout 的硬砍見 21
 mkdir -p "$TMP/nobin"; printf '#!/bin/sh\nexec %s "$@"\n' "$(command -v node)" > "$TMP/nobin/node"; chmod +x "$TMP/nobin/node"
 FAKE_BUSY=0 REVIEW_JUDGE="$TMP/judge-slow" JUDGE_BUDGET=3 PATH="$TMP/nobin:/usr/bin:/bin:/usr/sbin:/sbin" bash "$ROOT/bin/dispatch-watch" || fail '6：judge 卡死讓 watch 非零退出'
 t1="$(now)"
@@ -304,58 +318,53 @@ printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' 'o-cxl2' mid "$TMP/cxl2-task.md" "$(no
 FAKE_BUSY=0 watch
 [ "$(grep '^o-hist5' "$TSV")" = "$OLD5" ] || fail "12：watch 改寫了舊列：$(grep '^o-hist5' "$TSV")"
 [ "$(grep -c '^o-hist5' "$TSV")" = 1 ] || fail '12：watch 把舊列寫成多行'
-grep -q 'event_id=o-cxl2-PASS' "$TMUX_LOG" || true
+grep -q 'event_id=o-cxl2-PASS' "$TMUX_LOG" || fail "12：o-cxl2 的終態沒投遞（取消前提）：$(cat "$TMUX_LOG")"
 bash "$ROOT/bin/dispatch-cancel" o-cxl2 || fail '12：取消 o-cxl2 非零'
 [ "$(grep '^o-hist5' "$TSV")" = "$OLD5" ] || fail "12：cancel 改寫了舊列：$(grep '^o-hist5' "$TSV")"
 
 # ---------- 9. cancel 寫 ledger 失敗要非零，訊息分開 ----------
 CB="$TMP/cxl-bad"; mkdir -p "$CB/mythos/state"
 printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' 'o-bad' mid "$TMP/bad.md" 1 pending "$TMP" - dcq > "$CB/mythos/state/dispatch-jobs.tsv"
-LDIR="$CB/mythos/state/.ledger.lock"; mkdir -p "$LDIR"; printf '%s\n' "$$" > "$LDIR/pid"   # 活著的持有者 → 永遠等不到
+hold_lock "$CB/mythos" "$CB/ready" || fail '9：測試持鎖者沒拿到鎖'   # 活著的持有者 → 永遠等不到
 set +e
-out="$(MYTHOS_DIR="$CB/mythos" DCQ_BIN="$TMUX_LOG-dcq" bash "$ROOT/bin/dispatch-cancel" o-bad 2>&1)"; rc=$?
+out="$(MYTHOS_DIR="$CB/mythos" DCQ_BIN="$TMUX_LOG-dcq" LEDGER_LOCK_TRIES=2 bash "$ROOT/bin/dispatch-cancel" o-bad 2>&1)"; rc=$?
 set -e
 printf '#!/bin/sh\nexit 0\n' > "$TMUX_LOG-dcq"; chmod +x "$TMUX_LOG-dcq"
 set +e
-out="$(MYTHOS_DIR="$CB/mythos" DCQ_BIN="$TMUX_LOG-dcq" bash "$ROOT/bin/dispatch-cancel" o-bad 2>&1)"; rc=$?
+out="$(MYTHOS_DIR="$CB/mythos" DCQ_BIN="$TMUX_LOG-dcq" LEDGER_LOCK_TRIES=2 bash "$ROOT/bin/dispatch-cancel" o-bad 2>&1)"; rc=$?
 set -e
+release_lock
 [ "$rc" != 0 ] || fail '9：ledger 沒寫成功卻 exit 0'
 case "$out" in *後端已取消*ledger\ 未更新*) ;; *) fail "9：訊息沒分「後端已取消／ledger 未更新」：$out" ;; esac
 [ "$(awk -F'\t' '$1=="o-bad"{print $5}' "$CB/mythos/state/dispatch-jobs.tsv")" = pending ] || fail '9：ledger 竟然寫成功了'
 
-# ---------- 8. dispatch 拿不到鎖：worker 已啟動也要登錄＋WARN ----------
+# ---------- 8. dispatch 拿不到鎖：不准先啟動 worker（11-04 裁決：持鎖寫列 → 放鎖 → 才啟動；舊版的無鎖追加已刪） ----------
+# 原意「worker 在跑就一定有 ledger 列」改由順序保證：拿不到鎖＝沒有列、也沒有 worker
 DB="$TMP/disp-bad"; mkdir -p "$DB/mythos/state" "$DB/mythos/state/deep"
-printf '%s\n' "$$" > /dev/null
-LDIR="$DB/mythos/state/.ledger.lock"; mkdir -p "$LDIR"; printf '%s\n' "$$" > "$LDIR/pid"
+hold_lock "$DB/mythos" "$DB/ready" || fail '8：測試持鎖者沒拿到鎖'
 set +e
-idbad="$(MYTHOS_DIR="$DB/mythos" DISPATCH_LOCK_WAIT_REG=1 bash "$ROOT/bin/dispatch" "$TMP/a1-task.md" "$TMP" hard 2>/dev/null)"; rc=$?
+idbad="$(MYTHOS_DIR="$DB/mythos" LEDGER_LOCK_TRIES=2 bash "$ROOT/bin/dispatch" "$TMP/a1-task.md" "$TMP" hard 2>/dev/null)"; rc=$?
 set -e
-[ "$rc" = 0 ] || fail "8：拿不到鎖就退出（rc=${rc}），worker 已在跑卻沒登錄"
-[ -n "$idbad" ] && grep -q "^$idbad	" "$DB/mythos/state/dispatch-jobs.tsv" || fail '8：worker 已啟動但 ledger 沒有這一列'
-grep -q "WARN unlocked append $idbad" "$DB/mythos/logs/dispatch.log" || fail '8：沒有 logs/dispatch.log 的 WARN unlocked append'
+release_lock
+[ "$rc" != 0 ] || fail "8：拿不到鎖卻 exit 0（id=${idbad}）"
+[ ! -s "$DB/mythos/state/dispatch-jobs.tsv" ] || fail "8：拿不到鎖卻寫了 ledger：$(cat "$DB/mythos/state/dispatch-jobs.tsv")"
+[ -z "$(ls "$DB/mythos/state/deep")" ] || fail "8：拿不到鎖卻啟動了 deep runner：$(ls "$DB/mythos/state/deep")"
+[ ! -e "$DB/mythos/logs/dispatch.log" ] || ! grep -q 'unlocked append' "$DB/mythos/logs/dispatch.log" || fail '8：還有無鎖追加'
 
-# ---------- 7. 鎖接手：死不刪別人的新鎖、缺 pid 的超時才接手、只解自己的鎖 ----------
-LB="$TMP/lock"; mkdir -p "$LB"
-(
-  . "$ROOT/bin/lib-ledger.sh"
-  mkdir -p "$LEDGER_LOCK"; printf '%s\n' 999999 > "$LEDGER_LOCK/pid"   # 死 pid
-  ledger_lock || exit 3
-  # 另一個等待者剛建立的「新鎖」不能被後來的接手者誤刪
-  mkdir "$LEDGER_LOCK.stale.999998" 2>/dev/null || true
-  ledger_unlock
-) 7>"$LB/.lg" 2>&1
-mkdir -p "$LB"
-LB_LOCK="$LB/state/.ledger.lock"; mkdir -p "$LB_LOCK"; printf '%s\n' 999999 > "$LB_LOCK/pid"
-MYTHOS_DIR="$LB" bash -c '. "$0/bin/lib-ledger.sh"; ledger_lock || exit 3; [ "$(cat "$LEDGER_LOCK/pid")" = "$$" ] || exit 4; ledger_unlock; if [ -d "$LEDGER_LOCK" ]; then exit 5; fi' "$ROOT" || fail '7：死 pid 的鎖接不了手或解不掉'
-# 缺 pid 檔：剛建（<10 秒）別人的鎖不接手；mtime 超過 10 秒才接手
-mkdir -p "$LB_LOCK"
-MYTHOS_DIR="$LB" bash -c '. "$0/bin/lib-ledger.sh"; ledger_lock && exit 9' "$ROOT" && fail '7：搶了別人的活鎖（沒有 pid 但還新的鎖）'
-rm -rf "$LB_LOCK"; mkdir -p "$LB_LOCK"; touch -t "$(date -v-30S '+%Y%m%d%H%M')" "$LB_LOCK"
-MYTHOS_DIR="$LB" bash -c '. "$0/bin/lib-ledger.sh"; ledger_lock || exit 3; ledger_unlock' "$ROOT" || fail '7：缺 pid 且超過 10 秒的鎖沒接手'
-# unlock 只刪自己的：持有者換人就不刪
-mkdir -p "$LB_LOCK"; printf '%s\n' 999999 > "$LB_LOCK/pid"
-MYTHOS_DIR="$LB" bash -c '. "$0/bin/lib-ledger.sh"; ledger_unlock; [ -d "$LEDGER_LOCK" ] || exit 6' "$ROOT" || fail '7：unlock 刪了別人的鎖'
-rm -rf "$LB_LOCK"
+# ---------- 7. 鎖接手（flock 版）：持有者死了可接手、不放別人的鎖、只解自己的鎖 ----------
+# 11-04：mkdir＋pid＋reap 換成 flock；「死行程的鎖可接手」「不刪別人的鎖」兩個意圖照測
+LB="$TMP/lock"; mkdir -p "$LB/state"
+hold_lock "$LB" "$LB/ready" || fail '7：持鎖者沒拿到鎖'
+try_lock "$LB" && fail '7：別人持鎖時還拿得到（不互斥）'
+# 沒持鎖的行程呼叫 ledger_unlock 不能放掉別人的鎖
+MYTHOS_DIR="$LB" bash -c '. "$0/bin/lib-ledger.sh"; ledger_unlock' "$ROOT" || fail '7：沒持鎖時 unlock 非零'
+try_lock "$LB" && fail '7：unlock 放掉了別人的鎖'
+# 持有者被 kill -9（沒機會清理）→ 可接手
+release_lock
+try_lock "$LB" 10 || fail '7：死行程的鎖接不了手'
+# 解自己的鎖之後別人拿得到
+MYTHOS_DIR="$LB" bash -c '. "$0/bin/lib-ledger.sh"; ledger_lock || exit 3; ledger_unlock' "$ROOT" || fail '7：拿不到空鎖'
+try_lock "$LB" || fail '7：unlock 沒把自己的鎖放掉'
 
 # ---------- 10. retry 沿用後端（ledger 第 8 欄） ----------
 RB="$TMP/retry-b"; mkdir -p "$RB/mythos/state" "$RB/dcq"
@@ -375,5 +384,224 @@ internal="5""1mini|Car""rie|Coi""nW|L""CT|Be""ss|backlog\\.sql""ite"
 if git -C "$ROOT" grep -n -E "$internal" -- bin tests router launchd README.md; then
   fail '14：公開內容還有個人／內部名稱'
 fi
+
+
+# ======================================================================
+# 11-04 Codex 三審：裁決後 7 項，每項一條「沒修會 fail」的反例（18 起）
+# ======================================================================
+
+# 開一個乾淨的 MYTHOS_DIR 組（跟上面共用的 ledger／events 隔開）：設定 $F 與相關環境變數
+fresh() {
+  F="$TMP/$1"
+  mkdir -p "$F/mythos/state/deep" "$F/dcq"/{done,failed,running,pending} "$F/projects" "$F/router"
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":"hi"}}' > "$F/router/r.jsonl"
+}
+# 在 $F 裡登錄一張「該抽查了」的 deep 票（開跑 31 分鐘、transcript 剛更新、沒 rc）
+due_review() { # id cwd
+  local slug
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" hard "$F/$1.md" "$(( $(now) - 1860 ))" pending "$2" - deep >> "$F/mythos/state/dispatch-jobs.tsv"
+  printf 'task %s\n' "$1" > "$F/$1.md"
+  slug="$(printf '%s' "$2" | sed 's/[\/.]/-/g')"
+  mkdir -p "$F/projects/$slug"
+  printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"FakeTool","input":{"file_path":"/tmp/x"}}]}}\n' > "$F/projects/$slug/p.jsonl"
+}
+fwatch() { MYTHOS_DIR="$F/mythos" DCQ_HOME="$F/dcq" CLAUDE_PROJECTS_DIR="$F/projects" MYTHOS_TRANSCRIPT_DIR="$F/router" FAKE_BUSY=0 bash "$ROOT/bin/dispatch-watch"; }
+
+# ---------- 18. P0 鎖：flock 互斥、kill -9 的持有者 2 秒內可接手 ----------
+L18="$TMP/l18"; mkdir -p "$L18/state"; printf '0\n' > "$L18/count"
+bump20() {
+  MYTHOS_DIR="$L18" bash -c '. "$0/bin/lib-ledger.sh"
+    for i in $(seq 1 20); do
+      ledger_lock || exit 3
+      n="$(cat "$1")"; sleep 0.05; printf "%s\n" "$((n + 1))" > "$1"
+      ledger_unlock
+    done' "$ROOT" "$L18/count"
+}
+bump20 & b1=$!
+bump20 & b2=$!
+wait "$b1" || fail '18：計數行程 1 拿不到鎖'
+wait "$b2" || fail '18：計數行程 2 拿不到鎖'
+[ "$(cat "$L18/count")" = 40 ] || fail "18：兩行程各 20 次讀→寫+1，結果 $(cat "$L18/count")（應 40，鎖不互斥）"
+hold_lock "$L18" "$L18/ready" || fail '18：持鎖者沒拿到鎖'
+try_lock "$L18" && fail '18：A 持鎖時 B 還拿得到'
+kill -9 "$HOLDER"; wait "$HOLDER" 2>/dev/null || true
+t0="$(now)"
+try_lock "$L18" 10 || fail '18：持有者 kill -9 後拿不到鎖'
+[ $(( $(now) - t0 )) -le 2 ] || fail "18：kill -9 後過了 $(( $(now) - t0 )) 秒才拿到鎖"
+# MYTHOS_DIR 沒設也能 source（set -u 不中斷），鎖檔由 lib 位置推導
+env -u MYTHOS_DIR LEDGER_LOCK_FILE="$L18/state/.alt.flock" bash -c 'set -u; . "$0/bin/lib-ledger.sh"; ledger_lock && ledger_unlock' "$ROOT" \
+  || fail '18：MYTHOS_DIR 未設時 lib-ledger 中斷'
+[ "$(env -u MYTHOS_DIR -u LEDGER_LOCK_FILE bash -c 'set -u; . "$0/bin/lib-ledger.sh"; printf %s "$LEDGER_LOCK_FILE"' "$ROOT")" = "$ROOT/state/.ledger.flock" ] \
+  || fail '18：MYTHOS_DIR 未設時鎖檔沒由腳本目錄推導'
+
+# ---------- 19. P0 dispatch 拿不到鎖：不呼叫 dcq、不寫列、exit 非 0；放鎖後正常 ----------
+fresh d19
+printf '%s\n' '#!/bin/sh' "printf '%s\\n' \"\$*\" >> \"$F/dcq.log\"" 'case "$1" in add) echo "job-19" ;; esac' 'exit 0' > "$F/dcq/dcq"
+chmod +x "$F/dcq/dcq"; : > "$F/dcq.log"
+printf 'd19\n' > "$F/t.md"
+hold_lock "$F/mythos" "$F/ready" || fail '19：持鎖者沒拿到鎖'
+set +e
+out="$(MYTHOS_DIR="$F/mythos" DCQ_BIN="$F/dcq/dcq" LEDGER_LOCK_TRIES=2 bash "$ROOT/bin/dispatch" "$F/t.md" "$TMP" mid 2>&1)"; rc=$?
+set -e
+[ "$rc" != 0 ] || fail '19：拿不到鎖卻 exit 0'
+[ ! -s "$F/dcq.log" ] || fail "19：拿不到鎖還呼叫了 dcq：$(cat "$F/dcq.log")"
+[ ! -s "$F/mythos/state/dispatch-jobs.tsv" ] || fail '19：拿不到鎖還寫了 ledger'
+case "$out" in *拿不到\ ledger\ 鎖，未派出*) ;; *) fail "19：沒印「拿不到 ledger 鎖，未派出」：$out" ;; esac
+release_lock
+out="$(MYTHOS_DIR="$F/mythos" DCQ_BIN="$F/dcq/dcq" bash "$ROOT/bin/dispatch" "$F/t.md" "$TMP" mid)" || fail '19：放鎖後 dispatch 失敗'
+[ "$out" = job-19 ] || fail "19：放鎖後 id 不對：$out"
+awk -F'\t' '$1=="job-19" && $5=="pending" && $8=="dcq" { f=1 } END { exit !f }' "$F/mythos/state/dispatch-jobs.tsv" || fail '19：放鎖後 ledger 沒有列'
+grep -q '^add ' "$F/dcq.log" || fail '19：放鎖後沒呼叫 dcq add'
+
+# ---------- 20. P1 deep id：同一秒、同檔名、不同目錄、不同行程 → id 不同 ----------
+fresh d20
+mkdir -p "$F/fakebin" "$F/a" "$F/b"
+printf '%s\n' '#!/bin/sh' 'if [ "$1" = "+%s" ]; then echo 1700000000; else exec /bin/date "$@"; fi' > "$F/fakebin/date"
+chmod +x "$F/fakebin/date"
+printf 'a\n' > "$F/a/same.md"; printf 'b\n' > "$F/b/same.md"
+PATH="$F/fakebin:$PATH" MYTHOS_DIR="$F/mythos" bash "$ROOT/bin/dispatch" "$F/a/same.md" "$TMP" hard > "$F/ida" 2>/dev/null &
+pa=$!
+PATH="$F/fakebin:$PATH" MYTHOS_DIR="$F/mythos" bash "$ROOT/bin/dispatch" "$F/b/same.md" "$TMP" hard > "$F/idb" 2>/dev/null &
+pb=$!
+wait "$pa" || fail '20：第一張 deep 派工失敗'
+wait "$pb" || fail '20：第二張 deep 派工失敗'
+ida="$(cat "$F/ida")"; idb="$(cat "$F/idb")"
+case "$ida" in deep-1700000000-*-same) ;; *) fail "20：id 格式不是 deep-<epoch>-<pid>-<name>：$ida" ;; esac
+[ -n "$ida" ] && [ "$ida" != "$idb" ] || fail "20：同秒同名兩張 deep 票 id 撞了：$ida／$idb"
+[ "$(cut -f1 "$F/mythos/state/dispatch-jobs.tsv" | sort -u | wc -l | tr -d ' ')" = 2 ] || fail '20：ledger 兩張票 id 不唯一'
+
+# ---------- 21. P1 judge 逾時：JUDGE_BUDGET 可覆寫且真的砍；沒 timeout 就跳過 judge、REVIEW 照投 ----------
+command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1 || fail '21：測試機沒有 timeout／gtimeout（brew install coreutils）'
+fresh d21
+printf '%s\n' '#!/bin/sh' "printf 'start\\n' >> \"$F/judge.marker\"" 'sleep 10' 'echo ON_TRACK' > "$F/judge"
+chmod +x "$F/judge"
+due_review deep-21-a "$F/cwd-a"
+: > "$TMUX_LOG"
+t0="$(now)"
+REVIEW_JUDGE="$F/judge" JUDGE_BUDGET=1 fwatch || fail '21a：watch 非零退出'
+t1="$(now)"
+[ -s "$F/judge.marker" ] || fail '21a：judge 沒啟動（JUDGE_BUDGET 被寫死或預算算錯）'
+[ $(( t1 - t0 )) -le 5 ] || fail "21a：JUDGE_BUDGET=1 但 watch 跑了 $(( t1 - t0 )) 秒（judge 沒被砍）"
+grep -q 'event_id=deep-21-a-REVIEW' "$TMUX_LOG" || fail '21a：judge 逾時後 REVIEW 沒照投'
+# (b) PATH 只留沒有 timeout／gtimeout 的目錄：其餘指令 symlink 進去
+fresh d21b
+mkdir -p "$F/onlybin"
+for f in /usr/bin/* /bin/* "$(command -v node)" "$(command -v jq)"; do
+  b="$(basename "$f")"
+  case "$b" in timeout|gtimeout) continue ;; esac
+  [ -e "$F/onlybin/$b" ] || ln -s "$f" "$F/onlybin/$b"
+done
+[ ! -e "$F/onlybin/timeout" ] && [ ! -e "$F/onlybin/gtimeout" ] || fail '21b：測試前提錯了，PATH 裡還有 timeout'
+printf '%s\n' '#!/bin/sh' "printf 'start\\n' >> \"$F/judge.marker\"" 'echo ON_TRACK' > "$F/judge"
+chmod +x "$F/judge"
+due_review deep-21-b "$F/cwd-b"
+: > "$TMUX_LOG"
+PATH="$F/onlybin" REVIEW_JUDGE="$F/judge" fwatch || fail '21b：沒 timeout 時 watch 非零退出'
+grep -q 'event_id=deep-21-b-REVIEW' "$TMUX_LOG" || fail "21b：沒 timeout 時 REVIEW 被吞了：$(cat "$TMUX_LOG")"
+[ ! -e "$F/judge.marker" ] || fail '21b：沒 timeout 還是跑了 judge（沒有硬砍保護）'
+grep -q 'WARN no timeout, judge skipped' "$F/mythos/logs/dispatch-watch.log" || fail '21b：log 沒記 WARN no timeout, judge skipped'
+
+# ---------- 22. P1 終態先投遞、抽查後跑：同輪 O 票完成＋慢 judge 的 deep 票 ----------
+fresh d22
+SEQ="$F/seq.log"; : > "$SEQ"
+cat > "$F/tmux" <<'T22'
+#!/bin/sh
+case " $* " in
+  *" send-keys "*" -l "*) printf 'SEND %s\n' "$*" >> "$SEQ" ;;
+  *" capture-pane "*) printf 'idle screen\n' ;;
+esac
+exit 0
+T22
+chmod +x "$F/tmux"
+printf '%s\n' '#!/bin/sh' "printf 'JUDGE-START\\n' >> \"$SEQ\"" 'sleep 5' 'echo OFF_TRACK' > "$F/judge"
+chmod +x "$F/judge"
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' 'o-ord' mid "$F/ord.md" "$(now)" pending "$TMP" t-ord dcq >> "$F/mythos/state/dispatch-jobs.tsv"
+: > "$F/dcq/done/o-ord.job"
+due_review deep-22-slow "$F/cwd-22"
+SEQ="$SEQ" TMUX_BIN="$F/tmux" REVIEW_JUDGE="$F/judge" JUDGE_BUDGET=2 fwatch || fail '22：watch 非零退出'
+send_at="$(grep -n 'event_id=o-ord-PASS' "$SEQ" | head -1 | cut -d: -f1)"
+judge_at="$(grep -n 'JUDGE-START' "$SEQ" | head -1 | cut -d: -f1)"
+[ -n "$send_at" ] || fail "22：終態沒投遞：$(cat "$SEQ")"
+[ -n "$judge_at" ] || fail "22：judge 沒啟動：$(cat "$SEQ")"
+[ "$send_at" -lt "$judge_at" ] || fail "22：judge 先於終態投遞（judge 第 ${judge_at} 行、終態第 ${send_at} 行）：$(cat "$SEQ")"
+
+# ---------- 23. P1 deep 取消只用 handle：內容相同的兩張票，取消 A 不碰 B；A 無 handle 就拒絕 ----------
+fresh d23
+mkdir -p "$F/deep-task"
+printf '%s\n' '#!/bin/sh' "printf '%s\\n' \"\$*\" >> \"$F/tmux.log\"" 'exit 0' > "$F/tmux"
+chmod +x "$F/tmux"; : > "$F/tmux.log"
+printf 'same body\n' > "$F/a.md"; printf 'same body\n' > "$F/b.md"; printf 'same body\n' > "$F/a2.md"
+sleep 60 & pA=$!
+sleep 60 & pB=$!
+J23="$F/mythos/state/dispatch-jobs.tsv"
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' deep-1-1-a hard "$F/a.md" 1 pending "$TMP" - deep >> "$J23"
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' deep-2-2-b hard "$F/b.md" 2 pending "$TMP" - deep >> "$J23"
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' deep-3-3-a2 hard "$F/a2.md" 3 pending "$TMP" - deep >> "$J23"
+printf 'pid=%s\nsession=deep-111-1\n' "$pA" > "$F/mythos/state/deep/deep-1-1-a.handle"
+printf 'pid=%s\nsession=deep-222-2\n' "$pB" > "$F/mythos/state/deep/deep-2-2-b.handle"
+# 舊版的「猜」：.deep 下內容相同、B 最新 → 會挑中 B
+cp "$F/a.md" "$F/deep-task/111-1-task.md"; touch -A -0100 "$F/deep-task/111-1-task.md"
+cp "$F/b.md" "$F/deep-task/222-2-task.md"
+c23() { MYTHOS_DIR="$F/mythos" TMUX_BIN="$F/tmux" DEEP_TASK_DIR="$F/deep-task" bash "$ROOT/bin/dispatch-cancel" "$1"; }
+c23 deep-1-1-a 2>/dev/null || fail '23：有 handle 的 A 取消失敗'
+grep -q 'kill-session -t =deep-111-1$' "$F/tmux.log" || fail "23：沒照 handle 殺 A 的 session：$(cat "$F/tmux.log")"
+grep -q 'deep-222-2' "$F/tmux.log" && fail "23：取消 A 卻碰了 B 的 session：$(cat "$F/tmux.log")"
+set +e; wait "$pA"; rcA=$?; set -e
+[ "$rcA" != 0 ] || fail '23：A 的 runner 沒被殺'
+kill -0 "$pB" 2>/dev/null || fail '23：取消 A 殺了 B 的 runner'
+[ "$(awk -F'\t' '$1=="deep-1-1-a"{print $5}' "$J23")" = cancelled ] || fail '23：A 沒標 cancelled'
+: > "$F/tmux.log"
+set +e; out="$(c23 deep-3-3-a2 2>&1)"; rc=$?; set -e
+[ "$rc" = 1 ] || fail "23：沒 handle 卻沒 exit 1（rc=${rc}）"
+case "$out" in *沒有\ handle，拒絕猜*) ;; *) fail "23：沒 handle 的訊息不對：$out" ;; esac
+[ ! -s "$F/tmux.log" ] || fail "23：沒 handle 還去動 tmux：$(cat "$F/tmux.log")"
+kill -0 "$pB" 2>/dev/null || fail '23：沒 handle 的取消殺了 B'
+[ "$(awk -F'\t' '$1=="deep-3-3-a2"{print $5}' "$J23")" = pending ] || fail '23：沒 handle 卻改了 ledger'
+[ "$(awk -F'\t' '$1=="deep-2-2-b"{print $5}' "$J23")" = pending ] || fail '23：B 的 ledger 被改了'
+kill "$pB" 2>/dev/null || true; wait "$pB" 2>/dev/null || true
+# runner 自己會寫 handle（派完就有，cancel 才有得用）
+fresh d23r
+printf '%s\n' '#!/bin/sh' 'exec sleep 30' > "$F/deep-run"; chmod +x "$F/deep-run"
+printf 'r\n' > "$F/r.md"
+rid="$(MYTHOS_DIR="$F/mythos" DEEP_RUN_BIN="$F/deep-run" bash "$ROOT/bin/dispatch" "$F/r.md" "$TMP" hard)"
+grep -q '^pid=[0-9][0-9]*$' "$F/mythos/state/deep/$rid.handle" || fail "23：runner 沒寫 handle：$(cat "$F/mythos/state/deep/$rid.handle" 2>&1)"
+MYTHOS_DIR="$F/mythos" TMUX_BIN="$F/tmux" bash "$ROOT/bin/dispatch-cancel" "$rid" 2>/dev/null || fail '23：剛派出的 deep 票取消失敗'
+[ "$(cat "$F/mythos/state/deep/$rid.rc")" = 130 ] || fail '23：取消後 rc 不是 130'
+rpid="$(awk -F= '$1=="pid"{print $2}' "$F/mythos/state/deep/$rid.handle")"
+sleep 0.3; kill -0 "$rpid" 2>/dev/null && fail '23：取消後 runner 還活著'
+
+# ---------- 24. P1 events 不互蓋：兩行程各 20 筆並行 upsert（經 ledger_events 持鎖）→ 40 筆都在 ----------
+fresh d24
+E24="$F/mythos/state/events.jsonl"
+up20() {
+  MYTHOS_DIR="$F/mythos" bash -c '. "$0/bin/lib-ledger.sh"
+    for i in $(seq 1 20); do
+      ledger_events upsert "$1" "{\"event_id\":\"$2-$i\",\"job_id\":\"$2\",\"tries\":0,\"acked_at\":null}" >/dev/null || exit 3
+    done' "$ROOT" "$E24" "$1"
+}
+up20 w1 & u1=$!
+up20 w2 & u2=$!
+wait "$u1" || fail '24：寫者 1 失敗'
+wait "$u2" || fail '24：寫者 2 失敗'
+[ "$(jq -s 'length' "$E24")" = 40 ] || fail "24：並行寫 events 掉了：$(jq -s 'length' "$E24") 筆（應 40）"
+[ "$(jq -r .event_id "$E24" | sort -u | wc -l | tr -d ' ')" = 40 ] || fail '24：events 有重複或缺漏'
+# 原子替換：寫入中途讀者不能看到變短的檔（截斷後重寫的半份）
+big="$(printf '%04000d' 0)"
+( for i in $(seq 1 40); do node "$ROOT/bin/lib-events.mjs" upsert "$E24" "{\"event_id\":\"big-$i\",\"job_id\":\"big\",\"pad\":\"$big\"}" >/dev/null; done; : > "$F/w.done" ) &
+wbig=$!
+prev=0; shrunk=0
+while [ ! -f "$F/w.done" ]; do
+  n="$(wc -l < "$E24" | tr -d ' ')"
+  [ "$n" -lt "$prev" ] && shrunk=1
+  prev="$n"
+done
+wait "$wbig" || fail '24：大筆寫者失敗'
+[ "$shrunk" = 0 ] || fail '24：讀者看到 events.jsonl 變短（寫入不是原子替換）'
+[ "$(jq -s 'length' "$E24")" = 80 ] || fail "24：大筆寫入後筆數不對：$(jq -s 'length' "$E24")"
+# 上面的讀者靠撞時機；這條是確定性的：原子替換＝rename 換上新檔（inode 變），原地截斷重寫 inode 不變
+ino0="$(stat -f %i "$E24")"
+node "$ROOT/bin/lib-events.mjs" set "$E24" big-1 '{"acked_at":1}' >/dev/null || fail '24：set 失敗'
+[ "$(stat -f %i "$E24")" != "$ino0" ] || fail '24：events.jsonl 是原地改寫（inode 沒變），不是暫存檔＋rename'
+ls "$F/mythos/state" | grep -q '\.tmp\.' && fail '24：留下 events 暫存檔'
 
 echo PASS

@@ -24,9 +24,11 @@ EVENTS_FILE="$MYTHOS_DIR/state/events.jsonl"
 TSV="$MYTHOS_DIR/state/dispatch-jobs.tsv"
 RESEND_SEC=600
 MAX_TRIES=5
-JUDGE_BUDGET=90
+# 抽查（judge）總預算秒數，從抽查階段開始算；終態投遞在抽查之前做完，不受它影響
+JUDGE_BUDGET="${JUDGE_BUDGET:-90}"
 NODE_BIN="${NODE_BIN:-node}"
 LIB="$(cd "$(dirname "$0")" && pwd)/lib-events.mjs"
+WATCH_LOG="$MYTHOS_DIR/logs/dispatch-watch.log"
 
 [ -f "$TSV" ] || exit 0
 mkdir -p "$MYTHOS_DIR/state" 2>/dev/null || exit 0
@@ -41,11 +43,13 @@ printf '%s\n' "$$" > "$LOCK/pid"
 
 OUT="$(mktemp "${TMPDIR:-/tmp}/dispatch-watch-tsv.XXXXXX")" || { rm -rf "$LOCK"; exit 0; }
 TODOS="$(mktemp "${TMPDIR:-/tmp}/dispatch-watch-todos.XXXXXX")" || { rm -f "$OUT"; rm -rf "$LOCK"; exit 0; }
-cleanup() { rm -f "$OUT" "$TODOS"; rm -rf "$LOCK"; }
+REVIEWS="$(mktemp "${TMPDIR:-/tmp}/dispatch-watch-reviews.XXXXXX")" || { rm -f "$OUT" "$TODOS"; rm -rf "$LOCK"; exit 0; }
+cleanup() { rm -f "$OUT" "$TODOS" "$REVIEWS"; rm -rf "$LOCK"; }
 trap cleanup EXIT
 
 now="$(date +%s)"
-start=$now
+late=0
+log() { mkdir -p "$(dirname "$WATCH_LOG")" 2>/dev/null; printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$WATCH_LOG"; }
 
 mtime_of() {
   stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0
@@ -70,7 +74,8 @@ add_event() { # id status task extra guide
     --arg extra "$extra" --arg guide "$guide" --argjson now "$now" \
     '{event_id:$eid, job_id:$id, task:$tk, status:$st, summary:$sum, thread:$th, extra:$extra, guide:$guide,
       created:$now, delivered_at:null, acked_at:null, tries:0}')"
-  [ "$("$NODE_BIN" "$LIB" upsert "$EVENTS_FILE" "$payload")" = new ]
+  # events 寫入持 ledger 鎖（P1，11-04：多寫者互蓋）
+  [ "$(ledger_events upsert "$EVENTS_FILE" "$payload")" = new ]
 }
 
 todo() { printf '%s\t%s\n' "$1" "$2" >> "$TODOS"; }
@@ -112,7 +117,6 @@ while IFS=$'\t' read -r id tier task epoch status cwd thread backend; do
       latest_jsonl="$(ls -t "$dir"/*.jsonl 2>/dev/null | head -1)"
     fi
 
-    late=0
     max_mtime=0
     if [ -n "$latest_jsonl" ] && [ -f "$latest_jsonl" ]; then
       m="$(mtime_of "$latest_jsonl")"; [ -n "$m" ] && max_mtime="$m"
@@ -153,8 +157,7 @@ while IFS=$'\t' read -r id tier task epoch status cwd thread backend; do
       fi
       age_review=$((now - baseline))
       if [ "$age_review" -ge $((review_min * 60)) ]; then
-        # 終態事件先送，抽查放同一輪最後，總預算 JUDGE_BUDGET 秒（A：抽查不得拖住回報）
-        [ $(( $(date +%s) - start )) -lt "$JUDGE_BUDGET" ] || continue
+        # 這裡只收集候選；judge 放到終態事件投遞完之後才跑（P1，11-04：抽查不得先於終態投遞）
         # progress
         progress=""
         if [ -n "$latest_jsonl" ] && [ -f "$latest_jsonl" ]; then
@@ -167,40 +170,8 @@ while IFS=$'\t' read -r id tier task epoch status cwd thread backend; do
         fi
         if [ -z "$progress" ]; then progress="讀不到進度"; fi
         progress="${progress:0:500}"
-
-        verdict=""
-        # 剩餘預算硬砍：judge 自己有 80s 上限，這裡再包一層，投遞不被抽查拖過 90 秒。
-        # macOS 沒 timeout，用 perl alarm（子行程另開 process group，逾時整組砍）
-        budget=$(( JUDGE_BUDGET - ( $(date +%s) - start ) ))
-        if [ "$budget" -gt 0 ] && [ -x "$REVIEW_JUDGE" ]; then
-          if command -v timeout >/dev/null 2>&1; then
-            to=(timeout "$budget")
-          else
-            to=(perl -e 'my $p = fork; die "fork" unless defined $p;
-              if (!$p) { setpgrp(0, 0); exec @ARGV or exit 127 }
-              $SIG{ALRM} = sub { kill "TERM", -$p; sleep 1; kill "KILL", -$p; exit 124 };
-              alarm shift; waitpid($p, 0); exit($? & 127 ? 128 + ($? & 127) : $? >> 8)' "$budget")
-          fi
-          # 不接 pipe：judge 非零退出要算失敗（照舊喚醒），不能被 head 的 0 蓋掉
-          if verdict="$("${to[@]}" "$REVIEW_JUDGE" "$task" "$progress" 2>/dev/null)"; then
-            verdict="$(printf '%s\n' "$verdict" | head -1)"
-          else
-            verdict=""
-          fi
-        fi
-        case "$verdict" in
-          ON_TRACK*)
-            # 沒跑歪就不吵 Mythos；間隔立刻往前，下一輪才重判（省免費模型呼叫）
-            printf '%s\n' "$now" > "$last_review_file"
-            continue
-            ;;
-        esac
-
-        extra="$progress"
-        if [ -n "$verdict" ]; then extra="${verdict}｜${progress}"; fi
-        guide="對照工單目標判斷有無跑歪；歪了就 bin/dispatch-cancel $id 再 bin/dispatch-retry $id \"<導正指示>\"，沒歪不用回覆"
-        add_event "$id" REVIEW "$task" "$extra" "$guide" >/dev/null || late=1
-        todo "$last_review_file" "$now"
+        progress="$(printf '%s' "$progress" | tr '\t\n' '  ')"
+        printf '%s\t%s\t%s\t%s\n' "$id" "$task" "$last_review_file" "$progress" >> "$REVIEWS"
       fi
     fi
     continue
@@ -233,7 +204,7 @@ newest="$(ls -t "$ROUTER_DIR"/*.jsonl 2>/dev/null | head -1)"
 # 用 here-string 不用 pipe：while 在 pipeline 裡是子 shell，後面的等待會吊住整支腳本
 while IFS=$'\t' read -r eid at; do
   [ -n "$eid" ] || continue
-  "$NODE_BIN" "$LIB" set "$EVENTS_FILE" "$eid" "{\"acked_at\":$at}" >/dev/null
+  ledger_events set "$EVENTS_FILE" "$eid" "{\"acked_at\":$at}" >/dev/null
 done <<< "$("$NODE_BIN" "$LIB" scan "$EVENTS_FILE" "$newest" 2>/dev/null)"
 
 # 3) 待送：未 ACK 且（沒送過 or 送過超過 10 分鐘），tries 未滿上限
@@ -247,32 +218,77 @@ pending_events() {
     | select(.delivered_at == null or ($now - .delivered_at) >= $resend)
     | [.event_id, .job_id, .status, .summary, .extra, .guide] | @tsv' "$EVENTS_FILE"
 }
-pending_events > "$TODOS.pend"
-
 sent=0
-if [ -s "$TODOS.pend" ]; then
-  pane="$("$TMUX_BIN" -L mythos capture-pane -p -t mythos 2>/dev/null)" || pane=''
-  if ! printf '%s\n' "$pane" | tail -15 | grep -q 'esc to interrupt'; then
-    parts=''
-    sent_ids=''
-    while IFS=$'\t' read -r eid jid st sum extra guide; do
-      [ -n "$eid" ] || continue
-      th="$(jq -r --arg j "$jid" 'select(.job_id==$j) | .thread // "-"' "$EVENTS_FILE" | head -1)"
-      case "$th" in ''|null) th=- ;; *[!A-Za-z0-9-]*) th=- ;; esac
-      item="[派工回報] event_id=$eid thread=$th $jid $st $sum"
-      if [ -n "$extra" ]; then item="${item}；${extra}"; fi
-      if [ -n "$guide" ]; then item="${item}；${guide}"; fi
-      if [ -z "$parts" ]; then parts="$item"; else parts="${parts}；${item}"; fi
-      sent_ids="${sent_ids}${eid}"$'\n'
-    done < "$TODOS.pend"
-    if [ -n "$parts" ] && "$TMUX_BIN" -L mythos send-keys -t mythos -l -- "$parts" \
-       && "$TMUX_BIN" -L mythos send-keys -t mythos Enter; then
-      "$NODE_BIN" "$LIB" bump "$EVENTS_FILE" "$sent_ids" >/dev/null
-      sent=1
+deliver() {
+  pending_events > "$TODOS.pend"
+  if [ -s "$TODOS.pend" ]; then
+    pane="$("$TMUX_BIN" -L mythos capture-pane -p -t mythos 2>/dev/null)" || pane=''
+    if ! printf '%s\n' "$pane" | tail -15 | grep -q 'esc to interrupt'; then
+      parts=''
+      sent_ids=''
+      while IFS=$'\t' read -r eid jid st sum extra guide; do
+        [ -n "$eid" ] || continue
+        th="$(jq -r --arg j "$jid" 'select(.job_id==$j) | .thread // "-"' "$EVENTS_FILE" | head -1)"
+        case "$th" in ''|null) th=- ;; *[!A-Za-z0-9-]*) th=- ;; esac
+        item="[派工回報] event_id=$eid thread=$th $jid $st $sum"
+        if [ -n "$extra" ]; then item="${item}；${extra}"; fi
+        if [ -n "$guide" ]; then item="${item}；${guide}"; fi
+        if [ -z "$parts" ]; then parts="$item"; else parts="${parts}；${item}"; fi
+        sent_ids="${sent_ids}${eid}"$'\n'
+      done < "$TODOS.pend"
+      if [ -n "$parts" ] && "$TMUX_BIN" -L mythos send-keys -t mythos -l -- "$parts" \
+         && "$TMUX_BIN" -L mythos send-keys -t mythos Enter; then
+        ledger_events bump "$EVENTS_FILE" "$sent_ids" >/dev/null
+        sent=1
+      fi
     fi
   fi
+  rm -f "$TODOS.pend"
+}
+# 3a) 先投遞終態（PASS／FAIL／TIMEOUT）與 STALL，不等抽查
+deliver
+
+# 3b) 抽查：終態投遞完才跑 judge，總預算 JUDGE_BUDGET 秒（從這裡開始算）。
+#   judge 自己有 80s 上限，這裡再用 timeout／gtimeout 包一層硬砍（整個 process group）。
+#   兩者都沒有就不跑 judge，事件照舊以 REVIEW 投遞（不吞），log 記 WARN。
+if [ -s "$REVIEWS" ]; then
+  to_bin=''
+  if command -v timeout >/dev/null 2>&1; then to_bin=timeout
+  elif command -v gtimeout >/dev/null 2>&1; then to_bin=gtimeout
+  fi
+  jstart="$(date +%s)"
+  while IFS=$'\t' read -r id task last_review_file progress; do
+    [ -n "$id" ] || continue
+    budget=$(( JUDGE_BUDGET - ( $(date +%s) - jstart ) ))
+    # 預算用完：這張這輪不抽查（不建事件、不動 last-review），下輪再判
+    [ "$budget" -gt 0 ] || continue
+    verdict=""
+    if [ -x "$REVIEW_JUDGE" ]; then
+      if [ -z "$to_bin" ]; then
+        log "WARN no timeout, judge skipped $id"
+      # 不接 pipe：judge 非零退出要算失敗（照舊喚醒），不能被 head 的 0 蓋掉
+      elif verdict="$("$to_bin" "$budget" "$REVIEW_JUDGE" "$task" "$progress" </dev/null 2>/dev/null 9>&-)"; then
+        verdict="$(printf '%s\n' "$verdict" | head -1)"
+      else
+        verdict=""
+      fi
+    fi
+    case "$verdict" in
+      ON_TRACK*)
+        # 沒跑歪就不吵 Mythos；間隔立刻往前，下一輪才重判（省免費模型呼叫）
+        printf '%s\n' "$now" > "$last_review_file"
+        continue
+        ;;
+    esac
+    extra="$progress"
+    if [ -n "$verdict" ]; then extra="${verdict}｜${progress}"; fi
+    guide="對照工單目標判斷有無跑歪；歪了就 bin/dispatch-cancel $id 再 bin/dispatch-retry $id \"<導正指示>\"，沒歪不用回覆"
+    add_event "$id" REVIEW "$task" "$extra" "$guide" >/dev/null || late=1
+    todo "$last_review_file" "$now"
+  done < "$REVIEWS"
+  # 3c) 投遞抽查事件
+  deliver
 fi
-rm -f "$TODOS.pend"
 
 # 4) 送出成功才套用 last-* 間隔（pane 忙／送失敗留著下輪；同類型已有未 ACK 事件也先記，免得每輪重判）
 if [ -s "$TODOS" ] && { [ "$sent" = 1 ] || [ "$late" = 1 ]; }; then

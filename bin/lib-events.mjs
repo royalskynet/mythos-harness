@@ -8,7 +8,18 @@ import fs from 'node:fs'
 
 const [cmd, file, ...args] = process.argv.slice(2)
 const read = () => fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map(l => { try { return JSON.parse(l) } catch { return null } }).filter(Boolean) : []
-const write = rows => fs.writeFileSync(file, rows.map(r => JSON.stringify(r)).join('\n') + (rows.length ? '\n' : ''))
+// 寫入＝同目錄暫存檔＋renameSync 原子替換：讀者永遠看到完整的舊版或新版，不會讀到截斷的半份。
+// 互斥不在這裡做：呼叫端（shell）一律經 lib-ledger.sh 的 ledger_events 持 ledger 鎖再呼叫。
+const write = rows => {
+  const tmp = `${file}.tmp.${process.pid}`
+  try {
+    fs.writeFileSync(tmp, rows.map(r => JSON.stringify(r)).join('\n') + (rows.length ? '\n' : ''))
+    fs.renameSync(tmp, file)
+  } catch (e) {
+    try { fs.unlinkSync(tmp) } catch {}
+    throw e
+  }
+}
 if (cmd === 'scan') {
   // 印 "<id>\t<acked_at>"：transcript 裡有 type:"user" 且內容含 event_id=<id> 的紀錄才算處理完
   const transcript = args[0]

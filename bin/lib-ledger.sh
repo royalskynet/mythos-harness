@@ -1,47 +1,43 @@
 #!/usr/bin/env bash
-# 共用 ledger 鎖與讀寫（D）。所有改 state/dispatch-jobs.tsv 的地方都先 source 這個再在鎖內改。
-# 呼叫端要已設好 $TSV（或它自己算）。用法：
+# 共用 ledger 鎖與讀寫（D）。所有改 state/dispatch-jobs.tsv 與 state/events.jsonl 的地方都先 source 這個再在鎖內改。
+# 用法：
 #   ledger_lock || exit 1 ; ...改檔... ; ledger_unlock
-#   ledger_read  → 讀一行並裁成 8 欄（舊 5／6 欄列補預設，thread/backend 推導）
+#   ledger_events <lib-events 子命令> …  → 持鎖呼叫 lib-events.mjs（已持鎖就直接呼叫）
+#   ledger_fields  → 讀一行並裁成 8 欄（舊 5／6 欄列補預設，thread/backend 推導）
+# 鎖＝固定 fd 9 上的 flock（macOS 內建 perl 取鎖）：行程死掉 fd 關閉，鎖由核心自動釋放，不需要 reap。
+# 陷阱：持鎖期間啟動的長壽子行程（nohup、tmux、&）會繼承 fd 9 繼續持鎖，一律帶 `9>&-`。
+# /bin/bash 是 3.2，沒有 {fd} 語法，所以固定用 9。
 set -u
 
-LEDGER_LOCK="${LEDGER_LOCK:-$MYTHOS_DIR/state/.ledger.lock}"
-
-# 接手（reap）：先把鎖目錄原子搬走再刪，兩個等待者不會互刪對方剛建的新鎖；
-# 搬走的目錄只刪得到「被搬走的那個」，pid 檔比對後不是自己的絕不動。
-ledger_reap() {
-  local moved="$LEDGER_LOCK.stale.$$"
-  mv "$LEDGER_LOCK" "$moved" 2>/dev/null || return 1
-  rm -rf "$moved"
-}
+LEDGER_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# MYTHOS_DIR 沒設也能推導（lib 在 <repo>/bin/），不讓 set -u 中斷
+LEDGER_LOCK_FILE="${LEDGER_LOCK_FILE:-${MYTHOS_DIR:-$(cd "$LEDGER_LIB_DIR/.." && pwd)}/state/.ledger.flock}"
+LEDGER_HELD=''
 
 ledger_lock() {
-  local pid_file="$LEDGER_LOCK/pid" waited=0 holder mtime age
-  mkdir -p "$(dirname "$LEDGER_LOCK")"
-  until mkdir "$LEDGER_LOCK" 2>/dev/null; do
-    holder="$(cat "$pid_file" 2>/dev/null || true)"
-    if [ -n "$holder" ]; then
-      # 持有者已死就接手
-      if ! kill -0 "$holder" 2>/dev/null; then ledger_reap; continue; fi
-    else
-      # 還沒寫 pid：鎖 mtime 超過 10 秒＝建立者死在寫 pid 之前
-      mtime="$(stat -f %m "$LEDGER_LOCK" 2>/dev/null || stat -c %Y "$LEDGER_LOCK" 2>/dev/null || echo "$(date +%s)")"
-      age=$(( $(date +%s) - mtime ))
-      if [ "$age" -ge 10 ]; then ledger_reap; continue; fi
-    fi
-    waited=$((waited + 1))
-    [ "$waited" -ge 50 ] && return 1          # 10 秒 × 0.2
-    sleep 0.2
-  done
-  printf '%s\n' "$$" > "$pid_file"
-  return 0
+  mkdir -p "$(dirname "$LEDGER_LOCK_FILE")" || return 1
+  exec 9>>"$LEDGER_LOCK_FILE" || return 1
+  if ! perl -MFcntl=:flock -e 'open(my $f,">&=",$ARGV[0]) or exit 2; for(1..$ARGV[1]){ exit 0 if flock($f,LOCK_EX|LOCK_NB); select(undef,undef,undef,0.2) } exit 1' 9 "${LEDGER_LOCK_TRIES:-50}"; then
+    exec 9>&-; return 1
+  fi
+  LEDGER_HELD=1
 }
+# 只關自己這個行程的 fd 9：沒持鎖就什麼都不做，碰不到別人的鎖
+ledger_unlock() { [ -n "${LEDGER_HELD:-}" ] || return 0; exec 9>&-; LEDGER_HELD=''; }
 
-# 只刪 pid 是自己的鎖：別人接手後 pid 檔換人，這裡不會誤刪
-ledger_mine() { [ "$(cat "$LEDGER_LOCK/pid" 2>/dev/null || true)" = "$$" ]; }
-ledger_unlock() {
-  ledger_mine || return 0
-  rm -rf "$LEDGER_LOCK"
+# events.jsonl 的所有寫入（upsert／set／bump）都走這裡，跟 ledger 同一把鎖（不另建互斥）。
+# 已持鎖（例如 cancel 改 ledger 的同一段）就直接呼叫，不重開 fd 9（重開會把自己的鎖放掉）。
+ledger_events() {
+  local rc
+  if [ -n "${LEDGER_HELD:-}" ]; then
+    "${NODE_BIN:-node}" "$LEDGER_LIB_DIR/lib-events.mjs" "$@" 9>&-
+    return
+  fi
+  ledger_lock || return 1
+  "${NODE_BIN:-node}" "$LEDGER_LIB_DIR/lib-events.mjs" "$@" 9>&-
+  rc=$?
+  ledger_unlock
+  return "$rc"
 }
 
 # 讀一列並統一成 8 欄。缺的欄位只填預設，不改寫歷史列。
