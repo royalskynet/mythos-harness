@@ -16,9 +16,9 @@ chat with Sonnet; every request goes to a background dispatcher subagent that tr
                                        ├─ mid  ─▶ bin/dispatch ─▶ dcq（免費模型層）
                                        └─ hard ─▶ bin/dispatch ─▶ deep-run（背景多步自主）
                                                       ▲
-        dispatch-watch（每 2 分、零 token）── 先落 events.jsonl，Router 回覆帶 event_id 才算 ACK ──▶ 打回 Router
+        dispatch-watch（每 2 分、零 token）── 先落 events.jsonl；ACK＝Router 已收到事件，不代表處理完 ──▶ 打回 Router
                        │                 未 ACK 10 分鐘重送、上限 5 次；取消的票不再投遞
-                       └─ 抽查先過 review-judge（免費模型，硬預算 90 秒）：ON_TRACK 不打擾 Router
+                       └─ 終態先投遞，抽查後跑 review-judge（免費模型，timeout 硬砍 90 秒）：ON_TRACK 不打擾 Router
         watchdog（每 5 分、零 token）── 死鎖、重送用盡、Router 未回、pending 逾 6 小時 → brief-lines
 ```
 
@@ -55,9 +55,9 @@ tmux -L mythos attach -t mythos
 |---|---|
 | `router/settings.json`、`ROUTER.md`、`start.sh` | Router 層：模型分層、派工閘 hook、Router 規則、tmux 啟動 |
 | `bin/dispatch-gate.mjs` | 主 session 全工具白名單（Telegram 只放 reply／react／edit_message）；子代理不能直接回 Telegram；pinGuard、fail-closed |
-| `bin/lib-ledger.sh`、`lib-events.mjs` | 共同 ledger 鎖（原子接手死鎖、只解自己的鎖）、8 欄 schema、事件佇列與精確 ACK 比對 |
+| `bin/lib-ledger.sh`、`lib-events.mjs` | 共同 ledger 鎖（flock，行程死了自動釋放；ledger 與 events 同一把）、8 欄 schema、事件佇列（原子替換寫入）與精確 ACK 比對 |
 | `bin/watchdog` | 死鎖、重送用盡、Router 未回（只認成功的 reply 結果）、pending 逾 6 小時 |
-| `bin/dispatch`、`dispatch-retry`、`dispatch-cancel`、`dispatch-deep-run` | 派工、重派、取消、deep 背景執行 |
+| `bin/dispatch`、`dispatch-retry`、`dispatch-cancel`、`dispatch-deep-run` | 派工（先持鎖登錄再啟動後端）、重派、取消（deep 只照 `state/deep/<id>.handle`）、deep 背景執行 |
 | `bin/dispatch-watch` | 回報＋停滯／抽查，pane 閒置才打進去 |
 | `bin/review-judge`、`oc-free-ask`、`local-llm` | 免費模型判 Worker 有沒有跑歪；判不出來或格式不對一律 UNKNOWN＝照舊喚醒 Router |
 | `bin/idle-reset` | 04／05／06 點試，pane 不忙且 30 分沒動才 `/clear`，一天一次 |

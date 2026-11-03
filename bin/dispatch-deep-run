@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
+# deep 票的 runner：跑 deep-run、記 rc，並寫 state/deep/<id>.handle 給 dispatch-cancel 精確取消。
+# handle（key=value 每行一筆）：
+#   pid=<本 runner pid>  deep_pid=<deep-run pid>  session=<deep-run 開的 tmux session 名>
+# deep-run 的 tmux session 名＝deep-<秒數>-<deep-run 自己的 pid>，它同時寫 <秒數>-<pid>-task.md；
+# 這裡用 deep_pid 對檔名找出 session 名，不靠工單內容或時間猜。
 set -u
 
 MYTHOS_DIR="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+DEEP_TASK_DIR="${DEEP_TASK_DIR:-${DC_HOME:-$HOME/.deepclaude}/work/.deep}"
 
 id="${1:-}"
 task="${2:-}"
@@ -16,11 +22,40 @@ mkdir -p "$MYTHOS_DIR/state/deep"
 out="$MYTHOS_DIR/state/deep/$id.out"
 rcf="$MYTHOS_DIR/state/deep/$id.rc"
 pidf="$MYTHOS_DIR/state/deep/$id.pid"
+handle="$MYTHOS_DIR/state/deep/$id.handle"
+
+# 原子寫 handle：先寫暫存再 mv，cancel 不會讀到半份
+write_handle() {
+  printf '%s\n' "$@" > "$handle.tmp.$$" && mv "$handle.tmp.$$" "$handle"
+}
 
 : > "$out"
 printf '%s\n' "$$" > "$pidf"
+write_handle "pid=$$"
 
-"${DEEP_RUN_BIN:-deep-run}" "$task" "$cwd" > "$out" 2>&1
+"${DEEP_RUN_BIN:-deep-run}" "$task" "$cwd" > "$out" 2>&1 &
+dp=$!
+write_handle "pid=$$" "deep_pid=$dp"
+
+# 最多等 10 秒找 deep-run 開的 session（deep-run 一開始就寫 task 檔再開 tmux）
+session=''
+n=0
+while [ "$n" -lt 50 ] && kill -0 "$dp" 2>/dev/null; do
+  for f in "$DEEP_TASK_DIR"/*-"$dp"-task.md; do
+    [ -f "$f" ] || continue
+    # pid 會被重用：比本 runner 啟動還舊的同 pid task 檔是別人的
+    [ "$pidf" -nt "$f" ] && continue
+    b="$(basename "$f")"
+    session="deep-${b%-task.md}"
+    break
+  done
+  [ -n "$session" ] && break
+  sleep 0.2
+  n=$((n + 1))
+done
+[ -n "$session" ] && write_handle "pid=$$" "deep_pid=$dp" "session=$session"
+
+wait "$dp"
 rc=$?
 printf '%s\n' "$rc" > "$rcf"
 exit "$rc"

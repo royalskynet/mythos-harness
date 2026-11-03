@@ -82,15 +82,23 @@ cp "$D/a.md" "$D/deep/100-1-task.md"; touch -A -0100 "$D/deep/100-1-task.md"
 cp "$D/b.md" "$D/deep/200-2-task.md"
 printf '補充指示\n' >> "$D/a.md"
 : > "$D/tmux.log"
+# 11-04 起 A 沒有 handle → cancel 拒絕猜、exit 1
+set +e
 MYTHOS_DIR="$D/mythos" TMUX_BIN="$D/tmux" TMUX_LOG="$D/tmux.log" DEEP_TASK_DIR="$D/deep" \
   bash "$ROOT/bin/dispatch-cancel" deep-1-a 2>/dev/null
-if grep -q 'deep-200-2' "$D/tmux.log"; then bad "g 取消 A 誤殺 B 的 tmux"; else ok "g 取消 A（比對不到）不殺 B"; fi
+grc=$?
+set -e
+if grep -q 'deep-200-2' "$D/tmux.log"; then bad "g 取消 A 誤殺 B 的 tmux"
+elif [ "$grc" != 1 ]; then bad "g 取消 A（無 handle）應 exit 1，得 $grc"
+else ok "g 取消 A（比對不到）不殺 B"; fi
 
 printf 'A 原文\n' > "$D/a.md"
+# 11-04 起 cancel 只認 runner 寫的 handle（不再比對工單內容）；A 有 handle 才取消得到
+printf 'session=deep-100-1\n' > "$D/mythos/state/deep/deep-1-a.handle"
 : > "$D/tmux.log"
 MYTHOS_DIR="$D/mythos" TMUX_BIN="$D/tmux" TMUX_LOG="$D/tmux.log" DEEP_TASK_DIR="$D/deep" \
   bash "$ROOT/bin/dispatch-cancel" deep-1-a 2>/dev/null
-if grep -q 'kill-session -t deep-100-1' "$D/tmux.log" && ! grep -q 'deep-200-2' "$D/tmux.log"; then
+if grep -q 'kill-session -t =deep-100-1$' "$D/tmux.log" && ! grep -q 'deep-200-2' "$D/tmux.log"; then
   ok "g2 取消 A（比對得到）只殺 A"
 else bad "g2 取消 A 應只殺 deep-100-1：$(cat "$D/tmux.log")"; fi
 
