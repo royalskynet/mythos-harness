@@ -81,6 +81,23 @@ bash tests/test-watchdog.sh            # watchdog v2：L0 不叫模型、上限�
 - 派工閘是紀律閘不是沙箱：字串切段判斷，不是完整 shell 解析。要擋寫入用 OS 層沙箱（Claude Code sandbox／Seatbelt）。
 - `oc-free-ask` 送出前會打本機 `:4102/scrub` 去識別，`local-llm` 走本機 `:4000` LiteLLM；沒有這兩個服務，review-judge 會判 UNKNOWN（照舊喚醒 Router），不影響派工。
 
+## 狀態 / Status
+
+- 每輪由 Codex 對照文章審計，主 session 逐條裁決後修補。第 3 輪（2026-11-04）：必修從 9 降到 2，剩 deep 取消前驗證程序身分（PID 重用）、judge 逾時強制 KILL，修補中。
+- Each round is audited by Codex against the article; findings are adjudicated item by item before fixing. Round 3 (2026-11-04): must-fix dropped from 9 to 2 — process-identity check before cancelling a deep job (PID reuse) and a hard KILL after the judge timeout. Fixes in progress.
+
+## English summary
+
+**Architecture.** You chat with a Sonnet **Router** over Telegram. The Router never runs tools itself: a PreToolUse hook (`bin/dispatch-gate.mjs`) allows only Telegram replies, `ToolSearch`, `TaskStop`, `SendMessage` and background `dispatcher` subagents, so delegation is enforced by code, not by prompt. The dispatcher triages each request: easy → does it itself; mid → `bin/dispatch` to `dcq` (free-model tier); hard → `deep-run` (background multi-step agent).
+
+**Results and supervision (zero Router tokens).**
+- `bin/dispatch-watch` (every 2 min) writes worker results to `state/events.jsonl` first, then delivers them to the Router pane; un-ACKed events are resent every 10 min, up to 5 times. Terminal states are delivered before any review; `bin/review-judge` (free model, hard time budget) filters out ON_TRACK spot checks so they never wake the Router.
+- `bin/watchdog` (every 5 min): **L0** zero-token checks — stale locks, exhausted resends, Router not replying, jobs pending > 6 h, stalled deep transcripts, background agents blocked on permission prompts. **L1** only for what L0 cannot classify (new error lines in logs): a free model labels them KNOWN / NEW / NOISE. Payloads leaving the machine are field-whitelisted, PII-scrubbed and scanned with sensitive-canary rules; the scrubber is self-tested daily with fake PII. Fallback chain: beam-free → second OC Go free model → local LLM gateway → rule table → plain alert. **L2** may only propose whitelisted knobs, applied when two different model families agree and the value is within bounds. `bin/watchdog ask "<question>"` answers questions about recent watchdog activity.
+
+**State.** One ledger (`state/dispatch-jobs.tsv`, 8 columns) and the event queue share a single `flock` lock that is released automatically if the holder dies. Deep jobs are cancelled only through their recorded handle, never by guessing.
+
+**Install.** See *Quick start* above; `launchd/install.sh` renders the plist templates (`ONLY=<label>` for one job, `NO_LOAD=1` to only render). Tests use fake tmux / models / dcq, need no network or keys, and run on macOS CI.
+
 ## License
 
 MIT
