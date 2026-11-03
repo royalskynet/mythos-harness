@@ -12,6 +12,7 @@ jobs:
       - run: bash tests/test_p1_harness.sh
       - run: node --test tests/test_dispatch_gate.mjs
       - run: bash tests/test-review-judge.sh
+      - run: bash tests/test-watchdog.sh
       - run: bash tests/test-dispatch-route.sh
       - run: bash tests/test_idle_reset.sh
       - run: bash tests/test_dispatch_deep.sh
