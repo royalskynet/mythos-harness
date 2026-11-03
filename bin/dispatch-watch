@@ -267,7 +267,7 @@ if [ -s "$REVIEWS" ]; then
       if [ -z "$to_bin" ]; then
         log "WARN no timeout, judge skipped $id"
       # 不接 pipe：judge 非零退出要算失敗（照舊喚醒），不能被 head 的 0 蓋掉
-      elif verdict="$("$to_bin" "$budget" "$REVIEW_JUDGE" "$task" "$progress" </dev/null 2>/dev/null 9>&-)"; then
+      elif verdict="$("$to_bin" -k 5 "$budget" "$REVIEW_JUDGE" "$task" "$progress" </dev/null 2>/dev/null 9>&-)"; then
         verdict="$(printf '%s\n' "$verdict" | head -1)"
       else
         verdict=""
