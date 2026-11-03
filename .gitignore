@@ -33,6 +33,8 @@
 !/tests/test_router_template.sh
 !/tests/test_launchd_install.sh
 !/tests/test_p1_harness.sh
+!/tests/test-no-orphan-sleep.sh
+!/tests/test-watch-knobs.sh
 !/tests/test-dispatch-gate-handson.sh
 !/tests/mk-path.sh
 *.bak*
