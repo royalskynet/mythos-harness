@@ -10,16 +10,18 @@ S="$ROOT/router/settings.json"
 [ "$(jq -r .model "$S")" = claude-sonnet-5-5 ] || fail "Router 應是 Sonnet"
 [ "$(jq -r .advisorModel "$S")" = claude-opus-5-5 ] || fail "advisor 應是 Opus"
 
-# 2. settings 裡的 hook 指令原樣執行：mid 擋寫檔、easy 放行
+# 2. settings 裡的 hook 指令原樣執行：Router 親手寫檔擋、背景派 dispatcher 放行
 hook="$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$S")"
-printf '#!/bin/sh\nprintf "%%s\\n" "$TRIAGE_OUT"\n' > "$TMP/triage"; chmod +x "$TMP/triage"
 printf '%s\n' '{"type":"user","message":{"role":"user","content":"改一下 foo"}}' > "$TMP/t.jsonl"
-payload='{"tool_name":"Write","tool_input":{"file_path":"/opt/elsewhere/foo.js"},"transcript_path":"'"$TMP/t.jsonl"'","session_id":"s"}'
-call() { printf '%s' "$payload" | CLAUDE_PROJECT_DIR="$ROOT" MYTHOS_DIR="$TMP/bot" DISPATCH_GATE_TRIAGE="$TMP/triage" TRIAGE_OUT="$1" sh -c "$hook"; }
+call() { printf '%s' "$1" | CLAUDE_PROJECT_DIR="$ROOT" MYTHOS_DIR="$TMP/bot" sh -c "$hook"; }
 mkdir -p "$TMP/bot/state"
-call mid | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null || fail "mid 應擋 Router 親手寫檔"
-rm -f "$TMP/bot/state/dispatch-gate.json"
-[ -z "$(call easy)" ] || fail "easy 應放行"
+call '{"tool_name":"Write","tool_input":{"file_path":"/opt/elsewhere/foo.js"},"transcript_path":"'"$TMP/t.jsonl"'"}' \
+  | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null || fail "應擋 Router 親手寫檔"
+[ -z "$(call '{"tool_name":"Agent","tool_input":{"subagent_type":"dispatcher","prompt":"x"},"transcript_path":"'"$TMP/t.jsonl"'"}')" ] || fail "背景 Agent 應放行"
+jq -e '.hooks.PreToolUse[0].matcher | test("Agent")' "$S" >/dev/null || fail "matcher 要含 Agent"
+D="$ROOT/router/agents/dispatcher.md"
+[ "$(sed -n 2p "$D")" = "name: dispatcher" ] || fail "dispatcher agent 定義缺 name"
+grep -q 'agents/dispatcher.md' "$ROOT/router/start.sh" || fail "start.sh 沒裝 dispatcher agent"
 
 # 3. ROUTER.md 講到的指令都真的在
 for c in dispatch dispatch-watch review-judge dispatch-retry dispatch-cancel dispatch-gate.mjs; do
