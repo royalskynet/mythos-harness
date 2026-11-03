@@ -50,6 +50,8 @@ p="$(cat)"
 printf '%s\n===\n' "$p" >> "$TMP/canary-in"
 pk='PRIV''ATE KEY'
 if printf '%s' "$p" | grep -qE "gh[p]_[A-Za-z0-9]{20,}|BEGIN [A-Z ]*${pk}"; then exit 2; fi
+# 跟真的 sensitive-canary 一樣把 IP／手機長數字當 PII 擋（A1 突變靠這條咬住）
+if printf "%s" "$p" | grep -qE "[0-9]{1,3}([.][0-9]{1,3}){3}|09[0-9]{8}"; then exit 2; fi
 exit 0
 EOF
 chmod +x "$S/canary"
@@ -57,15 +59,46 @@ chmod +x "$S/canary"
 # ---- 假 scrub：good 把假 PII 換成佔位；bad 原樣回傳 ----
 cat > "$S/scrub-good" <<'EOF'
 #!/usr/bin/env bash
-echo x >> "$TMP/scrub-calls"
-jq -c '{texts: [.texts[0] | gsub("0912-345-678"; "<PHONE>") | gsub("0x[0-9A-Fa-f]{40}"; "<WALLET>") | gsub("[A-Za-z0-9._-]+@[A-Za-z0-9.-]+"; "<EMAIL>")]}'
+in="$(cat)"
+# 自檢的假 PII 才算自檢呼叫；逐項 scrub 另記，第 4 段只數自檢
+case "$in" in *0912-345-678*) echo x >> "$TMP/scrub-calls" ;; *) echo x >> "$TMP/scrub-item-calls" ;; esac
+printf "%s" "$in" | jq -c '{texts: [.texts[0] | gsub("0912-345-678"; "<PHONE>") | gsub("0x[0-9A-Fa-f]{40}"; "<WALLET>") | gsub("[A-Za-z0-9._-]+@[A-Za-z0-9.-]+"; "<EMAIL>")]}'
 EOF
 cat > "$S/scrub-bad" <<'EOF'
 #!/usr/bin/env bash
-echo x >> "$TMP/scrub-calls"
-cat
+in="$(cat)"
+case "$in" in *0912-345-678*) echo x >> "$TMP/scrub-calls" ;; *) echo x >> "$TMP/scrub-item-calls" ;; esac
+printf "%s" "$in"
 EOF
 chmod +x "$S/scrub-good" "$S/scrub-bad"
+# 缺口 A：只把 IP／手機換成佔位，其他原樣（拉掉長數字後 canary 不命中）
+cat > "$S/scrub-ip" <<'EOF'
+#!/usr/bin/env bash
+in="$(cat)"
+case "$in" in *0912-345-678*) echo x >> "$TMP/scrub-calls" ;; *) echo x >> "$TMP/scrub-item-calls" ;; esac
+printf "%s" "$in" | jq -c '{texts: [.texts[0] | gsub("[0-9]{1,3}([.][0-9]{1,3}){3}"; "<IP>") | gsub("09[0-9]{8}"; "<PHONE>") | gsub("0912-345-678"; "<PHONE>") | gsub("0x[0-9A-Fa-f]{40}"; "<WALLET>") | gsub("[A-Za-z0-9._-]+@[A-Za-z0-9.-]+"; "<EMAIL>")]}'
+EOF
+# scrub 連不上
+cat > "$S/scrub-down" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+exit 7
+EOF
+# 信任邊界：寫死的保密詞已去識別（測試自己補回去，確認規則還在；信任邊界不改行為）
+trust_case() { # 回 0＝保密詞檔生效（直接讀 bin/watchdog 的 SENSITIVE_RE 區塊，不碰 wl_line）
+  mkdir -p "$TMP/trust/state"
+  printf 'carr%s' ie > "$TMP/trust/state/watchdog-sensitive.re"
+  cp "$TMP/trust/state/watchdog-sensitive.re" "$TMP/sensitive.re"
+  reres() { awk '/^SENSITIVE_RE=/{f=1} f&&/^fi$/{print;exit} f' "$ROOT/bin/watchdog"; }
+  __re="$(export MYTHOS_DIR="$TMP/trust"; eval "$(reres)"; printf %s "$SENSITIVE_RE")"
+  printf '%s' "$__re" | grep -qw "$(cat "$TMP/trust/state/watchdog-sensitive.re")" || return 1
+  u="$TMP/trust/nonexistent"; mkdir -p "$u"
+  __re="$(export MYTHOS_DIR="$u"; eval "$(reres)"; printf %s "$SENSITIVE_RE")"
+  printf '%s' "$__re" | grep -qw "$(cat "$TMP/trust/state/watchdog-sensitive.re")" && return 1
+  return 0
+}
+trust_case || fail "3d：保密詞檔沒被讀進白名單"
+chmod +x "$S/scrub-ip" "$S/scrub-down"
 
 # ---- 假 claude agents／tmux ----
 cat > "$S/claude" <<'EOF'
@@ -92,14 +125,16 @@ export WATCHDOG_LLM_TIMEOUT_S=3
 case_init() {
   C="$TMP/case-$1"
   mkdir -p "$C/mythos/state/deep" "$C/mythos/logs" "$C/brief"
+  cp "$TMP/sensitive.re" "$C/mythos/state/watchdog-sensitive.re"   # 白名單那條規則原先寫死，測試自己補回
   export MYTHOS_DIR="$C/mythos" MYTHOS_BRIEF_DIR="$C/brief"
   BRIEF="$C/brief/mythos-watchdog.tsv"
   WLOG="$MYTHOS_DIR/logs/watchdog.log"
-  rm -f "$TMP/llm-calls" "$TMP/llm-prompts" "$TMP/canary-in" "$TMP/scrub-calls" "$TMP/agents.json" "$TMP/tmux-sessions"
+  rm -f "$TMP/llm-calls" "$TMP/llm-prompts" "$TMP/canary-in" "$TMP/scrub-calls" "$TMP/scrub-item-calls" "$TMP/agents.json" "$TMP/tmux-sessions"
   : > "$MYTHOS_DIR/logs/app.log"
   export WATCHDOG_LLM_LEGS="$S/llm-a"
   export WATCHDOG_L2_LEGS="$S/l2-a;$S/l2-b"
   export WATCHDOG_SCRUB_CMD="$S/scrub-good"
+  export WD_UNOWNED_MAX_MIN=120
   unset WATCHDOG_L1_MAX_PER_HOUR WATCHDOG_CANARY_DIR
   export WATCHDOG_CANARY_CMD="$S/canary"
 }
@@ -168,7 +203,7 @@ wl_case() { # 名稱 → 回 0＝行為正確
   printf 'read failed\t讀檔失敗\n' > "$MYTHOS_DIR/state/watchdog-known.tsv"
   run_wd
   addlog "ERROR upload with token $FAKE_TOK"
-  addlog "ERROR read failed $HOME/bots/carrie/notes.md"
+  addlog "ERROR read failed $HOME/bots/$(printf 'carr%s' 'ie')/notes.md"
   run_wd
   [ "$(calls)" = 0 ] || { echo "LLM 被叫了 $(calls) 次" >&2; return 1; }
   grep -q '判不了' "$BRIEF" || { echo "假憑證行沒走到「判不了」" >&2; return 1; }
@@ -295,6 +330,53 @@ mk_llm llm-a "" 1
 set +e; out="$(run_wd ask "再問一次")"; rc=$?; set -e
 [ "$rc" = 1 ] && printf '%s' "$out" | grep -q '判不了' || fail "ask：退路鏈全敗沒說判不了（rc=$rc）"
 
+# =============== 8. 缺口 A：出機先 scrub 再 canary、不送原值 ===============
+case_init a1
+mk_llm llm-a "1 NOISE"
+export WATCHDOG_SCRUB_CMD="$S/scrub-ip"
+run_wd; addlog 'ERROR connect 10.1.2.3 from 0912345678'; run_wd
+[ "$(calls)" = 1 ] || fail "A1a：去識別後該放行且只叫 1 次，實際 $(calls)"
+grep -q '10.1.2.3' "$TMP/llm-prompts" && fail "A1a：LLM 收到原始 IP"
+grep -q '0912345678' "$TMP/llm-prompts" && fail "A1a：LLM 收到原始手機"
+grep -q '<IP>' "$TMP/llm-prompts" || fail "A1a：LLM 沒收到 scrub 後文字"
+# A1b：scrub 原樣回傳，假憑證照樣被 canary 擋
+case_init a1b
+mk_llm llm-a "1 NOISE"
+export WATCHDOG_SCRUB_CMD="$S/scrub-bad"
+run_wd; addlog "ERROR upload with token $FAKE_TOK"; run_wd
+[ "$(calls)" = 0 ] || fail "A1b：假憑證去識別後仍送模型"
+grep -q 'FALLBACK KNOWN\|判不了' "$WLOG" "$BRIEF" || fail "A1b：假憑證沒走退路"
+# A1c：scrub 不通 → 不送模型、log 記 SCRUB_DOWN
+for sc in down empty; do
+  case_init "a1c-$sc"
+  mk_llm llm-a "1 NOISE"
+  if [ "$sc" = down ]; then export WATCHDOG_SCRUB_CMD="$S/scrub-down"
+  else printf '#!/bin/sh\nexit 0\n' > "$S/scrub-empty"; chmod +x "$S/scrub-empty"; export WATCHDOG_SCRUB_CMD="$S/scrub-empty"; fi
+  run_wd; addlog "ERROR theta broke"; run_wd
+  [ "$(calls)" = 0 ] || fail "A1c($sc)：scrub 不通還送模型"
+  grep -q 'SCRUB_DOWN' "$WLOG" || fail "A1c($sc)：log 沒有 SCRUB_DOWN"
+done
+
+# =============== 9. 旋鈕改名：DEEP_REVIEW_MIN ===============
+case_init a2
+mk_llm llm-a "1 NOISE
+KNOB DEEP_REVIEW_MIN=45"
+mk_llm l2-a "KNOB DEEP_REVIEW_MIN=45"; mk_llm l2-b "KNOB DEEP_REVIEW_MIN=45"
+run_wd; addlog "ERROR knob a2"; run_wd
+grep -qx 'DEEP_REVIEW_MIN=45' "$MYTHOS_DIR/state/watchdog-knobs.env" || fail "A2：knobs.env 沒有 DEEP_REVIEW_MIN=45"
+grep -qx 'DEEP_REVIEW_MIN=45' "$MYTHOS_DIR/state/watchdog-knobs.env" && [ "$(wc -l < "$MYTHOS_DIR/state/watchdog-knobs.env" | tr -d ' ')" = 1 ] || fail "A2：knobs.env 混了別的行"
+grep -q "$(printf 'REVIEW%s' _EVERY)" "$MYTHOS_DIR/state/watchdog-knobs.env" && fail "A2：knobs.env 還有舊名"
+
+# =============== 10. 無主 deep session ===============
+case_init a3
+mk_llm llm-a "1 NOISE"
+now=$(date +%s)
+printf 'deep-%s-999\ndeep-%s-998\n' $((now - 10800)) $((now - 600)) > "$TMP/tmux-sessions"
+run_wd
+grep -q "無主 deep session deep-$((now - 10800))-999" "$BRIEF" || fail "A3：3 小時的無主 session 沒告警"
+grep -q "deep-$((now - 600))-998" "$BRIEF" && fail "A3：10 分鐘的無主 session 不該告警"
+[ "$(calls)" = 0 ] || fail "A3：L0 情境叫了模型"
+
 # =============== 7. 突變：拿掉 canary 掃描那行 → 白名單測試必須 fail ===============
 if [ -z "${WD_MUTANT:-}" ]; then
   M="$TMP/mutant"; mkdir -p "$M/bin"
@@ -305,6 +387,39 @@ if [ -z "${WD_MUTANT:-}" ]; then
   WD_BIN="$M/bin/watchdog"
   export WATCHDOG_CANARY_CMD="$S/canary"
   if ( wl_case mut ) 2>/dev/null; then fail "7：拿掉 canary 掃描後白名單測試仍通過（測試沒咬住）"; fi
+  WD_BIN="$ROOT/bin/watchdog"
+fi
+
+# =============== 8b. 突變：順序換回 canary 先 → A1a 必 fail ===============
+if [ -z "${WD_MUTANT:-}" ]; then
+  M2="$TMP/mutant2"; mkdir -p "$M2/bin"
+  cp "$ROOT"/bin/* "$M2/bin/"
+  python3 - "$ROOT/bin/watchdog" "$M2/bin/watchdog" <<'PY' || fail "8b：找不到 scrub→canary 那段"
+import sys
+s = open(sys.argv[1], encoding='utf-8').read()
+a = '''    if ! scrub_payload "$txt"; then
+      log "SCRUB_DOWN [$src] 連不上或回應壞，不送模型"
+      fallback_item "$sig" "$src" "$raw" "scrub 不通" ""
+      continue
+    fi
+    txt="$SCRUBBED"
+'''
+b = '''    txt="$SCRUBBED"
+'''
+assert s.count(a) == 1
+s = s.replace(a, '''    blocked=0
+    canary_scan "$txt" || blocked=1
+    if [ "$blocked" = 1 ]; then
+      log "CANARY 命中 [$src]，不送模型"
+      fallback_item "$sig" "$src" "$raw" "canary 命中" ""
+      continue
+    fi
+''' + b, 1)
+open(sys.argv[2], 'w', encoding='utf-8').write(s)
+PY
+  bash -n "$M2/bin/watchdog" || fail "8b：突變版語法壞了"
+  ( WD_BIN="$M2/bin/watchdog" WD_MUTANT=1 WATCHDOG_SCRUB_CMD="$S/scrub-ip" bash "$0" ) 2>/dev/null \
+    && fail "8b：canary 先於 scrub 的順序仍通過（測試沒咬住）"
   WD_BIN="$ROOT/bin/watchdog"
 fi
 

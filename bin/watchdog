@@ -106,7 +106,7 @@ knob_bounds() {
   case "$1" in
     DEEP_STALL_MIN) echo "5 120" ;;
     BG_STALL_MIN)   echo "5 120" ;;
-    REVIEW_EVERY)   echo "10 240" ;;
+    DEEP_REVIEW_MIN) echo "10 240" ;;
     *) return 1 ;;
   esac
 }
@@ -129,7 +129,12 @@ knob_set() { # name value（原子改寫，保留其他行）
 
 # ---- 出機白名單 ----
 # 合規助理專案、合規、~/.claude/**、憑證相關路徑的行：整行丟，不出機（大小寫不分）
-SENSITIVE_RE='carrie|compliance|合規|\.claude/|\.creds|\.ssh/|\.aws/|\.gnupg|\.netrc|keychain|auth\.json|credential|(^|[/[:space:]])\.env([.[:space:]]|$)'
+# ponytail: 使用者自定的保密詞放 state/watchdog-sensitive.re（可多行，每行一個 regex，以 | 併入）
+SENSITIVE_RE='compliance|合規|\.claude/|\.creds|\.ssh/|\.aws/|\.gnupg|\.netrc|keychain|auth\.json|credential|(^|[/[:space:]])\.env([.[:space:]]|$)'
+if [ -r "$MYTHOS_DIR/state/watchdog-sensitive.re" ]; then
+  p="$(grep -vE '^[[:space:]]*(#|$)' "$MYTHOS_DIR/state/watchdog-sensitive.re" | tr '\n' '|' | sed 's/|$//')"
+  [ -z "$p" ] || SENSITIVE_RE="$SENSITIVE_RE|$p"
+fi
 wl_line() { # 一行文字 → 遮 ${HOME}、壓掉 canary allow tag；敏感整行丟（回 1）
   local s="$1" t='~'
   if [ -n "${HOME:-}" ] && [ "$HOME" != / ]; then s="${s//"$HOME"/$t}"; fi
@@ -185,33 +190,33 @@ canary_scan() {
   builtin_scan "$text"
 }
 
-# ---- scrub 自檢：每天第一次叫模型前送固定假 PII，回來還含原值＝scrub 失效 ----
-# 回 0＝通過；1＝失效（當天 L1 全停）；2＝連不上（不算數，下輪再驗；oc-free-ask 本身 fail-closed）
 FAKE_PII_PHONE='0912-345-678'
 FAKE_PII_WALLET='0x52908400098527886E0F7030069857D2E4169EE7'
 FAKE_PII_EMAIL='wd-canary@example.com'
-scrub_selfcheck() {
-  local body out v
-  body="$(jq -cn --arg t "watchdog 自檢假資料：電話 ${FAKE_PII_PHONE}、錢包 ${FAKE_PII_WALLET}、信箱 ${FAKE_PII_EMAIL}" '{texts:[$t]}')"
+# ---- 出機前去識別：payload 過 SCRUB_URL（同 oc-free-ask 格式）；成功把去識別後文字放 SCRUBBED、回 0
+SCRUBBED=''
+scrub_payload() {
+  local body out
+  SCRUBBED=''
+  body="$(jq -cn --arg t "$1" '{texts:[$t]}')" || return 1
   if [ -n "$SCRUB_CMD" ]; then
-    out="$(printf '%s' "$body" | run_to 25 "$SCRUB_CMD" 2>/dev/null)" || return 2
+    out="$(printf '%s' "$body" | run_to 20 "$SCRUB_CMD" 2>/dev/null)" || return 1
   else
-    out="$(printf '%s' "$body" | run_to 25 curl -sS -m 20 -H 'Content-Type: application/json' --data-binary @- "$SCRUB_URL" 2>/dev/null)" || return 2
+    out="$(printf '%s' "$body" | run_to 20 curl -sS -m 20 -H 'Content-Type: application/json' --data-binary @- "$SCRUB_URL" 2>/dev/null)" || return 1
   fi
-  out="$(printf '%s' "$out" | jq -r '.texts[0] // empty' 2>/dev/null)"   # 只看 texts，mapping 本來就含原值
-  [ -n "$out" ] || return 2
-  for v in "$FAKE_PII_PHONE" "$FAKE_PII_WALLET" "$FAKE_PII_EMAIL"; do
-    case "$out" in *"$v"*) return 1 ;; esac
-  done
-  return 0
+  SCRUBBED="$(printf '%s' "$out" | jq -r '(.texts // [])[0] // empty' 2>/dev/null)"
+  [ -n "$SCRUBBED" ]
 }
+
 # 今天能不能叫模型：0＝可以；1＝今天 scrub 失效、L1 停
 l1_gate_today() {
   local d ok rc
   d="$(jq -r '.scrub_check.date // ""' "$STATE" 2>/dev/null)"
   ok="$(jq -r '.scrub_check.ok // false' "$STATE" 2>/dev/null)"
   if [ "$d" = "$today" ]; then [ "$ok" = true ]; return; fi
-  scrub_selfcheck; rc=$?
+  if ! scrub_payload "watchdog 自檢假資料：電話 ${FAKE_PII_PHONE}、錢包 ${FAKE_PII_WALLET}、信箱 ${FAKE_PII_EMAIL}"; then rc=2
+  elif printf '%s' "$SCRUBBED" | grep -qF -e "$FAKE_PII_PHONE" -e "$FAKE_PII_WALLET" -e "$FAKE_PII_EMAIL"; then rc=1
+  else rc=0; fi
   case "$rc" in
     0) st_update --arg d "$today" '.scrub_check = {date:$d, ok:true}'; log "SELFCHECK scrub ok"; return 0 ;;
     1) st_update --arg d "$today" '.scrub_check = {date:$d, ok:false}'
@@ -279,6 +284,12 @@ if [ "${1:-}" = ask ]; then
   q="${2:-}"
   [ -n "$q" ] || { echo "用法：bin/watchdog ask \"<問題>\"" >&2; exit 2; }
   qline="$(wl_line "$q")" || { echo "Watchdog：問題含敏感路徑，不送模型"; log "ASK 問題含敏感路徑，未送"; exit 1; }
+  if ! scrub_payload "$qline"; then
+    log "SCRUB_DOWN ask 連不上或回應壞，不送模型"
+    if ty="$(known_match "$q")"; then echo "Watchdog（規則表）：$ty"; exit 0; fi
+    echo "Watchdog 判不了：scrub 不通，未送模型"; exit 1
+  fi
+  qline="$SCRUBBED"
   snap="$(jq -c --argjson now "$now" '{scrub_check, l1_calls_last_hour: ([(.l1_calls // [])[] | select(. > $now - 3600)] | length), bg_blocked: ((.bg_blocked // {}) | length), alerted_24h: ([(.alerted // {})[] | select(. > $now - 86400)] | length)}' "$STATE" 2>/dev/null)"
   qn=0; [ -f "$QUEUE" ] && qn="$(wc -l < "$QUEUE" | tr -d ' ')"
   ctx="$(tail -n 200 "$LOG" 2>/dev/null | while IFS= read -r l; do wl_line "$l" && echo; done)"
@@ -288,7 +299,7 @@ if [ "${1:-}" = ask ]; then
 $qline
 
 === 狀態快照 ===
-待判佇列：${qn} 項；旋鈕：DEEP_STALL_MIN=$(knob_get DEEP_STALL_MIN 15) BG_STALL_MIN=$(knob_get BG_STALL_MIN 10) REVIEW_EVERY=$(knob_get REVIEW_EVERY 30)
+待判佇列：${qn} 項；旋鈕：DEEP_STALL_MIN=$(knob_get DEEP_STALL_MIN 15) BG_STALL_MIN=$(knob_get BG_STALL_MIN 10) DEEP_REVIEW_MIN=$(knob_get DEEP_REVIEW_MIN 30)
 ${snap}
 
 === watchdog log（最近 200 行，已遮家目錄、丟敏感行）===
@@ -388,10 +399,22 @@ fi
 # 5a) deep tmux session 還在，但對應 transcript 超過 DEEP_STALL_MIN 分鐘沒動 → 告警
 #     session 名對 state/deep/<job>.handle 的 session=，再從 ledger 取 cwd 算 transcript 目錄（同 dispatch-watch）
 deep_stall_min="$(knob_get DEEP_STALL_MIN 15)"
+unowned_max="${WD_UNOWNED_MAX_MIN:-120}"
 while IFS= read -r sess; do
   case "$sess" in deep-*) ;; *) continue ;; esac
   hf="$(grep -l -x "session=$sess" "$MYTHOS_DIR"/state/deep/*.handle 2>/dev/null | head -1)"
-  [ -n "$hf" ] || { log "L0 deep session $sess 對不到 handle，略過"; continue; }
+  [ -n "$hf" ] || {
+    # 無主：名字 deep-<epoch>-<pid> 對不到任何 handle；跑超過 WD_UNOWNED_MAX_MIN 分鐘才告警
+    ep="$(printf '%s' "$sess" | sed -nE 's/^deep-([0-9]+)-[0-9]+$/\1/p')"
+    if ! printf '%s' "$ep" | grep -qE '^[0-9]{9,10}$' || [ "$ep" -gt "$now" ]; then
+      log "L0 deep session $sess 對不到 handle，略過"
+    elif [ $((now - ep)) -ge $((unowned_max * 60)) ]; then
+      alert "unowned-$sess" "無主 deep session $sess 已跑 $(( (now - ep) / 60 )) 分鐘"
+    else
+      log "L0 deep session $sess 無主，跑 $(( (now - ep) / 60 )) 分鐘，未達 ${unowned_max} 分鐘"
+    fi
+    continue
+  }
   jid="$(basename "$hf" .handle)"
   cwd="$(awk -F'\t' -v j="$jid" '$1==j{print $6; exit}' "$TSV" 2>/dev/null)"
   [ -n "$cwd" ] || continue
@@ -537,8 +560,14 @@ if [ -s "$QUEUE" ]; then
       fallback_item "$sig" "$src" "$raw" "白名單丟棄、不出機" ""
       continue
     fi
+    if ! scrub_payload "$txt"; then
+      log "SCRUB_DOWN [$src] 連不上或回應壞，不送模型"
+      fallback_item "$sig" "$src" "$raw" "scrub 不通" ""
+      continue
+    fi
+    txt="$SCRUBBED"
     blocked=0
-    canary_scan "$txt" || blocked=1   # canary 掃描：命中＝不送，轉退路
+    canary_scan "$txt" || blocked=1   # 掃的是去識別後的同一份文字
     if [ "$blocked" = 1 ]; then
       log "CANARY 命中 [$src]，不送模型"
       fallback_item "$sig" "$src" "$raw" "canary 命中" ""
@@ -564,7 +593,7 @@ $((i + 1)). ${C_TXT[$i]}"; i=$((i + 1)); done
 <編號> KNOWN <已知類型>　／　<編號> NEW <一句根因假設，40 字內>　／　<編號> NOISE
 已知類型：${types:-（無）}
 不判 worker 有沒有跑歪（那是別的監看員的事）。
-若認為監看門檻要調，另起一行：KNOB <名稱>=<整數>，名稱只能是 DEEP_STALL_MIN、BG_STALL_MIN、REVIEW_EVERY。
+若認為監看門檻要調，另起一行：KNOB <名稱>=<整數>，名稱只能是 DEEP_STALL_MIN、BG_STALL_MIN、DEEP_REVIEW_MIN。
 其他建議（改 prompt、規則）另起一行：PROPOSE <一句>。
 
 === 待判 ===$items"
