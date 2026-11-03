@@ -559,7 +559,7 @@ rm -f "$F/mythos/state/deep/deep-1-1-a.rc"
 awk -F'\t' 'BEGIN{OFS="\t"} $1=="deep-1-1-a"{$5="pending"} 1' "$J23" > "$J23.tmp" && mv "$J23.tmp" "$J23"
 # handle 沒記 start（舊格式，分不出 pid 是否被重用）→ pid 視為空、不送訊號、exit 1
 sleep 600 >/dev/null 2>&1 & pA=$!
-printf 'pid=%s\nsession=deep-111-1\n' "$pA" > "$F/mythos/state/deep/deep-1-1-a.handle"
+printf 'pid=%s\n' "$pA" > "$F/mythos/state/deep/deep-1-1-a.handle"
 set +e; out="$(c23 deep-1-1-a 2>&1)"; rc=$?; set -e
 [ "$rc" = 1 ] || fail "23n：handle 沒 pid_start 卻 exit ${rc}"
 kill -0 "$pA" 2>/dev/null || fail '23n：handle 沒 pid_start 還是殺了程序'
