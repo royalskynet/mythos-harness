@@ -21,7 +21,7 @@ decide() {
   printf '%s\n' "$1" > "$TMP/t.jsonl"
   agent=""
   [ -n "${4:-}" ] && agent=",\"agent_id\":\"$4\",\"agent_type\":\"general-purpose\""
-  out="$(printf '{"tool_name":"%s","tool_input":%s,"transcript_path":"%s"%s}' "$2" "$3" "$TMP/t.jsonl" "$agent" | node "$GATE" pre)"
+  out="$(printf '{"tool_name":"%s","tool_input":%s,"transcript_path":"%s"%s}' "$2" "$3" "$TMP/t.jsonl" "$agent" | MYTHOS_TRANSCRIPT_DIR="$TMP" node "$GATE" pre)"
   case "$out" in *'"deny"'*) echo deny ;; *) echo allow ;; esac
 }
 expect() { # $1 名稱 $2 期望 $3 實際
