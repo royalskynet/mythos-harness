@@ -108,7 +108,8 @@ cat "$TMP/agents.json" 2>/dev/null || echo '[]'
 EOF
 cat > "$S/tmux" <<'EOF'
 #!/usr/bin/env bash
-[ "$1" = ls ] && cat "$TMP/tmux-sessions" 2>/dev/null
+# deep 專用 socket：只有 `-L deep ls …` 才當 session 清單，預設 socket 印空
+if [ "$1 $2" = "-L deep" ] && [ "$3" = ls ]; then cat "$TMP/tmux-sessions" 2>/dev/null; fi
 exit 0
 EOF
 chmod +x "$S/claude" "$S/tmux"
@@ -214,7 +215,7 @@ wl_case() { # 名稱 → 回 0＝行為正確
 wl_case wl || fail "3：白名單／canary 行為不對"
 [ -s "$TMP/canary-in" ] || fail "3：canary 沒被呼叫"
 grep -q "$FAKE_TOK" "$TMP/canary-in" || fail "3：canary 沒掃到假憑證行"
-grep -qi 'carrie' "$TMP/canary-in" && fail "3：合規專案路徑沒在白名單階段丟掉"
+grep -qi "$(printf 'carr%s' ie)" "$TMP/canary-in" && fail "3：合規專案路徑沒在白名單階段丟掉"
 grep -q "$TMP/home" "$TMP/canary-in" && fail "3：家目錄沒遮"
 # 找不到 canary 入口 → 內建 regex 也要擋
 case_init wl-builtin
@@ -376,6 +377,17 @@ run_wd
 grep -q "無主 deep session deep-$((now - 10800))-999" "$BRIEF" || fail "A3：3 小時的無主 session 沒告警"
 grep -q "deep-$((now - 600))-998" "$BRIEF" && fail "A3：10 分鐘的無主 session 不該告警"
 [ "$(calls)" = 0 ] || fail "A3：L0 情境叫了模型"
+
+# =============== 11. run_to 逾時強制 KILL：忽略 TERM 也要在幾秒內結束 ===============
+eval "$(awk '/^run_to\(\) \{/,/^\}/' "$WD_BIN")"
+t0=$(date +%s)
+# $! 取號，$( … ) 才不會等握著 stdout 的 killed 子程序而卡住
+run_to 1 /bin/bash -c 'trap "" TERM; exec sleep 30' & rt_j=$!
+set +e; wait "$rt_j"; rt_rc=$?; set -e
+el=$(( $(date +%s) - t0 ))
+[ "$rt_rc" != 0 ] || fail "11：run_to 逾時卻 rc=0"
+[ "$el" -le 8 ] || fail "11：run_to 沒強制砍（${el}s）"
+eval "$(awk '/^run_to\(\) \{/,/^\}/' "$ROOT/bin/watchdog")"   # 還原，後續突變子測試用原版
 
 # =============== 7. 突變：拿掉 canary 掃描那行 → 白名單測試必須 fail ===============
 if [ -z "${WD_MUTANT:-}" ]; then
