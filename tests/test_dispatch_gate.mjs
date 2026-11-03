@@ -1,5 +1,5 @@
-// Why: Mythos 只能動口；這個 hook 判錯方向就是放它亂改檔或把它鎖死。
-// 全部用暫存 MYTHOS_DIR＋假 triage＋假 transcript，不碰真的 state／~/.dcq／tmux。
+// Why: Mythos 主 session 只聊天派工（11-03）；這個 hook 判錯方向就是主 session 自己動手佔住對話，或把派工鎖死。
+// 全部用暫存 MYTHOS_DIR＋假 transcript，不碰真的 state／~/.dcq／tmux。
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -12,19 +12,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const GATE = path.join(ROOT, 'bin/dispatch-gate.mjs')
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-gate-test-'))
 const MYTHOS = path.join(TMP, 'mythos')
-const STATE = path.join(MYTHOS, 'state')
-const HANDSON = path.join(STATE, 'dispatch-gate-handson')
-const COUNT = path.join(TMP, 'triage-count')
-const TRIAGE = path.join(TMP, 'triage')
-
-fs.mkdirSync(STATE, { recursive: true })
-fs.writeFileSync(TRIAGE, [
-  '#!/bin/sh',
-  'printf "run\\n" >> "$TRIAGE_COUNT"',
-  'printf "%s\\n" "${TRIAGE_OUT:-mid}"',
-].join('\n') + '\n')
-fs.chmodSync(TRIAGE, 0o755)
-
+fs.mkdirSync(path.join(MYTHOS, 'state'), { recursive: true })
 process.on('exit', () => fs.rmSync(TMP, { recursive: true, force: true }))
 
 let seq = 0
@@ -34,22 +22,15 @@ function transcript(text) {
   return p
 }
 
-function run(mode, payload, extra = {}) {
+function run(mode, payload) {
   return execFileSync(process.execPath, [GATE, mode], {
     input: JSON.stringify(payload),
-    env: {
-      ...process.env,
-      MYTHOS_DIR: MYTHOS,
-      DISPATCH_GATE_TRIAGE: TRIAGE,
-      TRIAGE_COUNT: COUNT,
-      TRIAGE_OUT: 'mid',
-      ...extra,
-    },
+    env: { ...process.env, MYTHOS_DIR: MYTHOS },
   }).toString()
 }
 
 function pre(tool, input, tp, extra = {}) {
-  return run('pre', { tool_name: tool, tool_input: input, transcript_path: tp, session_id: 'test' }, extra)
+  return run('pre', { tool_name: tool, tool_input: input, transcript_path: tp ?? transcript('幫我看一下'), session_id: 'test', ...extra })
 }
 
 function decision(out) {
@@ -57,142 +38,82 @@ function decision(out) {
   return s ? JSON.parse(s).hookSpecificOutput.permissionDecision : null
 }
 
-function clearHandson() {
-  try { fs.unlinkSync(HANDSON) } catch {}
+const PIN = '/Users/x/.claude/delegate-guard/p-123.sh'
+
+test('主 session：背景 Agent 放行、前景 Agent 擋', () => {
+  assert.equal(decision(pre('Agent', { subagent_type: 'dispatcher', prompt: 'x' })), null)
+  assert.equal(decision(pre('Agent', { subagent_type: 'dispatcher', prompt: 'x', run_in_background: true })), null)
+  assert.equal(decision(pre('Agent', { subagent_type: 'dispatcher', prompt: 'x', run_in_background: false })), 'deny')
+})
+
+test('主 session：Write 只准 /tmp、state、工單路徑', () => {
+  assert.equal(decision(pre('Write', { file_path: '~/dev/x.js' })), 'deny')
+  assert.equal(decision(pre('Edit', { file_path: path.join(MYTHOS, 'bin/dispatch') })), 'deny')
+  assert.equal(decision(pre('Write', { file_path: '/tmp/dc-worker/a-task.md' })), null)
+  assert.equal(decision(pre('Write', { file_path: path.join(MYTHOS, 'state/workorders/x.md') })), null)
+})
+
+for (const command of [
+  'bin/dispatch /tmp/a-task.md /tmp mid',
+  `${MYTHOS}/bin/dispatch-retry deep-1-x "補充"`,
+  'bin/dispatch-cancel deep-1-x',
+  'remind add "+30m" "看 x"',
+  'date && echo hi',
+  'FOO=1 bin/dispatch /tmp/a-task.md /tmp hard',
+]) {
+  test(`主 session Bash 放行：${command.slice(0, 40)}`, () => {
+    assert.equal(decision(pre('Bash', { command })), null)
+  })
 }
 
-function countRuns() {
-  try { return fs.readFileSync(COUNT, 'utf8').trim().split('\n').filter(Boolean).length } catch { return 0 }
+for (const command of [
+  // 11-03 使用者 Telegram 實例：主 session 自己跑測試，佔住對話，「哈囉」沒人回
+  'bash tests/test_dispatch_deep.sh',
+  'ls -la',
+  'rg -n x /tmp',
+  'wo-verify /tmp/a.md | tail -5',
+  'git status',
+  'cd /tmp && bin/dispatch /tmp/a-task.md /tmp mid',
+  '/tmp/evil/dispatch x',
+  'bin/../../tmp/dispatch x',
+  'echo "$(rm -rf /tmp/z)"',
+  'echo `touch /tmp/v`',
+  'echo hi > ~/dev/a',
+  'echo ok & touch /tmp/v',
+  "e'ch'o x; rm -rf /tmp/z",
+]) {
+  test(`主 session Bash 擋：${command.slice(0, 40)}`, () => {
+    assert.equal(decision(pre('Bash', { command })), 'deny')
+  })
 }
 
-test('easy 時 Write 任意路徑放行', () => {
-  clearHandson()
-  const out = pre('Write', { file_path: '~/dev/x.js' }, transcript('easy turn'), { TRIAGE_OUT: 'easy' })
-  assert.equal(out.trim(), '')
-})
-
-test('mid 時 Write 非允許路徑 deny、/tmp 工單放行', () => {
-  clearHandson()
-  const tp = transcript('mid turn write')
-  assert.equal(decision(pre('Write', { file_path: '~/dev/x.js' }, tp, { TRIAGE_OUT: 'mid' })), 'deny')
-  assert.equal(pre('Write', { file_path: '/tmp/dc-worker/a-task.md' }, tp).trim(), '')
-})
-
-test('mid 時 Bash 白名單與子指令限制', () => {
-  clearHandson()
-  const tp = transcript('mid turn bash')
-  const cases = [
-    ['ls -la && dcq status', true],
-    ['rm -rf /tmp/x', false],
-    ['git push', false],
-    ['echo hi > ~/dev/a', false],
-    ['sed -i s/a/b/ f', false],
-    ['FOO=1 dcq add /tmp/a.md /tmp mid', true],
-  ]
-  for (const [command, ok] of cases) {
-    const out = pre('Bash', { command }, tp)
-    if (ok) assert.equal(out.trim(), '', command)
-    else assert.equal(decision(out), 'deny', command)
-  }
-})
-
-test('11-03：子代理（agent_id）mid 輪 Write 任意路徑放行、主 session 照擋', () => {
-  const tp = transcript('subagent turn')
-  assert.equal(decision(pre('Write', { file_path: '~/dev/x.js' }, tp, { TRIAGE_OUT: 'mid' })), 'deny')
-  const out = run('pre', { tool_name: 'Write', tool_input: { file_path: '~/dev/x.js' }, transcript_path: tp, agent_id: 'a1', agent_type: 'general-purpose' })
-  assert.equal(out.trim(), '')
-})
-
-test('同一則使用者訊息第二次呼叫不再跑 triage', () => {
-  clearHandson()
-  const before = countRuns()
-  const tp = transcript('cache turn')
-  assert.equal(decision(pre('Write', { file_path: '~/dev/x.js' }, tp, { TRIAGE_OUT: 'mid' })), 'deny')
-  const afterFirst = countRuns()
-  assert.equal(afterFirst, before + 1)
+test('11-03：使用者訊息含 #手動 不解鎖主 session 動手', () => {
+  const tp = transcript('#手動 幫我改 launchd')
   assert.equal(decision(pre('Write', { file_path: '~/dev/x.js' }, tp)), 'deny')
-  assert.equal(countRuns(), afterFirst)
+  assert.equal(decision(pre('Bash', { command: 'launchctl list' }, tp)), 'deny')
 })
 
-test('transcript 不存在時放行', () => {
-  const out = pre('Write', { file_path: '~/dev/x.js' }, path.join(TMP, 'missing.jsonl'))
-  assert.equal(out.trim(), '')
+test('子代理（agent_id）：任意 Write／Bash 放行', () => {
+  const extra = { agent_id: 'a1', agent_type: 'dispatcher' }
+  assert.equal(decision(pre('Write', { file_path: '~/dev/x.js' }, undefined, extra)), null)
+  assert.equal(decision(pre('Bash', { command: 'bash tests/test_dispatch_deep.sh' }, undefined, extra)), null)
+  assert.equal(decision(pre('Agent', { prompt: 'x', run_in_background: false }, undefined, extra)), null)
 })
 
-test('11-03：fail 模式已移除，照收不建 handson 檔', () => {
-  clearHandson()
-  run('fail', { tool_name: 'Bash', tool_input: { command: 'wo-verify /tmp/x.md' }, transcript_path: '' })
-  assert.equal(fs.existsSync(HANDSON), false)
+test('pinGuard：主 session 與子代理都擋，#手動 才解，唯讀放行', () => {
+  const extra = { agent_id: 'a1' }
+  assert.equal(decision(pre('Write', { file_path: PIN }, undefined, extra)), 'deny')
+  assert.equal(decision(pre('Bash', { command: `sed -i s/a/b/ ${PIN}` }, undefined, extra)), 'deny')
+  assert.equal(decision(pre('Bash', { command: `cat ${PIN}` }, undefined, extra)), null)
+  assert.equal(decision(pre('Write', { file_path: PIN }, transcript('#手動 改憑證'), extra)), null)
 })
 
-test('11-02 補洞：mid 時 node -e／python3 -c／find -delete／curl -o／tmux send-keys deny，cd 放行', () => {
-  clearHandson()
-  const tp = transcript('mid turn holes')
-  for (const command of [
-    `node -e "require('fs').writeFileSync('~/dev/a','x')"`,
-    `python3 -c "open('~/dev/a','w')"`,
-    'find ~/dev -name x -delete',
-    'curl -s -o ~/dev/a https://example.com',
-    'tmux -L other send-keys -t s "rm -rf x" Enter',
-  ]) assert.equal(decision(pre('Bash', { command }, tp)), 'deny', command)
-  assert.equal(pre('Bash', { command: 'cd /tmp && ls && dcq status' }, tp).trim(), '')
+test('transcript 不存在時：Agent 照放、主 session 動手照擋', () => {
+  const tp = path.join(TMP, 'missing.jsonl')
+  assert.equal(decision(pre('Agent', { prompt: 'x' }, tp)), null)
+  assert.equal(decision(pre('Bash', { command: 'ls' }, tp)), 'deny')
 })
 
-test('11-02：使用者訊息帶 #手動 本輪解鎖，且不跑 triage', () => {
-  clearHandson()
-  const before = countRuns()
-  const out = pre('Write', { file_path: '~/dev/x.js' }, transcript('#手動 幫我改 launchd'), { TRIAGE_OUT: 'hard' })
-  assert.equal(out.trim(), '')
-  assert.equal(countRuns(), before)
+test('fail 模式是 no-op', () => {
+  assert.equal(run('fail', { tool_name: 'Bash', tool_input: { command: 'wo-verify /tmp/x.md' }, transcript_path: '' }).trim(), '')
 })
-
-test('11-02 deep：mid 時 dispatch-retry／dispatch-cancel 放行', () => {
-  clearHandson()
-  const tp = transcript('mid turn deep retry cancel')
-  assert.equal(pre('Bash', { command: 'bin/dispatch-retry deep-1-x "補充"' }, tp).trim(), '')
-  assert.equal(pre('Bash', { command: 'bin/dispatch-cancel deep-1-x' }, tp).trim(), '')
-})
-
-
-// 引號內的 | ; > 是字面（11-01 gate log 有 13 次唯讀查詢被誤擋）
-for (const cmd of [
-  'rg -n "slug|SLUG" ~/dev/fixindex/fixindex --max-count 40',
-  'rg -n "cmd_fi|cmd_auto|\\bfi\\)|auto\\)" ~/dev/fixindex/fixindex -m 20',
-  "ls -la ~/Library/LaunchAgents | grep -E 'opencode-probe|wiki-m2-cleanup'",
-  "launchctl list | grep -E 'opencode-probe|weekly-retro'",
-  'launchctl print gui/501/com.coco.weekly-retro',
-  'grep "a;b>c" /tmp/x',
-  'ls /tmp 2>&1 | head -3',
-  "awk -F'\\t' '{print $1}' /tmp/a | sort",
-  'echo \'$(literal)\'',
-]) {
-  test(`mid 唯讀查詢放行：${cmd.slice(0, 40)}`, () => {
-    clearHandson()
-    assert.equal(decision(pre('Bash', { command: cmd }, transcript('mid turn'))), null)
-  })
-}
-for (const cmd of [
-  'grep "x" /tmp/a; rm -rf ~/dev',
-  'echo "$(rm -rf /tmp/z)|x"',
-  'echo "a|b" > ~/dev/x',
-  "grep 'x' | sh",
-  'launchctl unload ~/Library/LaunchAgents/x.plist',
-  'launchctl bootout gui/501/x',
-  'echo "unterminated | rm x',
-  // 11-02 Codex 審計反例
-  'echo \\"; touch ~/dev/victim; # "',
-  'echo "$(touch ~/dev/victim)"',
-  'echo `touch ~/dev/victim`',
-  'ls $(touch ~/dev/victim)',
-  'echo ok & touch ~/dev/victim',
-  "git 'pu'sh",
-  `node -e"require('fs').writeFileSync('~/dev/victim','x')"`,
-  `python3 -c"open('~/dev/victim','w')"`,
-  `awk 'BEGIN {system("touch ~/dev/victim")}'`,
-  `awk '{print > "~/dev/victim"}' /tmp/a`,
-]) {
-  test(`mid 危險指令照擋：${cmd.slice(0, 40)}`, () => {
-    clearHandson()
-    assert.equal(decision(pre('Bash', { command: cmd }, transcript('mid turn'))), 'deny')
-  })
-}

@@ -1,25 +1,18 @@
 #!/usr/bin/env node
-// Mythos 的 PreToolUse hook：本輪使用者訊息不是 easy 時，主 session 只准派工，不准自己動手。
-// 動手的一律是子代理（payload 帶 agent_id，harness 填、模型偽造不了）：主 session 派背景 Agent 或 bin/dispatch，
-// 自己繼續跟使用者聊（11-03 對齊 DeepSeek Harness 兩層架構，取代 30 分鐘親手窗口）。
-// 判斷順序：pinGuard（不分主子）→ 子代理放行 → easy 放行 → 前景 Agent 擋 → Write/Edit 看路徑、Bash 看白名單。
+// Mythos 的 PreToolUse hook：主 session（Router）只聊天派工，任何動作交背景子代理，對話不被佔住（11-03 使用者定）。
+// 子代理的呼叫帶 agent_id（harness 填、模型偽造不了）→ pinGuard 後放行；難度判斷與派 O／deep 由 dispatcher 子代理做。
+// 主 session：Agent 必須背景、Bash 只准派工／提醒類秒回指令、Write/Edit 只准自己的 state／memory／工單路徑。
+// 不再用 Laya 判 tier、不再有 #手動 全解鎖（使用者轉貼的文字含「#手動」就整輪解鎖，11-03 又卡死一次）。
 // fail-open：任何例外一律放行，只記 log；deny 也記 log。
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import crypto from 'node:crypto'
-import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const MYTHOS = process.env.MYTHOS_DIR || path.dirname(HERE)
 const STATE = path.join(MYTHOS, 'state')
 const LOGS = path.join(MYTHOS, 'logs')
-const CACHE = path.join(STATE, 'dispatch-gate.json')
-// triage 來自 orchestrator（github.com/royalskynet/orchestrator 的 bin/triage）；本機預設路徑不在就找 PATH
-const TRIAGE_DEFAULT = path.join(os.homedir(), 'dev/dispatch-router/bin/triage')
-const TRIAGE = process.env.DISPATCH_GATE_TRIAGE || (fs.existsSync(TRIAGE_DEFAULT) ? TRIAGE_DEFAULT : 'triage')
-
 const ALLOW_PREFIXES = [
   '/tmp/',
   // 依安裝位置推算（11-03 公開版）：bot 自己的 state／memory／trips＋它的 Claude Code transcript 目錄
@@ -29,18 +22,17 @@ const ALLOW_PREFIXES = [
   path.join(os.homedir(), '.claude/projects', MYTHOS.replace(/[^A-Za-z0-9]/g, '-')) + '/',
 ]
 
+// 主 session 能自己跑的只有秒回、不讀不改程式碼的指令；其餘（含唯讀查詢、跑測試、wo-verify）都派子代理
+// 帶路徑的只准本 bot 的 bin/（主 session 能寫 /tmp，不能讓它寫一支 /tmp/x/dispatch 再借名執行）；不放 cd，免得 bin/ 相對路徑被換目錄
 const WHITELIST = new Set([
-  'ls', 'cat', 'head', 'tail', 'grep', 'rg', 'find', 'wc', 'stat', 'file', 'which',
-  'date', 'echo', 'printf', 'jq', 'sort', 'uniq', 'cut', 'awk', 'sed', 'tr', 'diff',
-  'test', '[', 'true', 'pwd', 'ps', 'pgrep', 'tmux', 'dcq', 'dc', 'wo-verify',
-  'triage', 'fixindex', 'curl', 'git', 'gh', 'node', 'python3', 'remind', 'local-llm',
-  'sleep', 'dispatch', 'dispatch-retry', 'dispatch-cancel', 'cd', 'launchctl',
+  'echo', 'printf', 'true', 'date', 'remind',
+  'dispatch', 'dispatch-retry', 'dispatch-cancel',
 ])
-
-const DENY_GIT = new Set(['commit', 'push', 'reset', 'checkout', 'rebase', 'merge', 'add', 'rm', 'mv', 'clean', 'stash'])
-const DENY_GH = new Set(['pr create', 'pr merge', 'repo create', 'release create', 'issue create'])
-const ALLOW_TMUX = new Set(['capture-pane', 'has-session', 'ls', 'list-sessions'])
-const ALLOW_LAUNCHCTL = new Set(['list', 'print', 'print-disabled'])
+function ownBin(token, cmd) {
+  if (!token.includes('/')) return true
+  const abs = path.resolve(MYTHOS, token.replace(/^~(?=\/)/, os.homedir()))
+  return abs === path.join(MYTHOS, 'bin', cmd)
+}
 
 function log(line) {
   try {
@@ -53,9 +45,9 @@ function allow() {
   process.exit(0)
 }
 
-function deny(tier, why) {
-  const reason = `本輪 Laya 判 ${tier}，Mythos 主 session 只能派工：要動手（含唯讀診斷驗收為何失敗、改 ~/.claude／launchd／Carrie 這類不能出機的活）就用 Agent 工具派背景子代理（run_in_background 不設或 true），子代理的工具呼叫不受此閘；量大低難度的寫工單（含 ## 驗收）用 bin/dispatch <task.md> <cwd> <tier>（easy／mid＝派of、hard＝deep）。派完繼續回使用者。${why ? `（${why}）` : ''}`
-  log(`DENY tier=${tier} ${why}`)
+function deny(why) {
+  const reason = `Mythos 主 session 只聊天派工，不自己動手：用 Agent 工具派背景 dispatcher 子代理（subagent_type: "dispatcher"，不設 run_in_background 或設 true），把使用者原話與你知道的脈絡交給它，它會判難度、自己做或派 O／deep；派完立刻 reply 使用者一句「已派 dispatcher」，結束本回合。${why ? `（${why}）` : ''}`
+  log(`DENY ${why}`)
   fs.writeSync(1, JSON.stringify({
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
@@ -110,40 +102,6 @@ function lastUserText(transcriptPath) {
   return null
 }
 
-function readCache() {
-  try {
-    const c = JSON.parse(fs.readFileSync(CACHE, 'utf8'))
-    if (c && typeof c.key === 'string' && typeof c.tier === 'string') return c
-  } catch {}
-  return {}
-}
-
-function saveCache(c) {
-  try {
-    fs.mkdirSync(STATE, { recursive: true })
-    fs.writeFileSync(CACHE, JSON.stringify(c))
-  } catch {}
-}
-
-function tierOf(text) {
-  const key = crypto.createHash('sha1').update(text).digest('hex')
-  const cache = readCache()
-  if (cache.key === key && ['easy', 'mid', 'hard'].includes(cache.tier)) return cache.tier
-
-  const tmp = path.join(os.tmpdir(), `dispatch-gate-${process.pid}-${Date.now()}.txt`)
-  fs.writeFileSync(tmp, text)
-  let out
-  try {
-    out = execFileSync(TRIAGE, [tmp], { encoding: 'utf8', timeout: 30000 })
-  } finally {
-    try { fs.unlinkSync(tmp) } catch {}
-  }
-  const raw = String(out || '').split(/\r?\n/).map(s => s.trim()).find(Boolean) || ''
-  const tier = ['easy', 'mid', 'hard'].includes(raw) ? raw : 'mid'
-  saveCache({ key, tier, at: Math.floor(Date.now() / 1000) })
-  return tier
-}
-
 function allowedPath(p) {
   if (typeof p !== 'string' || !p) return false
   const abs = path.resolve(p)
@@ -164,67 +122,6 @@ function redirectDenied(command) {
     if (!allowedPath(target)) return true
   }
   return false
-}
-
-function firstNonOpt(args, skipWithValue = []) {
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i]
-    if (skipWithValue.includes(a)) { i++; continue }
-    if (a.startsWith('-')) continue
-    return a
-  }
-  return ''
-}
-
-function firstNonOpts(args, n, skipWithValue = []) {
-  const out = []
-  for (let i = 0; i < args.length && out.length < n; i++) {
-    const a = args[i]
-    if (skipWithValue.includes(a)) { i++; continue }
-    if (a.startsWith('-')) continue
-    out.push(a)
-  }
-  return out
-}
-
-function subAllowed(cmd, args) {
-  if (cmd === 'git') {
-    const sub = firstNonOpt(args, ['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path'])
-    if (DENY_GIT.has(sub)) return false
-  } else if (cmd === 'gh') {
-    const pair = firstNonOpts(args, 2, ['-R', '--repo', '--hostname', '--jq', '--template'])
-    if (DENY_GH.has(pair.join(' '))) return false
-  } else if (cmd === 'sed') {
-    if (args.some(a => a === '-i' || a.startsWith('-i') || a === '--in-place' || a.startsWith('--in-place='))) return false
-  } else if (cmd === 'node' || cmd === 'python3') {
-    // ponytail: -e／-c 可任意寫檔，一律擋；要跑邏輯就放 bin/ 或派工
-    const evals = new Set(['-e', '-c', '-p', '--eval', '--print', '--command'])
-    // -e"…"／-c'…' 黏在一起也算（Codex 審計 #2）
-    if (args.some(a => evals.has(a) || a.startsWith('--eval=') || a.startsWith('--command=') || /^-[a-zA-Z]*[ecp]/.test(a))) return false
-    {
-      const script = firstNonOpt(args, ['-r', '--require', '-C', '--loader', '--import', '--experimental-loader'])
-      if (script) {
-        const abs = path.isAbsolute(script) ? script : path.resolve(MYTHOS, script)
-        const binDir = path.join(MYTHOS, 'bin') + path.sep
-        if (!abs.startsWith(binDir)) return false
-      }
-    }
-  } else if (cmd === 'curl') {
-    if (args.some(a => /^-X(POST|PUT|DELETE)$/i.test(a))) return false
-    if (args.some(a => /^--request=(POST|PUT|DELETE)$/i.test(a))) return false
-    const xi = args.findIndex(a => a === '-X' || a === '--request')
-    if (xi >= 0 && ['POST', 'PUT', 'DELETE'].includes(String(args[xi + 1] || '').toUpperCase())) return false
-    if (args.some(a => a === '-o' || a === '-O' || a.startsWith('--output') || a === '--remote-name')) return false
-    if (args.some(a => a === '-d' || a === '--data' || a.startsWith('--data-') || /^-d./.test(a))) return false
-  } else if (cmd === 'find') {
-    if (args.some(a => a === '-delete' || a.startsWith('-exec') || a.startsWith('-ok') || a === '-fprint')) return false
-  } else if (cmd === 'tmux') {
-    const sub = firstNonOpt(args, ['-L', '-S', '-f', '-c', '-T'])
-    if (!ALLOW_TMUX.has(sub)) return false
-  } else if (cmd === 'launchctl') {
-    if (!ALLOW_LAUNCHCTL.has(args[0])) return false
-  }
-  return true
 }
 
 // 引號內的 | ; & < > 換行只是字面（rg -n "a|b"、grep -E 'x|y'），切段前先換成空白，免得唯讀查詢被誤擋（11-01 gate log 13 次）。
@@ -250,11 +147,7 @@ function maskQuoted(command) {
   return q ? null : out
 }
 
-// awk 能 system()／getline／print > 檔，等於任意執行（Codex 審計 #3）
-const AWK_EXEC = /\bsystem\s*\(|\bgetline\b|\bprintf?\b[^;}]*[>|]/
-
 function bashAllowed(command) {
-  const raw0 = command
   command = maskQuoted(command)
   if (command === null) return false
   if (redirectDenied(command)) return false
@@ -268,9 +161,7 @@ function bashAllowed(command) {
     tokens = tokens.slice(i)
     if (!tokens.length) continue
     const cmd = path.basename(tokens[0])
-    if (!WHITELIST.has(cmd)) return false
-    if (cmd === 'awk' && AWK_EXEC.test(raw0)) return false
-    if (!subAllowed(cmd, tokens.slice(1))) return false
+    if (!WHITELIST.has(cmd) || !ownBin(tokens[0], cmd)) return false
   }
   return true
 }
@@ -294,33 +185,27 @@ function pinGuard(tool, input) {
 }
 
 function pre(payload) {
-  const text = lastUserText(payload.transcript_path)
-  if (!text) allow()
-
-  // 使用者明說 #手動＝本輪解鎖（只有使用者打得出來，模型無法自己繞）
-  if (text.includes('#手動')) allow()
-  pinGuard(String(payload.tool_name || ''), payload.tool_input || {})
-  if (payload.agent_id) allow()
-  const tier = tierOf(text)
-  if (tier === 'easy') allow()
-
   const tool = String(payload.tool_name || '')
   const input = payload.tool_input || {}
+  const text = lastUserText(payload.transcript_path) || ''
 
-  // 前景 Agent 會卡住主 session，派工期間沒法回使用者
-  if (tool === 'Agent' && input.run_in_background === false) return deny(tier, 'Agent 不可 run_in_background:false')
+  // pinGuard 不分主子；只有使用者訊息帶 #手動 能解（只解這一層）
+  if (!text.includes('#手動')) pinGuard(tool, input)
+  if (payload.agent_id) allow()
 
+  if (tool === 'Agent') {
+    if (input.run_in_background === false) return deny('Agent 不可 run_in_background:false，會佔住對話')
+    allow()
+  }
   if (tool === 'Write' || tool === 'Edit' || tool === 'MultiEdit') {
     if (allowedPath(input.file_path)) allow()
-    return deny(tier, `寫入非允許路徑 ${input.file_path || '(空)'}`)
+    return deny(`寫入非允許路徑 ${input.file_path || '(空)'}`)
   }
-
   if (tool === 'Bash') {
     const command = String(input.command || '')
     if (bashAllowed(command)) allow()
-    return deny(tier, `指令不在派工白名單 ${command.slice(0, 200)}`)
+    return deny(`主 session 不跑這個指令 ${command.slice(0, 200)}`)
   }
-
   allow()
 }
 
