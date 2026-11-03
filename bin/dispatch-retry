@@ -29,6 +29,14 @@ row="$(printf '%s\n' "$row" | ledger_fields)"
 task="$(printf '%s\n' "$row" | cut -f3)"
 cwd="$(printf '%s\n' "$row" | cut -f6)"
 tier="$(printf '%s\n' "$row" | cut -f2)"
+# 沿用原後端（D）：dcq→mid、deep→hard，不再只按 tier 猜；tier 缺／壞才用後端推
+backend="$(printf '%s\n' "$row" | cut -f8)"
+# dispatch 只看 tier 選後端（hard→deep），所以 tier 要跟著後端：dcq 票不能被舊 tier=hard 帶去 deep
+case "$backend:$tier" in
+  dcq:easy|dcq:mid) ;;
+  dcq:*) tier=mid ;;
+  deep:*) tier=hard ;;
+esac
 # 沿用原 thread（D）；沒有就 - ，同票重派才接得上
 thread="$(printf '%s\n' "$row" | cut -f7)"
 case "$thread" in ''|-|*[!A-Za-z0-9-]*) thread=- ;; esac

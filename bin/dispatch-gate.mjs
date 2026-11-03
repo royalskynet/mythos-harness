@@ -17,6 +17,8 @@ const ROUTER_TRANSCRIPTS = path.resolve(process.env.MYTHOS_TRANSCRIPT_DIR || pat
 // 原文 §2.1 Router 不執行任務；§4.1 stop()＝TaskStop；ToolSearch 只載延遲工具的 schema
 // SendMessage（B）：對既有 thread 的 dispatcher 續派追問／回報處理；只開這一個，其他不放寬
 const MAIN_ALLOW = new Set(['ToolSearch', 'TaskStop', 'SendMessage'])
+// Telegram 只放「跟使用者說話」這三個，精確名稱、不收前綴（附件下載等交子代理，11-04 Codex 二審）
+const TELEGRAM_ALLOW = new Set(['mcp__telegram__reply', 'mcp__telegram__react', 'mcp__telegram__edit_message'])
 // 原文 §2.2 Worker 不直接跟人互動，結果經 Router 轉述
 const WORKER_DENY = /^mcp__telegram__(reply|react|edit_message)$/
 
@@ -119,7 +121,7 @@ function pre(payload) {
     allow()
   }
 
-  if (tool.startsWith('mcp__telegram__') || MAIN_ALLOW.has(tool)) allow()
+  if (TELEGRAM_ALLOW.has(tool) || MAIN_ALLOW.has(tool)) allow()
   if (tool === 'Agent' || tool === 'Task') {
     if (input.run_in_background === false) deny('Agent 不可 run_in_background:false，會佔住對話')
     if (input.subagent_type !== 'dispatcher') deny(`主 session 只派 dispatcher，不派 ${input.subagent_type || '(未指定)'}`)

@@ -2,8 +2,8 @@
 # 每日閒置重置（OpenClaw session.reset 的對等版）。launchd 每天 04:00／05:00／06:00 跑，零 token，一天只清一次。
 # 條件：pane 沒在跑（無「esc to interrupt」）且最新 transcript ≥ IDLE_MIN 分鐘沒動 → 送 /clear（同 tg-commands 的 /new）。
 # /clear 會觸發 SessionEnd hook → daily-log 先把對話摘要進日誌，新 session 開場再由 session-context 載回。
-# 11-02 改：舊條件「6 小時沒動」永遠不成立——Bess 夜班 03:00 scan 會叫 Mythos 寫計畫（bess-maint），
-# 10-28～11-02 每天 04:00 都判 active (0h)。改成短閒置＋多試幾個整點，Mythos 還在寫計畫就等下一點。
+# 11-02 改：舊條件「6 小時沒動」永遠不成立——夜間排程 03:00 會叫 Router 寫計畫，
+# 於是每天 04:00 都判 active。改成短閒置＋多試幾個整點，Router 還在寫就等下一點。
 IDLE_MIN=${IDLE_MIN:-30}
 TMUX=${TMUX_BIN:-/opt/homebrew/bin/tmux}
 BOT_DIR=$(cd "$(dirname "$0")/.." && pwd)

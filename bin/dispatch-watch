@@ -16,7 +16,10 @@ REVIEW_JUDGE="${REVIEW_JUDGE:-$MYTHOS_DIR/bin/review-judge}"
 # deepclaude 用自己的 CLAUDE_CONFIG_DIR，transcript 不在 ~/.claude/projects（11-02 實查）
 CLAUDE_PROJECTS_DIR="${CLAUDE_PROJECTS_DIR:-$HOME/.deepclaude/config/projects}"
 # 主 session transcript：取 mtime 最新的 *.jsonl
-ROUTER_DIR="${MYTHOS_TRANSCRIPT_DIR:-$HOME/.claude/projects/-Users-51mini-bots-mythos}"
+# transcript 目錄＝工作目錄路徑把非英數字換成 -（跟 dispatch-gate 同一條算式，去個人化）
+ROUTER_SLUG="$(printf '%s' "$MYTHOS_DIR" | sed 's/[^A-Za-z0-9]/-/g')"
+ROUTER_DIR="${MYTHOS_TRANSCRIPT_DIR:-$HOME/.claude/projects/${ROUTER_SLUG}}"
+export ROUTER_DIR
 EVENTS_FILE="$MYTHOS_DIR/state/events.jsonl"
 TSV="$MYTHOS_DIR/state/dispatch-jobs.tsv"
 RESEND_SEC=600
@@ -55,6 +58,10 @@ add_event() { # id status task extra guide
   local id="$1" eid="$1-$2" st="$2" task="$3" extra="$4" guide="$5" payload base
   # 終態冪等（<job>-<狀態>）；STALL／REVIEW 是週期性的，帶時間才不會一張票只抽查一次
   case "$st" in STALL|REVIEW) eid="$1-$2-$now" ;; esac
+  # 同一票同一類型已有未 ACK 的事件就不再建（pane 一直忙時不會每輪多一筆）
+  if jq -e --arg id "$id" --arg st "$st" 'select(.job_id==$id and .status==$st and .acked_at == null)' "$EVENTS_FILE" >/dev/null 2>&1; then
+    return 1
+  fi
   base="${task##*/}"
   local th
   th="$(awk -F'\t' -v j="$1" '$1 == j { NF=8; print $7; exit }' "$TSV")"
@@ -105,6 +112,7 @@ while IFS=$'\t' read -r id tier task epoch status cwd thread backend; do
       latest_jsonl="$(ls -t "$dir"/*.jsonl 2>/dev/null | head -1)"
     fi
 
+    late=0
     max_mtime=0
     if [ -n "$latest_jsonl" ] && [ -f "$latest_jsonl" ]; then
       m="$(mtime_of "$latest_jsonl")"; [ -n "$m" ] && max_mtime="$m"
@@ -128,7 +136,7 @@ while IFS=$'\t' read -r id tier task epoch status cwd thread backend; do
         fi
         if [ "$allow" = 1 ]; then
           guide="判斷是否卡死；卡死就 bin/dispatch-cancel $id 再 bin/dispatch-retry"
-          add_event "$id" STALL "$task" "" "$guide" >/dev/null
+          add_event "$id" STALL "$task" "" "$guide" >/dev/null || late=1
           todo "$last_stall_file" "$now"
           stall_reported=1
         fi
@@ -161,9 +169,20 @@ while IFS=$'\t' read -r id tier task epoch status cwd thread backend; do
         progress="${progress:0:500}"
 
         verdict=""
-        if [ -x "$REVIEW_JUDGE" ]; then
+        # 剩餘預算硬砍：judge 自己有 80s 上限，這裡再包一層，投遞不被抽查拖過 90 秒。
+        # macOS 沒 timeout，用 perl alarm（子行程另開 process group，逾時整組砍）
+        budget=$(( JUDGE_BUDGET - ( $(date +%s) - start ) ))
+        if [ "$budget" -gt 0 ] && [ -x "$REVIEW_JUDGE" ]; then
+          if command -v timeout >/dev/null 2>&1; then
+            to=(timeout "$budget")
+          else
+            to=(perl -e 'my $p = fork; die "fork" unless defined $p;
+              if (!$p) { setpgrp(0, 0); exec @ARGV or exit 127 }
+              $SIG{ALRM} = sub { kill "TERM", -$p; sleep 1; kill "KILL", -$p; exit 124 };
+              alarm shift; waitpid($p, 0); exit($? & 127 ? 128 + ($? & 127) : $? >> 8)' "$budget")
+          fi
           # 不接 pipe：judge 非零退出要算失敗（照舊喚醒），不能被 head 的 0 蓋掉
-          if verdict="$("$REVIEW_JUDGE" "$task" "$progress" 2>/dev/null)"; then
+          if verdict="$("${to[@]}" "$REVIEW_JUDGE" "$task" "$progress" 2>/dev/null)"; then
             verdict="$(printf '%s\n' "$verdict" | head -1)"
           else
             verdict=""
@@ -180,14 +199,18 @@ while IFS=$'\t' read -r id tier task epoch status cwd thread backend; do
         extra="$progress"
         if [ -n "$verdict" ]; then extra="${verdict}｜${progress}"; fi
         guide="對照工單目標判斷有無跑歪；歪了就 bin/dispatch-cancel $id 再 bin/dispatch-retry $id \"<導正指示>\"，沒歪不用回覆"
-        add_event "$id" REVIEW "$task" "$extra" "$guide" >/dev/null
+        add_event "$id" REVIEW "$task" "$extra" "$guide" >/dev/null || late=1
         todo "$last_review_file" "$now"
       fi
     fi
     continue
   fi
 
-  # dcq row
+  # dcq row：這張票已有終態事件（不論 ACK 沒）就不重新推導
+  # （ACK 後 ledger 是 notified-PASS 會跳過；但事件被測試／手動重設回未 ACK 時，舊版每輪多建一筆）
+  if [ "$status" = pending ] && jq -e --arg id "$id" 'select(.job_id==$id and (.status=="PASS" or .status=="FAIL" or .status=="TIMEOUT"))' "$EVENTS_FILE" >/dev/null 2>&1; then
+    continue
+  fi
   if [ -f "$DCQ_HOME/done/$id.job" ]; then
     st=PASS
   elif [ -f "$DCQ_HOME/failed/$id.job" ]; then
@@ -216,8 +239,11 @@ done <<< "$("$NODE_BIN" "$LIB" scan "$EVENTS_FILE" "$newest" 2>/dev/null)"
 # 3) 待送：未 ACK 且（沒送過 or 送過超過 10 分鐘），tries 未滿上限
 pending_events() {
   [ -f "$EVENTS_FILE" ] || return 0
-  jq -rc --argjson now "$now" --argjson resend "$RESEND_SEC" --argjson max "$MAX_TRIES" '
-    select(.acked_at == null and .tries < $max)
+  # 已取消的票不投遞：ledger 標 cancelled 的 job、cancel 時標 cancelled:true 的事件都排除
+  cancelled="$(jq -Rr 'split("\t") | select(.[4]=="cancelled") | .[0]' "$TSV" 2>/dev/null | jq -R . | jq -sc . || echo '[]')"
+  jq -rc --argjson now "$now" --argjson resend "$RESEND_SEC" --argjson max "$MAX_TRIES" --argjson cxl "$cancelled" '
+    select(.acked_at == null and .tries < $max and .cancelled != true)
+    | select(.job_id as $j | ($cxl | index($j)) == null)
     | select(.delivered_at == null or ($now - .delivered_at) >= $resend)
     | [.event_id, .job_id, .status, .summary, .extra, .guide] | @tsv' "$EVENTS_FILE"
 }
@@ -248,8 +274,8 @@ if [ -s "$TODOS.pend" ]; then
 fi
 rm -f "$TODOS.pend"
 
-# 4) 送出成功才套用 last-* 間隔（pane 忙／送失敗留著下輪）
-if [ "$sent" = 1 ] && [ -s "$TODOS" ]; then
+# 4) 送出成功才套用 last-* 間隔（pane 忙／送失敗留著下輪；同類型已有未 ACK 事件也先記，免得每輪重判）
+if [ -s "$TODOS" ] && { [ "$sent" = 1 ] || [ "$late" = 1 ]; }; then
   while IFS=$'\t' read -r f v; do
     [ -n "$f" ] || continue
     printf '%s\n' "$v" > "$f"
@@ -274,7 +300,8 @@ ledger_lock || exit 0
     if [ -n "$new" ]; then
       line="$(printf '%s\n' "$line" | awk -F'\t' -v s="$new" 'BEGIN { OFS="\t" } { NF=8; $5=s; print }')"
     fi
-    printf '%s\n' "$line" | ledger_fields >> "$OUT"
+    # 舊列不改寫：只有狀態變的才補成 8 欄，其餘原樣寫回
+    printf '%s\n' "$line" >> "$OUT"
   done < "$TSV"
   mv "$OUT" "$TSV"
 }

@@ -37,9 +37,16 @@ if [ "$route" = deep ]; then
   id="deep-${epoch}-${name}"
   mkdir -p "$MYTHOS_DIR/state" "$MYTHOS_DIR/state/deep"
   nohup "$ROOT_DIR/bin/dispatch-deep-run" "$id" "$task" "$cwd" >/dev/null 2>&1 &
-  ledger_lock || { echo "拿不到 ledger 鎖" >&2; exit 1; }
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$tier" "$task" "$epoch" pending "$cwd" "$thread" deep \
-    >> "$MYTHOS_DIR/state/dispatch-jobs.tsv"
+  row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$id" "$tier" "$task" "$epoch" pending "$cwd" "$thread" deep)"
+  # 已啟動才拿不到鎖：不能直接退出把這張票弄丟，不持鎖追加並記 WARN 到 logs/dispatch.log
+  if ! ledger_lock; then
+    mkdir -p "$MYTHOS_DIR/logs"
+    printf '%s %s\n' "$(date '+%F %T')" "WARN unlocked append $id" >> "$MYTHOS_DIR/logs/dispatch.log"
+    printf '%s\n' "$row" >> "$MYTHOS_DIR/state/dispatch-jobs.tsv"
+    echo "$id"
+    exit 0
+  fi
+  printf '%s\n' "$row" >> "$MYTHOS_DIR/state/dispatch-jobs.tsv"
   ledger_unlock
   echo "$id"
   exit 0
@@ -60,10 +67,16 @@ fi
 mkdir -p "$MYTHOS_DIR/state"
 # 統一 8 欄（D）：id tier task epoch status cwd thread backend。
 # 第 6 欄 cwd：dispatch-retry 靠它重派（11-03 Codex 審計：O 列少這欄，retry 一律「找不到 cwd」）
-ledger_lock || { echo "拿不到 ledger 鎖" >&2; exit 1; }
-printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$tier" "$task" "$(date +%s)" pending "$cwd" "$thread" dcq \
-  >> "$MYTHOS_DIR/state/dispatch-jobs.tsv"
-ledger_unlock
+row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$id" "$tier" "$task" "$(date +%s)" pending "$cwd" "$thread" dcq)"
+# dcq 已經接手這張票：拿不到鎖也不退出，不持鎖追加並記一行 WARN（鎖本身幾乎不會壞，壞了也不能丟登錄）
+if ! ledger_lock; then
+  mkdir -p "$MYTHOS_DIR/logs"
+  printf '%s %s\n' "$(date '+%F %T')" "WARN unlocked append $id" >> "$MYTHOS_DIR/logs/dispatch.log"
+  printf '%s\n' "$row" >> "$MYTHOS_DIR/state/dispatch-jobs.tsv"
+else
+  printf '%s\n' "$row" >> "$MYTHOS_DIR/state/dispatch-jobs.tsv"
+  ledger_unlock
+fi
 
 "$DCQ" start -j 4 >/dev/null 2>&1 || true
 

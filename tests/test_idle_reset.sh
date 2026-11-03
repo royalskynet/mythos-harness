@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 驗收：idle-reset 短閒置才清、忙就等、一天只清一次（11-02：舊版 6h 條件被 Bess 03:00 夜班永遠擋住）。
+# 驗收：idle-reset 短閒置才清、忙就等、一天只清一次（11-02：舊版 6h 條件被夜間排程永遠擋住）。
 set -euo pipefail
 SRC="$(cd "$(dirname "$0")/../bin" && pwd)/idle-reset"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
@@ -13,7 +13,7 @@ chmod +x "$TMP/tmux"
 run() { TMUX_BIN="$TMP/tmux" PROJ="$TMP/proj" STAMP="$TMP/stamp" sh "$SRC"; }
 old() { touch -t "$(date -v-"$1"M +%Y%m%d%H%M)" "$TMP/proj/a.jsonl"; }
 
-# 50 分鐘前有動（像 Bess 03:10 寫完計畫、04:00 檢查）→ 要清
+# 50 分鐘前有動（像夜間排程 03:10 寫完計畫、04:00 檢查）→ 要清
 old 50; : > "$TMP/pane"; rm -f "$TMP/sent"
 run | grep -q -- '-> /clear' || fail "50 分鐘沒動應送 /clear"
 grep -q '/clear' "$TMP/sent" || fail "沒送 /clear 給 tmux"

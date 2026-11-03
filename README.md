@@ -3,28 +3,31 @@
 [![test](https://github.com/royalskynet/mythos-harness/actions/workflows/test.yml/badge.svg)](https://github.com/royalskynet/mythos-harness/actions/workflows/test.yml)
 
 用 Claude Code 實作 [DeepSeek Harness super-agent](https://x.com/DeepSeekHarness/article/2116857257245987236) 的**雙層架構**：
-你跟 **Sonnet** 聊天（Router），它在對的時機叫 **Opus advisor** 想清楚，該動手的事寫成工單**派到背景 Worker**（免費模型層或 `deep-run`），做完由零 token 腳本把結果打回對話。
+你跟 **Sonnet** 聊天（Router），它只聊天、派工、轉述：每件事都交給背景 **dispatcher** 子代理，dispatcher 判難度後自己做或**派到背景 Worker**（免費模型層或 `deep-run`），做完由零 token 腳本把結果打回對話。Router 自己不跑指令、不讀檔（派工閘全工具白名單硬擋）。
 
 A Claude Code implementation of the two-layer (Router / Worker) super-agent pattern:
-chat with Sonnet, let it consult an Opus advisor at decision points, and delegate real work to background workers.
+chat with Sonnet; every request goes to a background dispatcher subagent that triages and delegates real work to background workers.
 
 ```
-你 ──Telegram──▶ Router：Sonnet（聊天、寫工單）──叫──▶ advisor：Opus（定方向／卡住／宣告完成前）
-                    │  PreToolUse 派工閘：mid／hard 不准親手改檔
-                    ├─ easy ─▶ 自己做
-                    ├─ mid  ─▶ bin/dispatch ─▶ dcq（免費模型層）
-                    └─ hard ─▶ bin/dispatch ─▶ deep-run（背景多步自主）
-                                      ▲
-        dispatch-watch（每 2 分、零 token）── PASS／FAIL／停滯／抽查 ──▶ 打回 Router 對話
-                       └─ 抽查先過 review-judge（免費模型）：ON_TRACK 不打擾 Router
+你 ──Telegram──▶ Router：Sonnet（只聊天、派工、轉述）
+                    │  PreToolUse 派工閘：主 session 只能 Telegram／ToolSearch／TaskStop／背景 dispatcher
+                    └─ Agent(dispatcher, 背景) ─▶ dispatcher：判難度、驗收、retry／cancel
+                                       ├─ easy ─▶ 自己做
+                                       ├─ mid  ─▶ bin/dispatch ─▶ dcq（免費模型層）
+                                       └─ hard ─▶ bin/dispatch ─▶ deep-run（背景多步自主）
+                                                      ▲
+        dispatch-watch（每 2 分、零 token）── 先落 events.jsonl，Router 回覆帶 event_id 才算 ACK ──▶ 打回 Router
+                       │                 未 ACK 10 分鐘重送、上限 5 次；取消的票不再投遞
+                       └─ 抽查先過 review-judge（免費模型，硬預算 90 秒）：ON_TRACK 不打擾 Router
+        watchdog（每 5 分、零 token）── 死鎖、重送用盡、Router 未回、pending 逾 6 小時 → brief-lines
 ```
 
 ## 對照文章 / Mapping
 
 | 文章模組 | 這裡的實作 |
 |---|---|
-| 兩層架構（Router 不執行） | `router/settings.json`：`model`＝Sonnet、`advisorModel`＝Opus；`bin/dispatch-gate.mjs` 用 PreToolUse 硬擋，不靠 prompt 自律（文章 7.1：只靠 prompt 叫自己派工，5 跑 0 次） |
-| 何時叫 advisor | `router/ROUTER.md`：定方向、同錯兩次、宣告完成前 |
+| 兩層架構（Router 不執行） | `bin/dispatch-gate.mjs`：PreToolUse 全工具白名單，主 session 只放 Telegram 回覆三個工具、ToolSearch、TaskStop、SendMessage 與背景 dispatcher，不靠 prompt 自律（文章 7.1：只靠 prompt 叫自己派工，5 跑 0 次） |
+| 何時定方向／宣告完成 | dispatcher（子代理）；`router/ROUTER.md` 是 Router 的規則 |
 | Worker 一次性行程 | `bin/dispatch`：mid → `dcq`，hard → `deep-run`，背景跑、Router 不等 |
 | 全雙工／async start() | `bin/dispatch-watch`：結果事後打進 Router 的 tmux pane，Router 派完就回去聊天 |
 | Watchdog | `dispatch-watch` 停滯／逾時偵測＋`bin/review-judge` 兩段過濾 |
@@ -44,14 +47,16 @@ router/start.sh                      # 不要 Telegram：CHANNELS= router/start.
 tmux -L mythos attach -t mythos
 ```
 
-背景監看用 launchd：`bash launchd/install.sh` 把兩份範本的 `__REPO__`／`__HOME__` 換成 clone 位置與家目錄，寫進 `~/Library/LaunchAgents/` 並載入（`NO_LOAD=1` 只產檔）。
+背景監看用 launchd：`bash launchd/install.sh` 把 `launchd/*.plist` 範本的 `__REPO__`／`__HOME__` 換成 clone 位置與家目錄，寫進 `~/Library/LaunchAgents/`（`NO_LOAD=1` 只產檔）。現有三份：`ai.mythos.dispatch-watch`（回報與抽查）、`ai.mythos.watchdog`（卡住偵測）、`ai.mythos.idle-reset`（閒置 `/clear`）。`ONLY=<label>` 只處理那一份。載入要帶完整 service target：`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist`。
 
 ## 元件 / Components
 
 | 檔案 | 作用 |
 |---|---|
 | `router/settings.json`、`ROUTER.md`、`start.sh` | Router 層：模型分層、派工閘 hook、Router 規則、tmux 啟動 |
-| `bin/dispatch-gate.mjs` | 依 `triage` 判的 easy／mid／hard 決定能不能親手做；mid／hard 只放行唯讀 Bash 白名單 |
+| `bin/dispatch-gate.mjs` | 主 session 全工具白名單（Telegram 只放 reply／react／edit_message）；子代理不能直接回 Telegram；pinGuard、fail-closed |
+| `bin/lib-ledger.sh`、`lib-events.mjs` | 共同 ledger 鎖（原子接手死鎖、只解自己的鎖）、8 欄 schema、事件佇列與精確 ACK 比對 |
+| `bin/watchdog` | 死鎖、重送用盡、Router 未回（只認成功的 reply 結果）、pending 逾 6 小時 |
 | `bin/dispatch`、`dispatch-retry`、`dispatch-cancel`、`dispatch-deep-run` | 派工、重派、取消、deep 背景執行 |
 | `bin/dispatch-watch` | 回報＋停滯／抽查，pane 閒置才打進去 |
 | `bin/review-judge`、`oc-free-ask`、`local-llm` | 免費模型判 Worker 有沒有跑歪；判不出來或格式不對一律 UNKNOWN＝照舊喚醒 Router |
@@ -62,11 +67,11 @@ tmux -L mythos attach -t mythos
 全部用假的 tmux／模型／triage／dcq，不連網、不需要金鑰；CI（macos-latest）每次 push 跑。
 
 ```bash
-bash tests/test_router_template.sh     # Sonnet＋Opus advisor＋派工閘真的接起來
+bash tests/test_router_template.sh     # Router 模板＋派工閘真的接起來
 node --test tests/test_dispatch_gate.mjs   # 36 項，含 Codex 審計的 10 個繞過反例
 bash tests/test-review-judge.sh && bash tests/test-dispatch-route.sh && bash tests/test_idle_reset.sh
 bash tests/test_dispatch_deep.sh && bash tests/test_dispatch_watch.sh
-bash tests/test_launchd_install.sh     # 範本無寫死路徑、換完是合法 plist
+bash tests/test_launchd_install.sh     # 範本無寫死路徑、換完是合法 plist、ONLY= 只產一份
 ```
 
 ## 限制 / Limits

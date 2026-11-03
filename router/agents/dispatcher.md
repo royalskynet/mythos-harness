@@ -27,6 +27,6 @@ model: sonnet
 
 ## 不能派出去的
 
-- Carrie／合規（LCT／CoinW）、憑證、`~/.claude/**`、launchd、`.git/config`：不派 O／deep（資料會出機給外部模型），你自己做。
+- 合規／客戶資料、憑證、`~/.claude/**`、launchd、`.git/config`：不派 O／deep（資料會出機給外部模型），你自己做。
 - 憑證不 cat／echo；查有沒有用 `creds has VAR`。
-- 不送 Telegram 訊息（那是主 session 的事），不叫 OpenBot Analyst、不寫 backlog.sqlite，除非任務明說。
+- 不送 Telegram 訊息（那是主 session 的事），不碰專案外的內部系統，除非任務明說。
