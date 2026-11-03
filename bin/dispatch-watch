@@ -8,8 +8,27 @@ MYTHOS_DIR="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 DCQ_HOME="${DCQ_HOME:-$HOME/.dcq}"
 TMUX_BIN="${TMUX_BIN:-tmux}"
 TIMEOUT_MIN="${DISPATCH_TIMEOUT_MIN:-90}"
+# 旋鈕（11-04）：bin/watchdog L2 寫 state/watchdog-knobs.env（KEY=整數）。只認這兩條、不 source／不 eval；
+# 環境變數優先，沒設才用檔內值。ponytail: 目前只有兩個旋鈕，新增要同步改這裡的 case 與測試白名單。
+KNOBS_FILE="$MYTHOS_DIR/state/watchdog-knobs.env"
+if [ -f "$KNOBS_FILE" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      DEEP_STALL_MIN=*|DEEP_REVIEW_MIN=*) ;;
+      *) continue ;;
+    esac
+    k="${line%%=*}" v="${line#*=}"
+    case "$v" in ''|*[!0-9]*) continue ;; esac
+    eval "[ -n \"\${$k+x}\" ]" && continue
+    eval "$k=\$v"
+  done < "$KNOBS_FILE"
+fi
 DEEP_STALL_MIN="${DEEP_STALL_MIN:-15}"
 DEEP_REVIEW_MIN="${DEEP_REVIEW_MIN:-30}"
+if [ "${DISPATCH_WATCH_PRINT_KNOBS:-}" = 1 ]; then
+  printf 'DEEP_STALL_MIN=%s DEEP_REVIEW_MIN=%s\n' "$DEEP_STALL_MIN" "$DEEP_REVIEW_MIN"
+  exit 0
+fi
 # 抽查兩段過濾（11-02）：fast path 是這支腳本的 mtime／間隔判斷，slow path 交免費模型，
 # 只有 OFF_TRACK／STUCK／看不懂才喚醒 Mythos。沒這支或不可執行＝退回舊行為（每次抽查都喚醒）。
 REVIEW_JUDGE="${REVIEW_JUDGE:-$MYTHOS_DIR/bin/review-judge}"

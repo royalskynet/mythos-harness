@@ -5,7 +5,9 @@ set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/p1-harness.XXXXXX")"
-trap '[ -n "${KEEP:-}" ] || rm -rf "$TMP"' EXIT
+# 背景 sleep 一律登記到 BG_PIDS：中途 fail 也要收掉，否則 ppid=1 成孤兒（見 tests/test-no-orphan-sleep.sh）
+BG_PIDS=()
+trap 'kill ${BG_PIDS[@]+"${BG_PIDS[@]}"} 2>/dev/null || true; [ -n "${KEEP:-}" ] || rm -rf "$TMP"' EXIT
 
 export MYTHOS_DIR="$TMP/mythos"
 export DCQ_HOME="$TMP/dcq"
@@ -532,8 +534,9 @@ printf '%s\n' '#!/bin/sh' "printf '%s\\n' \"\$*\" >> \"$F/tmux.log\"" 'exit 0' >
 chmod +x "$F/tmux"; : > "$F/tmux.log"
 printf 'same body\n' > "$F/a.md"; printf 'same body\n' > "$F/b.md"; printf 'same body\n' > "$F/a2.md"
 # sleep 以外的子程序（含背景 sleep 自己）stdio 都要導掉：$( … ) 會等「所有」握著 stdout 的程序
-sleep 600 >/dev/null 2>&1 & pA=$!
-sleep 600 >/dev/null 2>&1 & pB=$!
+sleep 600 >/dev/null 2>&1 & pA=$!; BG_PIDS+=("$pA")
+sleep 600 >/dev/null 2>&1 & pB=$!; BG_PIDS+=("$pB")
+[ "${P1_FORCE_FAIL_AT:-}" = 23 ] && fail '強制失敗（P1_FORCE_FAIL_AT=23）'
 J23="$F/mythos/state/dispatch-jobs.tsv"
 printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' deep-1-1-a hard "$F/a.md" 1 pending "$TMP" - deep >> "$J23"
 printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' deep-2-2-b hard "$F/b.md" 2 pending "$TMP" - deep >> "$J23"
@@ -558,7 +561,7 @@ kill -0 "$pB" 2>/dev/null || fail '23：取消 A 殺了 B 的 runner'
 rm -f "$F/mythos/state/deep/deep-1-1-a.rc"
 awk -F'\t' 'BEGIN{OFS="\t"} $1=="deep-1-1-a"{$5="pending"} 1' "$J23" > "$J23.tmp" && mv "$J23.tmp" "$J23"
 # handle 沒記 start（舊格式，分不出 pid 是否被重用）→ pid 視為空、不送訊號、exit 1
-sleep 600 >/dev/null 2>&1 & pA=$!
+sleep 600 >/dev/null 2>&1 & pA=$!; BG_PIDS+=("$pA")
 printf 'pid=%s\n' "$pA" > "$F/mythos/state/deep/deep-1-1-a.handle"
 set +e; out="$(c23 deep-1-1-a 2>&1)"; rc=$?; set -e
 [ "$rc" = 1 ] || fail "23n：handle 沒 pid_start 卻 exit ${rc}"
