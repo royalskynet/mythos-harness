@@ -20,6 +20,9 @@ const MAIN_ALLOW = new Set(['ToolSearch', 'TaskStop', 'SendMessage'])
 // Telegram 只放「跟使用者說話」這三個，精確名稱、不收前綴（附件下載等交子代理，11-04 Codex 二審）
 const TELEGRAM_ALLOW = new Set(['mcp__telegram__reply', 'mcp__telegram__react', 'mcp__telegram__edit_message'])
 // 原文 §2.2 Worker 不直接跟人互動，結果經 Router 轉述
+// Mythos 是 YOLO（CLAUDE.md 身分段）：reply 不准把「要不要做」丟回使用者，建議直接派 dispatcher 去做
+// 只擋請示句型；問使用者才知道的資訊（時間、帳號、要哪一份）不在此列
+export const ASK_PERMISSION = /回[「『"]?好[」』"]?|要的話回|要不要我|是否要我|需要我[^。？?\n]{0,20}(嗎|？|\?)|等你(說|回)|我們得決定|你決定要不要/
 const WORKER_DENY = /^mcp__telegram__(reply|react|edit_message)$/
 
 function log(line) {
@@ -121,6 +124,9 @@ function pre(payload) {
     allow()
   }
 
+  if (tool === 'mcp__telegram__reply' && ASK_PERMISSION.test(String(input.text || ''))) {
+    deny('reply 含請示句型', 'Mythos 一律直接做，不問使用者要不要做：把建議項派背景 dispatcher 執行，reply 改成「已派 dispatcher：<要做的事>」。真的缺使用者才知道的資訊，就直接問那個資訊，不用「回好」句型。')
+  }
   if (TELEGRAM_ALLOW.has(tool) || MAIN_ALLOW.has(tool)) allow()
   if (tool === 'Agent' || tool === 'Task') {
     if (input.run_in_background === false) deny('Agent 不可 run_in_background:false，會佔住對話')
