@@ -4,12 +4,16 @@
 // 主 session 整份白名單（11-03 Codex 審計 P0）：只准 Telegram 工具、ToolSearch、TaskStop、背景 dispatcher；Bash／讀寫檔／Web／等待工具一律擋。
 // fail-closed：payload 壞或例外一律擋並記 log（Codex 審計：fail-open＝閘一壞主 session 又能自己動手）。
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const MYTHOS = process.env.MYTHOS_DIR || path.dirname(HERE)
 const LOGS = path.join(MYTHOS, 'logs')
+// 只管 Mythos 本人：同目錄跑的其他 Claude Code（deep-run 等，transcript 在 ~/.deepclaude/…）共用 project settings，
+// 不限範圍就被當 Router 全擋（11-03 deep 派 P1 卡死）。範圍外比照子代理：pinGuard 照做、其餘放行。
+const ROUTER_TRANSCRIPTS = path.resolve(process.env.MYTHOS_TRANSCRIPT_DIR || path.join(os.homedir(), '.claude', 'projects', MYTHOS.replace(/[/.]/g, '-')))
 // 原文 §2.1 Router 不執行任務；§4.1 stop()＝TaskStop；ToolSearch 只載延遲工具的 schema
 const MAIN_ALLOW = new Set(['ToolSearch', 'TaskStop'])
 // 原文 §2.2 Worker 不直接跟人互動，結果經 Router 轉述
@@ -105,7 +109,9 @@ function pre(payload) {
   const tool = String(payload.tool_name || '')
   const input = payload.tool_input || {}
 
-  if (payload.agent_id) {
+  const tp = payload.transcript_path
+  const router = !tp || path.resolve(tp).startsWith(ROUTER_TRANSCRIPTS + path.sep)  // 沒路徑當 Router（fail-closed）
+  if (payload.agent_id || !router) {
     if (WORKER_DENY.test(tool)) deny(`worker ${tool}`, '子代理不直接對使用者發訊息：結論寫在你最後一則訊息，主 session 會轉述。')
     // pinGuard 只剩子代理會碰到；使用者訊息帶 #手動 才解（只解這一層）
     if (!(lastUserText(payload.transcript_path) || '').includes('#手動')) pinGuard(tool, input)

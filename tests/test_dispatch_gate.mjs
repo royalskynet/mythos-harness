@@ -25,7 +25,7 @@ function transcript(text) {
 function run(mode, payload) {
   return execFileSync(process.execPath, [GATE, mode], {
     input: JSON.stringify(payload),
-    env: { ...process.env, MYTHOS_DIR: MYTHOS },
+    env: { ...process.env, MYTHOS_DIR: MYTHOS, MYTHOS_TRANSCRIPT_DIR: TMP },
   }).toString()
 }
 
@@ -85,7 +85,7 @@ test('11-03：使用者訊息含 #手動 不解鎖主 session 動手', () => {
 })
 
 test('fail-closed：payload 不是 JSON 時擋', () => {
-  const out = execFileSync(process.execPath, [GATE, 'pre'], { input: 'not json', env: { ...process.env, MYTHOS_DIR: MYTHOS } }).toString()
+  const out = execFileSync(process.execPath, [GATE, 'pre'], { input: 'not json', env: { ...process.env, MYTHOS_DIR: MYTHOS, MYTHOS_TRANSCRIPT_DIR: TMP } }).toString()
   assert.equal(decision(out), 'deny')
 })
 
@@ -118,4 +118,14 @@ test('transcript 不存在時：Agent 照放、主 session 動手照擋', () => 
 
 test('fail 模式是 no-op', () => {
   assert.equal(run('fail', { tool_name: 'Bash', tool_input: { command: 'wo-verify /tmp/x.md' }, transcript_path: '' }).trim(), '')
+})
+
+test('同目錄的非 Mythos session（deep，transcript 在別處）不被當 Router 擋', () => {
+  const other = path.join(os.tmpdir(), `deep-${process.pid}.jsonl`)
+  fs.writeFileSync(other, JSON.stringify({ type: 'user', message: { role: 'user', content: 'x' } }) + '\n')
+  try {
+    assert.equal(decision(pre('Bash', { command: 'git status' }, other)), null)
+    assert.equal(decision(pre('Bash', { command: 'git status' })), 'deny')  // Mythos 本人照擋
+    assert.equal(decision(pre('Bash', { command: 'git status' }, '')), 'deny')  // 沒路徑 fail-closed
+  } finally { fs.rmSync(other, { force: true }) }
 })

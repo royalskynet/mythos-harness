@@ -13,7 +13,7 @@ S="$ROOT/router/settings.json"
 # 2. settings 裡的 hook 指令原樣執行：Router 親手寫檔擋、背景派 dispatcher 放行
 hook="$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$S")"
 printf '%s\n' '{"type":"user","message":{"role":"user","content":"改一下 foo"}}' > "$TMP/t.jsonl"
-call() { printf '%s' "$1" | CLAUDE_PROJECT_DIR="$ROOT" MYTHOS_DIR="$TMP/bot" sh -c "$hook"; }
+call() { printf '%s' "$1" | CLAUDE_PROJECT_DIR="$ROOT" MYTHOS_DIR="$TMP/bot" MYTHOS_TRANSCRIPT_DIR="$TMP" sh -c "$hook"; }
 mkdir -p "$TMP/bot/state"
 call '{"tool_name":"Write","tool_input":{"file_path":"/opt/elsewhere/foo.js"},"transcript_path":"'"$TMP/t.jsonl"'"}' \
   | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null || fail "應擋 Router 親手寫檔"
