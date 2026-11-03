@@ -12,6 +12,7 @@ for f in "$TMP"/*.plist; do
   if grep -q '__REPO__\|__HOME__' "$f"; then fail "$(basename "$f") 佔位沒換掉"; fi
   plutil -lint "$f" >/dev/null || fail "$(basename "$f") 不是合法 plist"
   script="$(plutil -extract ProgramArguments.1 raw "$f")"
+  case "$(basename "$script")" in *.sh|*.mjs) ;; *) [ -x "$script" ] || fail "$(basename "$f") 指到的 $script 沒有執行權（bash 跑它會靜默失敗）" ;; esac
   [ -f "$script" ] || fail "$(basename "$f") 指到不存在的 $script"
   [ "$(plutil -extract EnvironmentVariables.HOME raw "$f")" = "$HOME" ] || fail "$(basename "$f") HOME 沒換成本機"
 done

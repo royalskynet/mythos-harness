@@ -3,18 +3,37 @@ set -u
 
 MYTHOS_DIR="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 TMUX_BIN="${TMUX_BIN:-tmux}"
+DCQ="${DCQ_BIN:-$(command -v dcq || echo "$HOME/.local/bin/dcq")}"
 DEEP_TASK_DIR="${DEEP_TASK_DIR:-$HOME/.deepclaude/work/.deep}"
 TSV="$MYTHOS_DIR/state/dispatch-jobs.tsv"
+. "$(cd "$(dirname "$0")" && pwd)/lib-ledger.sh"
 
 id="${1:-}"
 if [ -z "$id" ]; then
   echo "用法：bin/dispatch-cancel <id>" >&2
   exit 2
 fi
-case "$id" in
-  deep-*) ;;
-  *) echo "只接受 deep- 開頭 id：$id" >&2; exit 1 ;;
+# backend 以 ledger 為準（D），ledger 沒有舊列就退回 id 前綴
+row="$(awk -F'\t' -v id="$id" '$1 == id { print; exit }' "$TSV" 2>/dev/null | ledger_fields)"
+backend="$(printf '%s' "$row" | cut -f8)"
+case "$backend" in
+  deep|dcq) ;;
+  *) case "$id" in deep-*) backend=deep ;; *) backend=dcq ;; esac ;;
 esac
+
+mark_cancelled() {
+  [ -f "$TSV" ] || return 0
+  ledger_lock || { echo "拿不到 ledger 鎖" >&2; return 1; }
+  tmp="$(mktemp "${TMPDIR:-/tmp}/dispatch-cancel.XXXXXX")"
+  awk -F'\t' -v id="$id" 'BEGIN{OFS="\t"} {NF=8} $1==id {$5="cancelled"} {print}' "$TSV" | ledger_fields > "$tmp" && mv "$tmp" "$TSV"
+  ledger_unlock
+}
+
+if [ "$backend" = dcq ]; then
+  "$DCQ" cancel "$id" || { echo "dcq cancel 失敗：$id" >&2; exit 1; }
+  mark_cancelled
+  exit 0
+fi
 
 pidf="$MYTHOS_DIR/state/deep/$id.pid"
 if [ -f "$pidf" ]; then
@@ -62,10 +81,6 @@ else
 fi
 
 printf '%s\n' 130 > "$MYTHOS_DIR/state/deep/$id.rc"
-
-if [ -f "$TSV" ]; then
-  tmp="$(mktemp "${TMPDIR:-/tmp}/dispatch-cancel.XXXXXX")"
-  awk -F'\t' -v id="$id" 'BEGIN{OFS="\t"} $1==id {$5="cancelled"} {print}' "$TSV" > "$tmp" && mv "$tmp" "$TSV"
-fi
+mark_cancelled
 
 exit 0

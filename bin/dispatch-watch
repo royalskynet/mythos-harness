@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # 派工回報：dcq 結果 + deep 停滯／抽查。Mythos pane 閒置才打進去。
+# A（11-03）：終態先落 state/events.jsonl，送進 tmux 不算數，要主 session transcript 出現 event_id=… 才算 ACK；
+#   未 ACK 10 分鐘重送（tries 上限 5，之後交 bin/watchdog）。
 set -u
 
 MYTHOS_DIR="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -13,25 +15,34 @@ DEEP_REVIEW_MIN="${DEEP_REVIEW_MIN:-30}"
 REVIEW_JUDGE="${REVIEW_JUDGE:-$MYTHOS_DIR/bin/review-judge}"
 # deepclaude 用自己的 CLAUDE_CONFIG_DIR，transcript 不在 ~/.claude/projects（11-02 實查）
 CLAUDE_PROJECTS_DIR="${CLAUDE_PROJECTS_DIR:-$HOME/.deepclaude/config/projects}"
+# 主 session transcript：取 mtime 最新的 *.jsonl
+ROUTER_DIR="${MYTHOS_TRANSCRIPT_DIR:-$HOME/.claude/projects/-Users-mac-mini-bots-mythos}"
+EVENTS_FILE="$MYTHOS_DIR/state/events.jsonl"
 TSV="$MYTHOS_DIR/state/dispatch-jobs.tsv"
+RESEND_SEC=600
+MAX_TRIES=5
+JUDGE_BUDGET=90
+NODE_BIN="${NODE_BIN:-node}"
+LIB="$(cd "$(dirname "$0")" && pwd)/lib-events.mjs"
 
 [ -f "$TSV" ] || exit 0
 mkdir -p "$MYTHOS_DIR/state" 2>/dev/null || exit 0
 mkdir -p "$MYTHOS_DIR/state/deep" 2>/dev/null || true
+# lib 跟腳本走（不跟 MYTHOS_DIR）：測試／別處呼叫時 MYTHOS_DIR 是暫存目錄，沒有 bin/
+. "$(cd "$(dirname "$0")" && pwd)/lib-ledger.sh"
 
 LOCK="$MYTHOS_DIR/state/.dispatch-watch.lock"
 mkdir "$LOCK" 2>/dev/null || exit 0
+# 鎖內記 pid：watchdog 靠它判斷持有者是否已死（C）
+printf '%s\n' "$$" > "$LOCK/pid"
 
-EVENTS="$(mktemp "${TMPDIR:-/tmp}/dispatch-watch-events.XXXXXX")" || { rmdir "$LOCK" 2>/dev/null; exit 0; }
-OUT="$(mktemp "${TMPDIR:-/tmp}/dispatch-watch-tsv.XXXXXX")" || { rm -f "$EVENTS"; rmdir "$LOCK" 2>/dev/null; exit 0; }
-cleanup() { rm -f "$EVENTS" "$OUT"; rmdir "$LOCK" 2>/dev/null; }
+OUT="$(mktemp "${TMPDIR:-/tmp}/dispatch-watch-tsv.XXXXXX")" || { rm -rf "$LOCK"; exit 0; }
+TODOS="$(mktemp "${TMPDIR:-/tmp}/dispatch-watch-todos.XXXXXX")" || { rm -f "$OUT"; rm -rf "$LOCK"; exit 0; }
+cleanup() { rm -f "$OUT" "$TODOS"; rm -rf "$LOCK"; }
 trap cleanup EXIT
 
 now="$(date +%s)"
-
-# queued updates for deep last-* (deferred until pane idle + send success)
-LASTSTALL_UPDATES=()
-LASTREVIEW_UPDATES=()
+start=$now
 
 mtime_of() {
   stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0
@@ -39,195 +50,232 @@ mtime_of() {
 
 slug_of() { printf '%s' "$1" | sed 's/[\/.]/-/g'; }
 
-while IFS=$'\t' read -r id tier task epoch status cwd; do
+# 同一 event_id 只建一次，回 new／existing
+add_event() { # id status task extra guide
+  local id="$1" eid="$1-$2" st="$2" task="$3" extra="$4" guide="$5" payload base
+  # 終態冪等（<job>-<狀態>）；STALL／REVIEW 是週期性的，帶時間才不會一張票只抽查一次
+  case "$st" in STALL|REVIEW) eid="$1-$2-$now" ;; esac
+  base="${task##*/}"
+  local th
+  th="$(awk -F'\t' -v j="$1" '$1 == j { NF=8; print $7; exit }' "$TSV")"
+  case "$th" in ''|-|*[!A-Za-z0-9-]*) th=- ;; esac
+  payload="$(jq -cn --arg eid "$eid" --arg id "$id" --arg st "$st" --arg sum "$base" --arg tk "$task" --arg th "$th" \
+    --arg extra "$extra" --arg guide "$guide" --argjson now "$now" \
+    '{event_id:$eid, job_id:$id, task:$tk, status:$st, summary:$sum, thread:$th, extra:$extra, guide:$guide,
+      created:$now, delivered_at:null, acked_at:null, tries:0}')"
+  [ "$("$NODE_BIN" "$LIB" upsert "$EVENTS_FILE" "$payload")" = new ]
+}
+
+todo() { printf '%s\t%s\n' "$1" "$2" >> "$TODOS"; }
+
+# 1) 掃描 ledger：終態只寫事件、不動 ledger
+while IFS=$'\t' read -r id tier task epoch status cwd thread backend; do
   [ -n "$id" ] || continue
   [ "$status" = pending ] || continue
 
-  case "$id" in
-    deep-*)
-      rcfile="$MYTHOS_DIR/state/deep/$id.rc"
-      outfile="$MYTHOS_DIR/state/deep/$id.out"
-      if [ -f "$rcfile" ]; then
-        rc="$(tr -d '[:space:]' < "$rcfile")"
-        if [ "$rc" = "0" ]; then
-          st=PASS
-        else
-          st=FAIL
-        fi
-        extra=""
-        if [ "$st" = FAIL ]; then
-          extra="$(tail -n 3 "$outfile" 2>/dev/null | tr '\t\n' '  ' | cut -c1-300)"
-        fi
-        case "$st" in
-          PASS) guide="請重跑工單驗收並看改動範圍後收尾" ;;
-          FAIL) guide="看 state/deep/$id.out，判斷後用 bin/dispatch-retry $id \"<補充指示>\" 重派" ;;
-        esac
-        printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$task" "$extra" "$guide" >> "$EVENTS"
-        continue
-      fi
-
-      # no rc yet
-      stall_min="$DEEP_STALL_MIN"
-      review_min="$DEEP_REVIEW_MIN"
-      slug="$(slug_of "$cwd")"
-      dir="$CLAUDE_PROJECTS_DIR/$slug"
-      latest_jsonl=""
-      if [ -d "$dir" ]; then
-        latest_jsonl="$(ls -t "$dir"/*.jsonl 2>/dev/null | head -1)"
-      fi
-
-      max_mtime=0
-      if [ -n "$latest_jsonl" ] && [ -f "$latest_jsonl" ]; then
-        m="$(mtime_of "$latest_jsonl")"; [ -n "$m" ] && max_mtime="$m"
-      fi
-      if [ -f "$outfile" ]; then
-        m="$(mtime_of "$outfile")"; [ -n "$m" ] && [ "$m" -gt "$max_mtime" ] 2>/dev/null && max_mtime="$m"
-      fi
-
-      stall_reported=0
-      if [ "$max_mtime" -gt 0 ]; then
-        age=$((now - max_mtime))
-        if [ "$age" -ge $((stall_min * 60)) ]; then
-          last_stall_file="$MYTHOS_DIR/state/deep/$id.last-stall"
-          allow=1
-          if [ -f "$last_stall_file" ]; then
-            last="$(tr -d '[:space:]' < "$last_stall_file")"
-            case "$last" in ''|*[!0-9]*) allow=1 ;; *) 
-              if [ $((now - last)) -lt $((stall_min * 60)) ]; then allow=0; fi ;;
-            esac
-          fi
-          if [ "$allow" = 1 ]; then
-            st=STALL
-            extra=""
-            guide="判斷是否卡死；卡死就 bin/dispatch-cancel $id 再 bin/dispatch-retry"
-            printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$task" "$extra" "$guide" >> "$EVENTS"
-            LASTSTALL_UPDATES+=("$last_stall_file|$now")
-            stall_reported=1
-          fi
-        fi
-      fi
-
-      if [ "$stall_reported" = 0 ]; then
-        last_review_file="$MYTHOS_DIR/state/deep/$id.last-review"
-        baseline="$epoch"
-        case "$baseline" in ''|*[!0-9]*) baseline="$now" ;; esac
-        if [ -f "$last_review_file" ]; then
-          lr="$(tr -d '[:space:]' < "$last_review_file")"
-          case "$lr" in ''|*[!0-9]*) ;; *) baseline="$lr" ;; esac
-        fi
-        age_review=$((now - baseline))
-        if [ "$age_review" -ge $((review_min * 60)) ]; then
-          # progress
-          progress=""
-          if [ -n "$latest_jsonl" ] && [ -f "$latest_jsonl" ]; then
-            while IFS=$'\t' read -r tname tval; do
-              [ -n "$tname" ] || continue
-              short="${tval:0:60}"
-              item="$tname $short"
-              if [ -z "$progress" ]; then progress="$item"; else progress="${progress}；${item}"; fi
-            done < <(jq -r 'select(.type=="assistant" and .message) | .message.content[]? | select(.type=="tool_use") | [.name, (.input.file_path // .input.command // .input.path // "")] | @tsv' "$latest_jsonl" 2>/dev/null | tail -n 8)
-          fi
-          if [ -z "$progress" ]; then progress="讀不到進度"; fi
-          progress="${progress:0:500}"
-
-          verdict=""
-          if [ -x "$REVIEW_JUDGE" ]; then
-            # 不接 pipe：judge 非零退出要算失敗（照舊喚醒），不能被 head 的 0 蓋掉
-            if verdict="$("$REVIEW_JUDGE" "$task" "$progress" 2>/dev/null)"; then
-              verdict="$(printf '%s\n' "$verdict" | head -1)"
-            else
-              verdict=""
-            fi
-          fi
-          case "$verdict" in
-            ON_TRACK*)
-              # 沒跑歪就不吵 Mythos；間隔立刻往前，下一輪才重判（省免費模型呼叫）
-              printf '%s\n' "$now" > "$last_review_file"
-              continue
-              ;;
-          esac
-
-          st=REVIEW
-          extra="$progress"
-          if [ -n "$verdict" ]; then extra="${verdict}｜${progress}"; fi
-          guide="對照工單目標判斷有無跑歪；歪了就 bin/dispatch-cancel $id 再 bin/dispatch-retry $id \"<導正指示>\"，沒歪不用回覆"
-          printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$task" "$extra" "$guide" >> "$EVENTS"
-          LASTREVIEW_UPDATES+=("$last_review_file|$now")
-        fi
-      fi
-      continue
-      ;;
-    *)
-      # dcq row
-      if [ -f "$DCQ_HOME/done/$id.job" ]; then
+  if [ "$backend" = deep ]; then
+    rcfile="$MYTHOS_DIR/state/deep/$id.rc"
+    outfile="$MYTHOS_DIR/state/deep/$id.out"
+    if [ -f "$rcfile" ]; then
+      rc="$(tr -d '[:space:]' < "$rcfile")"
+      if [ "$rc" = "0" ]; then
         st=PASS
-      elif [ -f "$DCQ_HOME/failed/$id.job" ]; then
-        st=FAIL
-      elif [ -f "$DCQ_HOME/running/$id.job" ]; then
-        case "$epoch" in '' | *[!0-9]*) continue ;; esac
-        if [ $((now - epoch)) -ge $((TIMEOUT_MIN * 60)) ]; then
-          st=TIMEOUT
-        else
-          continue
-        fi
       else
-        continue
+        st=FAIL
       fi
-      printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$task" "" "" >> "$EVENTS"
-      ;;
-  esac
-done < "$TSV"
+      extra=""
+      if [ "$st" = FAIL ]; then
+        extra="$(tail -n 3 "$outfile" 2>/dev/null | tr '\t\n' '  ' | cut -c1-300)"
+      fi
+      case "$st" in
+        PASS) guide="請重跑工單驗收並看改動範圍後收尾" ;;
+        FAIL) guide="看 state/deep/$id.out，判斷後用 bin/dispatch-retry $id \"<補充指示>\" 重派" ;;
+      esac
+      add_event "$id" "$st" "$task" "$extra" "$guide" >/dev/null
+      continue
+    fi
 
-[ -s "$EVENTS" ] || exit 0
+    # no rc yet
+    stall_min="$DEEP_STALL_MIN"
+    review_min="$DEEP_REVIEW_MIN"
+    slug="$(slug_of "$cwd")"
+    dir="$CLAUDE_PROJECTS_DIR/$slug"
+    latest_jsonl=""
+    if [ -d "$dir" ]; then
+      latest_jsonl="$(ls -t "$dir"/*.jsonl 2>/dev/null | head -1)"
+    fi
 
-pane="$("$TMUX_BIN" -L mythos capture-pane -p -t mythos 2>/dev/null)" || exit 0
-if printf '%s\n' "$pane" | tail -15 | grep -q 'esc to interrupt'; then
-  exit 0
+    max_mtime=0
+    if [ -n "$latest_jsonl" ] && [ -f "$latest_jsonl" ]; then
+      m="$(mtime_of "$latest_jsonl")"; [ -n "$m" ] && max_mtime="$m"
+    fi
+    if [ -f "$outfile" ]; then
+      m="$(mtime_of "$outfile")"; [ -n "$m" ] && [ "$m" -gt "$max_mtime" ] 2>/dev/null && max_mtime="$m"
+    fi
+
+    stall_reported=0
+    if [ "$max_mtime" -gt 0 ]; then
+      age=$((now - max_mtime))
+      if [ "$age" -ge $((stall_min * 60)) ]; then
+        last_stall_file="$MYTHOS_DIR/state/deep/$id.last-stall"
+        allow=1
+        if [ -f "$last_stall_file" ]; then
+          last="$(tr -d '[:space:]' < "$last_stall_file")"
+          case "$last" in
+            ''|*[!0-9]*) allow=1 ;;
+            *) if [ $((now - last)) -lt $((stall_min * 60)) ]; then allow=0; fi ;;
+          esac
+        fi
+        if [ "$allow" = 1 ]; then
+          guide="判斷是否卡死；卡死就 bin/dispatch-cancel $id 再 bin/dispatch-retry"
+          add_event "$id" STALL "$task" "" "$guide" >/dev/null
+          todo "$last_stall_file" "$now"
+          stall_reported=1
+        fi
+      fi
+    fi
+
+    if [ "$stall_reported" = 0 ]; then
+      last_review_file="$MYTHOS_DIR/state/deep/$id.last-review"
+      baseline="$epoch"
+      case "$baseline" in ''|*[!0-9]*) baseline="$now" ;; esac
+      if [ -f "$last_review_file" ]; then
+        lr="$(tr -d '[:space:]' < "$last_review_file")"
+        case "$lr" in ''|*[!0-9]*) ;; *) baseline="$lr" ;; esac
+      fi
+      age_review=$((now - baseline))
+      if [ "$age_review" -ge $((review_min * 60)) ]; then
+        # 終態事件先送，抽查放同一輪最後，總預算 JUDGE_BUDGET 秒（A：抽查不得拖住回報）
+        [ $(( $(date +%s) - start )) -lt "$JUDGE_BUDGET" ] || continue
+        # progress
+        progress=""
+        if [ -n "$latest_jsonl" ] && [ -f "$latest_jsonl" ]; then
+          while IFS=$'\t' read -r tname tval; do
+            [ -n "$tname" ] || continue
+            short="${tval:0:60}"
+            item="$tname $short"
+            if [ -z "$progress" ]; then progress="$item"; else progress="${progress}；${item}"; fi
+          done < <(jq -r 'select(.type=="assistant" and .message) | .message.content[]? | select(.type=="tool_use") | [.name, (.input.file_path // .input.command // .input.path // "")] | @tsv' "$latest_jsonl" 2>/dev/null | tail -n 8)
+        fi
+        if [ -z "$progress" ]; then progress="讀不到進度"; fi
+        progress="${progress:0:500}"
+
+        verdict=""
+        if [ -x "$REVIEW_JUDGE" ]; then
+          # 不接 pipe：judge 非零退出要算失敗（照舊喚醒），不能被 head 的 0 蓋掉
+          if verdict="$("$REVIEW_JUDGE" "$task" "$progress" 2>/dev/null)"; then
+            verdict="$(printf '%s\n' "$verdict" | head -1)"
+          else
+            verdict=""
+          fi
+        fi
+        case "$verdict" in
+          ON_TRACK*)
+            # 沒跑歪就不吵 Mythos；間隔立刻往前，下一輪才重判（省免費模型呼叫）
+            printf '%s\n' "$now" > "$last_review_file"
+            continue
+            ;;
+        esac
+
+        extra="$progress"
+        if [ -n "$verdict" ]; then extra="${verdict}｜${progress}"; fi
+        guide="對照工單目標判斷有無跑歪；歪了就 bin/dispatch-cancel $id 再 bin/dispatch-retry $id \"<導正指示>\"，沒歪不用回覆"
+        add_event "$id" REVIEW "$task" "$extra" "$guide" >/dev/null
+        todo "$last_review_file" "$now"
+      fi
+    fi
+    continue
+  fi
+
+  # dcq row
+  if [ -f "$DCQ_HOME/done/$id.job" ]; then
+    st=PASS
+  elif [ -f "$DCQ_HOME/failed/$id.job" ]; then
+    st=FAIL
+  elif [ -f "$DCQ_HOME/running/$id.job" ]; then
+    case "$epoch" in '' | *[!0-9]*) continue ;; esac
+    if [ $((now - epoch)) -ge $((TIMEOUT_MIN * 60)) ]; then
+      st=TIMEOUT
+    else
+      continue
+    fi
+  else
+    continue
+  fi
+  add_event "$id" "$st" "$task" "" "" >/dev/null
+done < <(ledger_fields < "$TSV")
+
+# 2) ACK：transcript 出現 event_id=<id> 的 user 紀錄才算處理完，ledger 才改 notified-*
+newest="$(ls -t "$ROUTER_DIR"/*.jsonl 2>/dev/null | head -1)"
+# 用 here-string 不用 pipe：while 在 pipeline 裡是子 shell，後面的等待會吊住整支腳本
+while IFS=$'\t' read -r eid at; do
+  [ -n "$eid" ] || continue
+  "$NODE_BIN" "$LIB" set "$EVENTS_FILE" "$eid" "{\"acked_at\":$at}" >/dev/null
+done <<< "$("$NODE_BIN" "$LIB" scan "$EVENTS_FILE" "$newest" 2>/dev/null)"
+
+# 3) 待送：未 ACK 且（沒送過 or 送過超過 10 分鐘），tries 未滿上限
+pending_events() {
+  [ -f "$EVENTS_FILE" ] || return 0
+  jq -rc --argjson now "$now" --argjson resend "$RESEND_SEC" --argjson max "$MAX_TRIES" '
+    select(.acked_at == null and .tries < $max)
+    | select(.delivered_at == null or ($now - .delivered_at) >= $resend)
+    | [.event_id, .job_id, .status, .summary, .extra, .guide] | @tsv' "$EVENTS_FILE"
+}
+pending_events > "$TODOS.pend"
+
+sent=0
+if [ -s "$TODOS.pend" ]; then
+  pane="$("$TMUX_BIN" -L mythos capture-pane -p -t mythos 2>/dev/null)" || pane=''
+  if ! printf '%s\n' "$pane" | tail -15 | grep -q 'esc to interrupt'; then
+    parts=''
+    sent_ids=''
+    while IFS=$'\t' read -r eid jid st sum extra guide; do
+      [ -n "$eid" ] || continue
+      th="$(jq -r --arg j "$jid" 'select(.job_id==$j) | .thread // "-"' "$EVENTS_FILE" | head -1)"
+      case "$th" in ''|null) th=- ;; *[!A-Za-z0-9-]*) th=- ;; esac
+      item="[派工回報] event_id=$eid thread=$th $jid $st $sum"
+      if [ -n "$extra" ]; then item="${item}；${extra}"; fi
+      if [ -n "$guide" ]; then item="${item}；${guide}"; fi
+      if [ -z "$parts" ]; then parts="$item"; else parts="${parts}；${item}"; fi
+      sent_ids="${sent_ids}${eid}"$'\n'
+    done < "$TODOS.pend"
+    if [ -n "$parts" ] && "$TMUX_BIN" -L mythos send-keys -t mythos -l -- "$parts" \
+       && "$TMUX_BIN" -L mythos send-keys -t mythos Enter; then
+      "$NODE_BIN" "$LIB" bump "$EVENTS_FILE" "$sent_ids" >/dev/null
+      sent=1
+    fi
+  fi
+fi
+rm -f "$TODOS.pend"
+
+# 4) 送出成功才套用 last-* 間隔（pane 忙／送失敗留著下輪）
+if [ "$sent" = 1 ] && [ -s "$TODOS" ]; then
+  while IFS=$'\t' read -r f v; do
+    [ -n "$f" ] || continue
+    printf '%s\n' "$v" > "$f"
+  done < "$TODOS"
 fi
 
-parts=''
-while IFS=$'\t' read -r id st task extra guide; do
-  base="${task##*/}"
-  item="[派工回報] $id $st $base"
-  if [ -n "$extra" ]; then item="${item}；${extra}"; fi
-  if [ -n "$guide" ]; then item="${item}；${guide}"; fi
-  if [ -z "$parts" ]; then
-    parts="$item"
-  else
-    parts="${parts}；${item}"
-  fi
-done < "$EVENTS"
-
-msg="$parts"
-"$TMUX_BIN" -L mythos send-keys -t mythos -l -- "$msg" || exit 0
-"$TMUX_BIN" -L mythos send-keys -t mythos Enter || exit 0
-
-# apply deferred last-* updates
-for u in ${LASTSTALL_UPDATES[@]+"${LASTSTALL_UPDATES[@]}"}; do
-  f="${u%%|*}"; v="${u##*|}"
-  printf '%s\n' "$v" > "$f"
-done
-for u in ${LASTREVIEW_UPDATES[@]+"${LASTREVIEW_UPDATES[@]}"}; do
-  f="${u%%|*}"; v="${u##*|}"
-  printf '%s\n' "$v" > "$f"
-done
-
-while IFS= read -r line || [ -n "$line" ]; do
-  id="$(printf '%s\n' "$line" | cut -f1)"
-  status="$(printf '%s\n' "$line" | cut -f5)"
-  new=''
-  if [ "$status" = pending ]; then
-    act="$(awk -F'\t' -v id="$id" '$1 == id { print $2; exit }' "$EVENTS")"
-    case "$act" in
-      PASS) new=notified-PASS ;;
-      FAIL) new=notified-FAIL ;;
-      TIMEOUT) new=timeout-notified ;;
-    esac
-  fi
-  if [ -n "$new" ]; then
-    line="$(printf '%s\n' "$line" | awk -F'\t' -v s="$new" 'BEGIN { OFS="\t" } { $5=s; print }')"
-  fi
-  printf '%s\n' "$line" >> "$OUT"
-done < "$TSV"
-
-mv "$OUT" "$TSV"
+# 5) ledger 整檔替換：以事件為準決定 notified-<status>，全程在共同鎖內（D）
+ledger_lock || exit 0
+{
+  while IFS= read -r line || [ -n "$line" ]; do
+    id="$(printf '%s\n' "$line" | cut -f1)"
+    status="$(printf '%s\n' "$line" | cut -f5)"
+    new=''
+    if [ "$status" = pending ] && [ -f "$EVENTS_FILE" ]; then
+      act="$(jq -r --arg id "$id" 'select(.job_id==$id and .acked_at != null) | .status' "$EVENTS_FILE" | tail -1)"
+      case "$act" in
+        PASS) new=notified-PASS ;;
+        FAIL) new=notified-FAIL ;;
+        TIMEOUT) new=timeout-notified ;;
+      esac
+    fi
+    if [ -n "$new" ]; then
+      line="$(printf '%s\n' "$line" | awk -F'\t' -v s="$new" 'BEGIN { OFS="\t" } { NF=8; $5=s; print }')"
+    fi
+    printf '%s\n' "$line" | ledger_fields >> "$OUT"
+  done < "$TSV"
+  mv "$OUT" "$TSV"
+}
+ledger_unlock

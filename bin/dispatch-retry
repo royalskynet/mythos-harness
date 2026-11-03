@@ -4,6 +4,7 @@ set -u
 MYTHOS_DIR="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TSV="$MYTHOS_DIR/state/dispatch-jobs.tsv"
+. "$ROOT_DIR/bin/lib-ledger.sh"
 
 id="${1:-}"
 extra="${2:-}"
@@ -24,14 +25,15 @@ if [ -z "$row" ]; then
   exit 1
 fi
 
+row="$(printf '%s\n' "$row" | ledger_fields)"
 task="$(printf '%s\n' "$row" | cut -f3)"
 cwd="$(printf '%s\n' "$row" | cut -f6)"
 tier="$(printf '%s\n' "$row" | cut -f2)"
-if [ -z "$cwd" ]; then
-  # maybe dcq row has no cwd; cannot retry
-  echo "找不到 cwd：$id" >&2
-  exit 1
-fi
+# 沿用原 thread（D）；沒有就 - ，同票重派才接得上
+thread="$(printf '%s\n' "$row" | cut -f7)"
+case "$thread" in ''|-|*[!A-Za-z0-9-]*) thread=- ;; esac
+# 25c0ae5 前的 O 列沒記 cwd：當時 dcq 在 Mythos 目錄下被呼叫，照舊補
+[ -n "$cwd" ] || cwd="$MYTHOS_DIR"
 
 # root name
 base="$(basename "$task")"
@@ -60,4 +62,4 @@ ts="$(date '+%Y-%m-%d %H:%M')"
   printf '\n\n## 追加指示（第 %s 次重派，%s）\n\n%s\n' "$N" "$ts" "$extra"
 } > "$newtask"
 
-"$ROOT_DIR/bin/dispatch" "$newtask" "$cwd" "$tier"
+DISPATCH_THREAD="$thread" "$ROOT_DIR/bin/dispatch" "$newtask" "$cwd" "$tier"

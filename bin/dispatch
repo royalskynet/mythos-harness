@@ -4,12 +4,16 @@
 #   hard      → deep（OpenCode Go 訂閱，背景多步自主）
 # 用法：bin/dispatch <task.md 絕對路徑> <cwd 絕對路徑> <easy|mid|hard>
 # 舊的第四參數（urgent／later）照收不理，免得還沒重開的 Mythos 派工被 exit 2 擋掉。
+# DISPATCH_THREAD=<代號>（B）：同一個 thread 的追問／重派都帶同一個代號；沒給就寫 -。
 set -u
 
 MYTHOS_DIR="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # dcq 來自 orchestrator（github.com/royalskynet/orchestrator）
 DCQ="${DCQ_BIN:-$(command -v dcq || echo "$HOME/.local/bin/dcq")}"
+thread="${DISPATCH_THREAD:-}"
+case "$thread" in ''|-|*[!A-Za-z0-9-]*) thread=- ;; esac
+. "$ROOT_DIR/bin/lib-ledger.sh"
 
 task="${1:-}"
 cwd="${2:-}"
@@ -33,8 +37,10 @@ if [ "$route" = deep ]; then
   id="deep-${epoch}-${name}"
   mkdir -p "$MYTHOS_DIR/state" "$MYTHOS_DIR/state/deep"
   nohup "$ROOT_DIR/bin/dispatch-deep-run" "$id" "$task" "$cwd" >/dev/null 2>&1 &
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$tier" "$task" "$epoch" pending "$cwd" \
+  ledger_lock || { echo "拿不到 ledger 鎖" >&2; exit 1; }
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$tier" "$task" "$epoch" pending "$cwd" "$thread" deep \
     >> "$MYTHOS_DIR/state/dispatch-jobs.tsv"
+  ledger_unlock
   echo "$id"
   exit 0
 fi
@@ -52,9 +58,12 @@ if [ -z "$id" ]; then
 fi
 
 mkdir -p "$MYTHOS_DIR/state"
+# 統一 8 欄（D）：id tier task epoch status cwd thread backend。
 # 第 6 欄 cwd：dispatch-retry 靠它重派（11-03 Codex 審計：O 列少這欄，retry 一律「找不到 cwd」）
-printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$tier" "$task" "$(date +%s)" pending "$cwd" \
+ledger_lock || { echo "拿不到 ledger 鎖" >&2; exit 1; }
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$tier" "$task" "$(date +%s)" pending "$cwd" "$thread" dcq \
   >> "$MYTHOS_DIR/state/dispatch-jobs.tsv"
+ledger_unlock
 
 "$DCQ" start -j 4 >/dev/null 2>&1 || true
 

@@ -8,6 +8,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - run: bash tests/test_router_template.sh
+      - run: bash tests/test_p1_harness.sh
       - run: node --test tests/test_dispatch_gate.mjs
       - run: bash tests/test-review-judge.sh
       - run: bash tests/test-dispatch-route.sh

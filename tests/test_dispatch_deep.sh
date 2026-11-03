@@ -13,13 +13,20 @@ export CLAUDE_PROJECTS_DIR="$TMP/claude-projects"
 export DEEP_TASK_DIR="$TMP/deep-task"
 export DEEP_RUN_BIN="$TMP/deep-run"
 export DCQ_BIN="$TMP/dcq-fail"
+# A（11-03）：送進 tmux 不算數，Mythos transcript 出現 event_id=… 的 user 紀錄才 ACK；
+# 假 tmux 在 send-keys -l 時追加一筆 user 紀錄，模擬 Router 收到。
+export MYTHOS_TRANSCRIPT_DIR="$TMP/router-transcript"
 
-mkdir -p "$MYTHOS_DIR/state" "$DCQ_HOME" "$CLAUDE_PROJECTS_DIR" "$DEEP_TASK_DIR"
+mkdir -p "$MYTHOS_DIR/state" "$DCQ_HOME" "$CLAUDE_PROJECTS_DIR" "$DEEP_TASK_DIR" "$MYTHOS_TRANSCRIPT_DIR"
 : > "$TMUX_LOG"
 
 cat > "$TMUX_BIN" <<'TMUX'
 #!/bin/sh
 printf '%s\n' "$*" >> "$TMUX_LOG"
+case " $* " in
+  " -L mythos send-keys -t mythos -l "*) esc="$(printf '%s' "$8" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+    printf '{"type":"user","message":{"role":"user","content":"%s"}}\n' "$esc" >> "$MYTHOS_TRANSCRIPT_DIR/router.jsonl" ;;
+esac
 case " $* " in
   *" capture-pane "*)
     if [ "${FAKE_BUSY:-0}" = 1 ]; then printf 'working... esc to interrupt\n'; else printf 'idle screen\n'; fi
@@ -69,12 +76,14 @@ grep -q "^$id	hard" "$TSV" || fail 'tsv deep row missing'
 wait_rc "$id" || fail 'rc not produced'
 [ "$(cat "$MYTHOS_DIR/state/deep/$id.rc")" = 0 ] || fail 'rc not 0'
 
-# 2. rc=0 → watch 送 PASS、狀態 notified-PASS
+# 2. rc=0 → watch 送 PASS（狀態仍 pending，未 ACK）；下一輪掃到 ACK 才 notified-PASS
 : > "$TMUX_LOG"
 FAKE_BUSY=0 bash "$ROOT/bin/dispatch-watch"
 grep -q 'send-keys' "$TMUX_LOG" || fail 'no send-keys'
 grep -q 'PASS' "$TMUX_LOG" || fail 'no PASS'
 grep -q "$id" "$TMUX_LOG" || fail 'no id'
+[ "$(cut -f5 "$TSV")" = 'pending' ] || fail "sent but not acked already notified: $(cut -f5 "$TSV")"
+FAKE_BUSY=0 bash "$ROOT/bin/dispatch-watch"
 [ "$(cut -f5 "$TSV")" = 'notified-PASS' ] || fail "status not notified-PASS: $(cut -f5 "$TSV")"
 
 # 3. rc=1 + CLAIM_MISMATCH → 訊息含 FAIL 與 CLAIM_MISMATCH
@@ -179,6 +188,7 @@ rc=$?
 set -e
 [ "$rc" -eq 1 ] || fail "non-deep cancel expected exit 1 got $rc"
 
+rm -f /tmp/dc-worker/retry-task-r*.md   # 7 產生的暫存檔
 # kill stray sleepers
 pkill -f "sleep 300" 2>/dev/null || true
 

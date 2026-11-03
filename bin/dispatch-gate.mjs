@@ -15,7 +15,8 @@ const LOGS = path.join(MYTHOS, 'logs')
 // 不限範圍就被當 Router 全擋（11-03 deep 派 P1 卡死）。範圍外比照子代理：pinGuard 照做、其餘放行。
 const ROUTER_TRANSCRIPTS = path.resolve(process.env.MYTHOS_TRANSCRIPT_DIR || path.join(os.homedir(), '.claude', 'projects', MYTHOS.replace(/[/.]/g, '-')))
 // 原文 §2.1 Router 不執行任務；§4.1 stop()＝TaskStop；ToolSearch 只載延遲工具的 schema
-const MAIN_ALLOW = new Set(['ToolSearch', 'TaskStop'])
+// SendMessage（B）：對既有 thread 的 dispatcher 續派追問／回報處理；只開這一個，其他不放寬
+const MAIN_ALLOW = new Set(['ToolSearch', 'TaskStop', 'SendMessage'])
 // 原文 §2.2 Worker 不直接跟人互動，結果經 Router 轉述
 const WORKER_DENY = /^mcp__telegram__(reply|react|edit_message)$/
 
