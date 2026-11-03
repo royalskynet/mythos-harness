@@ -37,7 +37,7 @@ mark_events() {
 mark_cancelled() {
   [ -f "$TSV" ] || return 0
   ledger_lock || { echo "拿不到 ledger 鎖" >&2; return 1; }
-  local rc=0
+  local rc=0 tmp
   tmp="$(mktemp "${TMPDIR:-/tmp}/dispatch-cancel.XXXXXX")" || { ledger_unlock; return 1; }
   # 舊列不改寫：只有這張票被改成 cancelled，其餘原樣
   awk -F'\t' -v id="$id" 'BEGIN{OFS="\t"} $1==id {$5="cancelled"; if (NF<8) NF=8} {print}' "$TSV" > "$tmp" \
@@ -69,6 +69,27 @@ hget() { awk -F= -v k="$1" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$handl
 pid="$(hget pid)"; deep_pid="$(hget deep_pid)"; session="$(hget session)"
 case "$pid" in *[!0-9]*) pid='' ;; esac
 case "$deep_pid" in *[!0-9]*) deep_pid='' ;; esac
+
+# pid 會被別的程序重用（票跑完 handle 還留著）：現存程序的本輪 lstart 要與 handle 記的一致才動手。
+# handle 啟動那一刻寫的行程必然還在，所以 lstart 沒抓到也是失配，不送訊號、不收集它的子程序。
+# lstart 與 dispatch-deep-run 寫入時同一個 ps 格式，逐字比對。
+identity_ok() { # pid handle 裡記的 start
+  local cur
+  cur="$(ps -o lstart= -p "$1" 2>/dev/null)"
+  [ -n "$2" ] && [ -n "$cur" ] && [ "$2" = "$cur" ]
+}
+if [ -n "$pid" ] && ! identity_ok "$pid" "$(hget pid_start)"; then
+  echo "身分不符，不送訊號：$pid" >&2
+  pid=''
+fi
+if [ -n "$deep_pid" ] && ! identity_ok "$deep_pid" "$(hget deep_pid_start)"; then
+  echo "身分不符，不送訊號：$deep_pid" >&2
+  deep_pid=''
+fi
+if [ -z "$pid" ] && [ -z "$deep_pid" ]; then
+  echo "取消無效：pid／deep_pid 身分不符或 handle 沒記 start，不送訊號：$handle" >&2
+  exit 1
+fi
 case "$session" in deep-*) case "$session" in *[!A-Za-z0-9-]*) session='' ;; esac ;; *) session='' ;; esac
 
 # session 還沒記進 handle（剛派出）：只認名字結尾恰好是 -<deep_pid> 的那一個，且 deep-run 還活著

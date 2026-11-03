@@ -531,25 +531,51 @@ mkdir -p "$F/deep-task"
 printf '%s\n' '#!/bin/sh' "printf '%s\\n' \"\$*\" >> \"$F/tmux.log\"" 'exit 0' > "$F/tmux"
 chmod +x "$F/tmux"; : > "$F/tmux.log"
 printf 'same body\n' > "$F/a.md"; printf 'same body\n' > "$F/b.md"; printf 'same body\n' > "$F/a2.md"
-sleep 60 & pA=$!
-sleep 60 & pB=$!
+# sleep 以外的子程序（含背景 sleep 自己）stdio 都要導掉：$( … ) 會等「所有」握著 stdout 的程序
+sleep 600 >/dev/null 2>&1 & pA=$!
+sleep 600 >/dev/null 2>&1 & pB=$!
 J23="$F/mythos/state/dispatch-jobs.tsv"
 printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' deep-1-1-a hard "$F/a.md" 1 pending "$TMP" - deep >> "$J23"
 printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' deep-2-2-b hard "$F/b.md" 2 pending "$TMP" - deep >> "$J23"
 printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' deep-3-3-a2 hard "$F/a2.md" 3 pending "$TMP" - deep >> "$J23"
-printf 'pid=%s\nsession=deep-111-1\n' "$pA" > "$F/mythos/state/deep/deep-1-1-a.handle"
+# handle 照 runner 的格式寫：ps -o lstart= 原樣
+printf 'pid=%s\npid_start=%s\nsession=deep-111-1\n' "$pA" "$(ps -o lstart= -p "$pA")" > "$F/mythos/state/deep/deep-1-1-a.handle"
 printf 'pid=%s\nsession=deep-222-2\n' "$pB" > "$F/mythos/state/deep/deep-2-2-b.handle"
 # 舊版的「猜」：.deep 下內容相同、B 最新 → 會挑中 B
 cp "$F/a.md" "$F/deep-task/111-1-task.md"; touch -A -0100 "$F/deep-task/111-1-task.md"
 cp "$F/b.md" "$F/deep-task/222-2-task.md"
 c23() { MYTHOS_DIR="$F/mythos" TMUX_BIN="$F/tmux" DEEP_TASK_DIR="$F/deep-task" bash "$ROOT/bin/dispatch-cancel" "$1"; }
-c23 deep-1-1-a 2>/dev/null || fail '23：有 handle 的 A 取消失敗'
+# 正例：start 相符 → 殺
+c23 deep-1-1-a 2>/dev/null || fail '23：start 相符卻取消失敗'
 grep -q 'kill-session -t =deep-111-1$' "$F/tmux.log" || fail "23：沒照 handle 殺 A 的 session：$(cat "$F/tmux.log")"
 grep -q 'deep-222-2' "$F/tmux.log" && fail "23：取消 A 卻碰了 B 的 session：$(cat "$F/tmux.log")"
-set +e; wait "$pA"; rcA=$?; set -e
-[ "$rcA" != 0 ] || fail '23：A 的 runner 沒被殺'
+for _ in $(seq 1 50); do kill -0 "$pA" 2>/dev/null || break; sleep 0.1; done
+kill -0 "$pA" 2>/dev/null && fail '23：A 的 runner 沒被殺'
+wait "$pA" 2>/dev/null || true
 kill -0 "$pB" 2>/dev/null || fail '23：取消 A 殺了 B 的 runner'
 [ "$(awk -F'\t' '$1=="deep-1-1-a"{print $5}' "$J23")" = cancelled ] || fail '23：A 沒標 cancelled'
+# 反例前把正例留下的 rc 與 cancelled 清回 pending，才量得到「身分不符沒動 ledger」
+rm -f "$F/mythos/state/deep/deep-1-1-a.rc"
+awk -F'\t' 'BEGIN{OFS="\t"} $1=="deep-1-1-a"{$5="pending"} 1' "$J23" > "$J23.tmp" && mv "$J23.tmp" "$J23"
+# handle 沒記 start（舊格式，分不出 pid 是否被重用）→ pid 視為空、不送訊號、exit 1
+sleep 600 >/dev/null 2>&1 & pA=$!
+printf 'pid=%s\nsession=deep-111-1\n' "$pA" > "$F/mythos/state/deep/deep-1-1-a.handle"
+set +e; out="$(c23 deep-1-1-a 2>&1)"; rc=$?; set -e
+[ "$rc" = 1 ] || fail "23n：handle 沒 pid_start 卻 exit ${rc}"
+kill -0 "$pA" 2>/dev/null || fail '23n：handle 沒 pid_start 還是殺了程序'
+case "$out" in *"身分不符，不送訊號：$pA"*) ;; *) fail "23n：沒印身分不符：$out" ;; esac
+# stale-handle：pid 活著但記的 start 不同（pid 被別的程序重用）→ 不送訊號、不碰 tmux、exit 1
+printf 'pid=%s\npid_start=Thu Jan  1 00:00:00 1970\n' "$pA" > "$F/mythos/state/deep/deep-1-1-a.handle"
+printf '%s\n' '{"event_id":"deep-1-1-a-PASS","job_id":"deep-1-1-a","acked_at":null}' >> "$F/mythos/state/events.jsonl"
+: > "$F/tmux.log"
+set +e; out="$(c23 deep-1-1-a 2>&1)"; rc=$?; set -e
+[ "$rc" = 1 ] || fail "23s：stale handle 卻 exit ${rc}"
+kill -0 "$pA" 2>/dev/null || fail '23s：start 不符還是殺了程序'
+case "$out" in *"身分不符，不送訊號：$pA"*) ;; *) fail "23s：沒印身分不符：$out" ;; esac
+[ ! -s "$F/tmux.log" ] || fail "23s：start 不符還動了 tmux：$(cat "$F/tmux.log")"
+[ "$(awk -F'\t' '$1=="deep-1-1-a"{print $5}' "$J23")" = pending ] || fail '23s：身分不符卻改了 ledger 狀態'
+[ "$(cat "$F/mythos/state/deep/deep-1-1-a.rc" 2>/dev/null)" != 130 ] || fail '23s：身分不符卻寫了 rc=130'
+jq -e 'select(.event_id=="deep-1-1-a-PASS") | .cancelled == null' "$F/mythos/state/events.jsonl" >/dev/null || fail '23s：身分不符卻撤銷了事件'
 : > "$F/tmux.log"
 set +e; out="$(c23 deep-3-3-a2 2>&1)"; rc=$?; set -e
 [ "$rc" = 1 ] || fail "23：沒 handle 卻沒 exit 1（rc=${rc}）"
@@ -558,6 +584,13 @@ case "$out" in *沒有\ handle，拒絕猜*) ;; *) fail "23：沒 handle 的訊�
 kill -0 "$pB" 2>/dev/null || fail '23：沒 handle 的取消殺了 B'
 [ "$(awk -F'\t' '$1=="deep-3-3-a2"{print $5}' "$J23")" = pending ] || fail '23：沒 handle 卻改了 ledger'
 [ "$(awk -F'\t' '$1=="deep-2-2-b"{print $5}' "$J23")" = pending ] || fail '23：B 的 ledger 被改了'
+# 正例：start 相符 → 殺（handle 照 runner 格式：一次 ps 取 pid 與 start）
+printf 'pid=%s\npid_start=%s\n' "$pA" "$(ps -o lstart= -p "$pA")" > "$F/mythos/state/deep/deep-1-1-a.handle"
+c23 deep-1-1-a 2>/dev/null || fail '23g：start 相符卻取消失敗'
+for _ in $(seq 1 50); do kill -0 "$pA" 2>/dev/null || break; sleep 0.1; done
+kill -0 "$pA" 2>/dev/null && fail '23g：start 相符卻沒殺'
+wait "$pA" 2>/dev/null || true
+[ "$(awk -F'\t' '$1=="deep-1-1-a"{print $5}' "$J23")" = cancelled ] || fail '23g：start 相符卻沒標 cancelled'
 kill "$pB" 2>/dev/null || true; wait "$pB" 2>/dev/null || true
 # runner 自己會寫 handle（派完就有，cancel 才有得用）
 fresh d23r
@@ -603,5 +636,19 @@ ino0="$(stat -f %i "$E24")"
 node "$ROOT/bin/lib-events.mjs" set "$E24" big-1 '{"acked_at":1}' >/dev/null || fail '24：set 失敗'
 [ "$(stat -f %i "$E24")" != "$ino0" ] || fail '24：events.jsonl 是原地改寫（inode 沒變），不是暫存檔＋rename'
 ls "$F/mythos/state" | grep -q '\.tmp\.' && fail '24：留下 events 暫存檔'
+
+# ---------- 25. P1 judge 無視 TERM 也要被砍：timeout -k 5，一輪 10 秒內結束、REVIEW 照投 ----------
+command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1 || fail '25：測試機沒有 timeout／gtimeout'
+fresh d25
+printf '%s\n' '#!/bin/sh' "printf 'start\\n' >> \"$F/judge.marker\"" 'trap "" TERM' 'sleep 30' 'echo ON_TRACK' > "$F/judge"
+chmod +x "$F/judge"
+due_review deep-25-a "$F/cwd-25"
+: > "$TMUX_LOG"
+t0="$(now)"
+REVIEW_JUDGE="$F/judge" JUDGE_BUDGET=2 fwatch || fail '25：watch 非零退出'
+t1="$(now)"
+[ -s "$F/judge.marker" ] || fail '25：judge 沒啟動'
+[ $(( t1 - t0 )) -le 10 ] || fail "25：judge 忽略 TERM 後 watch 跑了 $(( t1 - t0 )) 秒（沒 -k 5）"
+grep -q 'event_id=deep-25-a-REVIEW' "$TMUX_LOG" || fail '25：judge 被砍後 REVIEW 沒照投'
 
 echo PASS

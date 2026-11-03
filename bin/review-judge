@@ -17,7 +17,7 @@ LLM_TIMEOUT_S="${REVIEW_JUDGE_TIMEOUT_S:-40}"
 # macOS 原生沒有 timeout（coreutils 才有）。沒有就用系統內建 perl：子行程開新 process group，逾時整組砍
 # （只砍 exec 的那支不夠，孫行程握著 stdout，$(…) 會一直等；11-03 CI 抓到）
 run_to() {
-  if command -v timeout >/dev/null 2>&1; then timeout "$LLM_TIMEOUT_S" "$@"; return; fi
+  if command -v timeout >/dev/null 2>&1; then timeout -k 5 "$LLM_TIMEOUT_S" "$@"; return; fi
   perl -e '$t = shift; $p = fork; die "fork" unless defined $p;
     if (!$p) { setpgrp(0, 0); exec @ARGV or exit 127 }
     $SIG{ALRM} = sub { kill "TERM", -$p; sleep 1; kill "KILL", -$p; exit 124 };
