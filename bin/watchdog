@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Watchdog（C，零 token）：每 5 分鐘掃「活著但卡住」的四種情況，能修的先修，修不了的寫一行告警。
+# 告警出口照使用者規定：只寫 brief-lines 的 mythos-watchdog.tsv，由 Coco 08:00 晨報讀；不推 Telegram。
+set -u
+
+MYTHOS_DIR="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+BRIEF_DIR="${MYTHOS_BRIEF_DIR:-${HOME}/.cache/brief-lines}"
+BRIEF="$BRIEF_DIR/mythos-watchdog.tsv"
+LOG="$MYTHOS_DIR/logs/watchdog.log"
+EVENTS_FILE="$MYTHOS_DIR/state/events.jsonl"
+TSV="$MYTHOS_DIR/state/dispatch-jobs.tsv"
+STATE="$MYTHOS_DIR/state/watchdog.json"
+ROUTER_DIR="${MYTHOS_TRANSCRIPT_DIR:-${HOME}/.claude/projects/-Users-51mini-bots-mythos}"
+LOCK="$MYTHOS_DIR/state/.dispatch-watch.lock"
+NODE="${NODE_BIN:-node}"
+now="$(date +%s)"
+
+mkdir -p "$MYTHOS_DIR/logs" "$MYTHOS_DIR/state"
+log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG"; }
+
+# 台灣時間 08:00 前發生的算當天，之後的算隔天（給 Coco 08:00 晨報讀）
+alert_date() {
+  local d h
+  d="$(TZ=Asia/Taipei date '+%Y-%m-%d')"
+  h="$(TZ=Asia/Taipei date '+%H')"
+  [ "$h" -lt 8 ] && printf '%s' "$d" || date -j -v+1d -f %Y-%m-%d "$d" '+%Y-%m-%d'
+}
+alert() { # 同一條只記一次（記在 watchdog.json 的 alerted）
+  local key="$1" text="$2" seen
+  seen="$(jq -r --arg k "$key" '(.alerted[$k] // 0) > 0' "$STATE" 2>/dev/null)"
+  [ "$seen" = true ] && return 0
+  mkdir -p "$BRIEF_DIR"
+  printf '%s\tMythos watchdog：⚠ %s\n' "$(alert_date)" "$text" >> "$BRIEF"
+  jq --arg k "$key" --argjson t "$now" '(.alerted[$k]) = $t' "$STATE" > "$STATE.tmp" 2>/dev/null && mv "$STATE.tmp" "$STATE"
+  log "ALERT $key $text"
+}
+
+# 1) dispatch-watch 的死鎖：超過 10 分鐘且持有 pid 已不在 → 刪鎖
+if [ -d "$LOCK" ]; then
+  pid="$(cat "$LOCK/pid" 2>/dev/null || true)"
+  age=$(( now - $(stat -f %m "$LOCK" 2>/dev/null || stat -c %Y "$LOCK" 2>/dev/null || echo "$now") ))
+  if [ "$age" -ge 600 ]; then
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+      rm -rf "$LOCK"
+      log "FIX stale lock removed pid=${pid:-unknown} age=${age}s"
+    fi
+  fi
+fi
+
+# 2) 事件重送用盡（tries>=5）仍未 ACK → 告警
+if [ -f "$EVENTS_FILE" ]; then
+  while IFS=$'\t' read -r eid jid; do
+    [ -n "$eid" ] || continue
+    alert "event-$eid" "派工回報 $eid（$jid）送了 5 次都沒有人處理，請看狀態或重新派工"
+  done < <(jq -r 'select(.acked_at == null and .tries >= 5) | [.event_id, .job_id] | @tsv' "$EVENTS_FILE" 2>/dev/null)
+fi
+
+# 3) Router 未回：最後一則 Telegram 訊息之後 10 分鐘內沒有任何 telegram reply
+newest="$(ls -t "$ROUTER_DIR"/*.jsonl 2>/dev/null | head -1)"
+if [ -n "$newest" ]; then
+  stale="$("$NODE" - "$newest" <<'JS'
+const fs = require('fs')
+const lines = fs.readFileSync(process.argv[2], 'utf8').split('\n').filter(Boolean)
+let last = -1, replied = false
+for (const l of lines) {
+  let e; try { e = JSON.parse(l) } catch { continue }
+  if (e && e.type === 'user' && e.origin && e.origin.kind === 'channel') {
+    last = e.timestamp ? Date.parse(e.timestamp) : Date.now()
+    replied = false
+    continue
+  }
+  const c = e && e.message && e.message.content
+  if (e && e.type === 'assistant' && Array.isArray(c) && c.some(x => x && x.type === 'tool_use' && x.name === 'mcp__telegram__reply')) replied = true
+}
+if (last < 0 || replied) process.exit(0)
+console.log(last)
+JS
+)"
+  if [ -n "$stale" ]; then
+    secs=$(( stale / 1000 ))
+    if [ $(( now - secs )) -ge 600 ]; then
+      alert "router-noreply-$secs" "使用者訊息超過 10 分鐘沒回覆，Router 可能卡住"
+    fi
+  fi
+fi
+
+# 4) ledger pending 超過 6 小時
+if [ -f "$TSV" ]; then
+  while IFS=$'\t' read -r id epoch; do
+    [ -n "$id" ] || continue
+    alert "pending-$id" "派工 $id 卡在 pending 超過 6 小時"
+  done < <(awk -F'\t' -v now="$now" '$5=="pending" && $4 ~ /^[0-9]+$/ && now-$4 >= 21600 {print $1"\t"$4}' "$TSV")
+fi
+
+log "done"
+exit 0

@@ -10,6 +10,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # dispatch 用自己的位置找 bin/dispatch-deep-run，所以整支搬進假目錄
 mkdir -p "$TMP/m/bin"
 cp "$SRC" "$TMP/m/bin/dispatch"
+cp "$(dirname "$SRC")/lib-ledger.sh" "$TMP/m/bin/lib-ledger.sh"
 cat > "$TMP/m/bin/dispatch-deep-run" <<EOS
 #!/usr/bin/env bash
 echo "\$1" >> "$TMP/deep.log"

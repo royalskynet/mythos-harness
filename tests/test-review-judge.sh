@@ -107,6 +107,12 @@ for a in "\$@"; do [ "\$a" = capture-pane ] && { echo "idle prompt"; exit 0; }; 
 exit 0
 EOF
 chmod +x "$TMP/tmux"
+# A（11-03）：終態事件同一 event_id 只建一次，重送看 delivered_at；每次 run_watch 視為下一輪，
+# 先把已投遞的 delivered_at 推回 11 分鐘前（不碰事件本身，只跨過 10 分鐘重送門檻）
+reset_delivered() {
+  [ -f "$MD/state/events.jsonl" ] || return 0
+  jq -c '.delivered_at = ((now | floor) - 660)' "$MD/state/events.jsonl" > "$TMP/ev.tmp" && mv "$TMP/ev.tmp" "$MD/state/events.jsonl"
+}
 
 # 反例：否定／無效輸出不得被當成 ON_TRACK（11-02 Codex 審計）
 i=0
@@ -124,7 +130,8 @@ out="$(REVIEW_JUDGE_LLM="$TMP/llm-md2" "$BIN/review-judge" "$task" "$progress")"
 case "$out" in STUCK*) ;; *) fail "*STUCK* 應判 STUCK：$out" ;; esac
 
 run_watch() {
-  MYTHOS_DIR="$MD" DCQ_HOME="$TMP/dcq" TMUX_BIN="$TMP/tmux" \
+  reset_delivered
+  MYTHOS_DIR="$MD" DCQ_HOME="$TMP/dcq" TMUX_BIN="$TMP/tmux" MYTHOS_TRANSCRIPT_DIR="$TMP/transcript" \
     CLAUDE_PROJECTS_DIR="$PROJ" REVIEW_JUDGE="$1" bash "$BIN/dispatch-watch"
 }
 

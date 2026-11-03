@@ -15,6 +15,9 @@
 !/bin/dispatch-gate.mjs
 !/bin/dispatch-retry
 !/bin/dispatch-watch
+!/bin/lib-ledger.sh
+!/bin/lib-events.mjs
+!/bin/watchdog
 !/bin/idle-reset
 !/bin/local-llm
 !/bin/oc-free-ask
@@ -28,6 +31,7 @@
 !/tests/test_dispatch_watch.sh
 !/tests/test_router_template.sh
 !/tests/test_launchd_install.sh
+!/tests/test_p1_harness.sh
 !/tests/test-dispatch-gate-handson.sh
 *.bak*
 __pycache__/
