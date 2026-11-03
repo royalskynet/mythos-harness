@@ -28,5 +28,6 @@
 !/tests/test_dispatch_watch.sh
 !/tests/test_router_template.sh
 !/tests/test_launchd_install.sh
+!/tests/test-dispatch-gate-handson.sh
 *.bak*
 __pycache__/

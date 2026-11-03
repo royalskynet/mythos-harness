@@ -47,30 +47,18 @@ if [ -d "$DEEP_TASK_DIR" ]; then
       best="$cand"; best_mtime="$cmtime"
     fi
   done
+  # 只認內容相符的 task 檔。舊版比對不到時 fallback 取「比 pid 新的最新 task」，
+  # 並行時那是別張票（11-03 取消 r1 誤殺 v2，fix 11653）；工單派後被改過也會比對不到，寧可只殺程序
   if [ -n "$best" ]; then
     epoch="$(basename "$best")"
     epoch="${epoch%-task.md}"
-  else
-    # fallback：內容比對不到時，取比 pid 新的最新 *-task.md
-    best2=""; best2_mtime=0
-    for cand in "$DEEP_TASK_DIR"/*-task.md; do
-      [ -f "$cand" ] || continue
-      cmtime="$(stat -f %m "$cand" 2>/dev/null || stat -c %Y "$cand" 2>/dev/null)"
-      : "${cmtime:=0}"
-      [ "$cmtime" -gt "$pid_mtime" ] 2>/dev/null || continue
-      if [ "$cmtime" -gt "$best2_mtime" ]; then best2="$cand"; best2_mtime="$cmtime"; fi
-    done
-    if [ -n "$best2" ]; then
-      epoch="$(basename "$best2")"
-      epoch="${epoch%-task.md}"
-    fi
   fi
 fi
 
 if [ -n "$epoch" ]; then
   "$TMUX_BIN" -L deep kill-session -t "deep-$epoch" 2>/dev/null || true
 else
-  echo "警告：找不到 EPOCH，只殺程序" >&2
+  echo "警告：找不到內容相符的 task 檔，只殺程序、不動 tmux（用 $TMUX_BIN -L deep ls 確認後再處理）" >&2
 fi
 
 printf '%s\n' 130 > "$MYTHOS_DIR/state/deep/$id.rc"

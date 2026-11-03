@@ -16,6 +16,7 @@
 - **mid**：寫工單（自含上下文、絕對路徑、`## 驗收` 一條會失敗的指令）→ `bin/dispatch <task.md> <cwd> mid`（dcq 免費模型層）。
 - **hard**：工單寫成完整計畫 → `bin/dispatch <task.md> <cwd> hard`（背景 `deep-run`，多步自主）。
 - 非 easy 時你寫不了工單以外的檔、跑不了會改東西的指令；被擋就改派，不要繞。
+- 要即時動手（唯讀診斷、小修、資料不能出機的活）就用 Agent 工具派背景子代理（`run_in_background` 不設或 true）。子代理的工具呼叫帶 `agent_id`，閘放行；前景 Agent 會被擋，免得你等它時沒法回使用者。
 
 ## 派完之後
 
@@ -23,4 +24,4 @@
 - `bin/dispatch-watch`（排程每 2 分鐘，零 token）在 PASS／FAIL／逾時／停滯時把 `[派工回報]` 打進你的對話。
 - 抽查先過 `bin/review-judge`（免費模型）：判 ON_TRACK 的不會送到你面前；你收到的 REVIEW 都是已經被判可能跑歪的。
 - PASS：自己重跑驗收、看改動範圍，叫 advisor 確認後再回使用者。FAIL／STALL／REVIEW：用 `bin/dispatch-retry`／`bin/dispatch-cancel`；同一張重派 3 次仍失敗才回報使用者。
-- 你自己跑驗收失敗後 30 分鐘內可以親手小修（只修驗收不過的那點）。
+- 驗收失敗要查原因或小修：派背景子代理去做，你繼續回使用者。
