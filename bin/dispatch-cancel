@@ -86,11 +86,12 @@ if [ -n "$deep_pid" ] && ! identity_ok "$deep_pid" "$(hget deep_pid_start)"; the
   echo "身分不符，不送訊號：$deep_pid" >&2
   deep_pid=''
 fi
-if [ -z "$pid" ] && [ -z "$deep_pid" ]; then
-  echo "取消無效：pid／deep_pid 身分不符或 handle 沒記 start，不送訊號：$handle" >&2
+case "$session" in deep-*) case "$session" in *[!A-Za-z0-9-]*) session='' ;; esac ;; *) session='' ;; esac
+# pid 都判空又沒有 session 可精確殺＝無從取消，不動 ledger
+if [ -z "$pid" ] && [ -z "$deep_pid" ] && [ -z "$session" ]; then
+  echo "取消無效：pid／deep_pid 身分不符或 handle 沒記 start，也沒有 session：$handle" >&2
   exit 1
 fi
-case "$session" in deep-*) case "$session" in *[!A-Za-z0-9-]*) session='' ;; esac ;; *) session='' ;; esac
 
 # session 還沒記進 handle（剛派出）：只認名字結尾恰好是 -<deep_pid> 的那一個，且 deep-run 還活著
 if [ -z "$session" ] && [ -n "$deep_pid" ] && kill -0 "$deep_pid" 2>/dev/null; then
