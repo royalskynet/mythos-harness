@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 驗收：bin/dispatch 路由只看難度（11-02 使用者定，不分急緩）：easy／mid→dcq 派of（free）、hard→deep；舊第四參數照收不理。
 set -euo pipefail
+export DISPATCH_HARD_BACKEND=deep  # 工單 D：hard 預設改 bg-hard；本檔驗的是 deep 舊路徑，明設才走 deep-run
 
 SRC="$(cd "$(dirname "$0")/../bin" && pwd)/dispatch"
 TMP="$(mktemp -d)"

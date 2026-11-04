@@ -111,6 +111,27 @@ function pinGuard(tool, input) {
   process.exit(0)
 }
 
+// 計畫第 5 項（工單 D）：Router 派背景 worker 只開這一條 Bash，整條指令完全符合才放；其餘 Bash 照舊 deny。
+// 字元集已排除 ;&|$` 與換行（JS 的 $ 不帶 m 旗標只認字串尾），另外再明擋一次，正規式被改寬也不會漏。
+export const ROUTER_BG_BASH = /^bin\/dispatch-bg( --thread [A-Za-z0-9-]+)? [A-Za-z0-9-]+ state\/bg\/[A-Za-z0-9._-]+\.md$/
+const BG_META = /[;&|$`\n\r]/
+const BG_DIR = path.join(MYTHOS, 'state', 'bg')
+function routerBgBash(cmd) {
+  const c = String(cmd ?? '')
+  return !BG_META.test(c) && ROUTER_BG_BASH.test(c)
+}
+// prompt 檔只准 Write 到 $MYTHOS/state/bg/ 底下一層、檔名同上；目標檔或 state／state/bg 是 symlink 一律不准（會寫到目錄外）
+function routerBgWrite(file) {
+  if (typeof file !== 'string' || !file) return false
+  const abs = path.resolve(MYTHOS, file)
+  const name = path.basename(abs)
+  if (path.dirname(abs) !== BG_DIR || !/^[A-Za-z0-9_-][A-Za-z0-9._-]*\.md$/.test(name)) return false
+  for (const p of [abs, BG_DIR, path.dirname(BG_DIR)]) {
+    try { if (fs.lstatSync(p).isSymbolicLink()) return false } catch {}
+  }
+  return true
+}
+
 function pre(payload) {
   const tool = String(payload.tool_name || '')
   const input = payload.tool_input || {}
@@ -133,6 +154,8 @@ function pre(payload) {
     if (input.subagent_type !== 'dispatcher') deny(`主 session 只派 dispatcher，不派 ${input.subagent_type || '(未指定)'}`)
     allow()
   }
+  if (tool === 'Bash' && routerBgBash(input.command)) allow()
+  if (tool === 'Write' && routerBgWrite(input.file_path)) allow()
   deny(`主 session 不用 ${tool || '(空)'}`)
 }
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -eu
+export DISPATCH_HARD_BACKEND=deep  # 工單 D：hard 預設改 bg-hard；本檔驗的是 deep 舊路徑，明設才走 deep-run
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/dispatch-deep-test.XXXXXX")"

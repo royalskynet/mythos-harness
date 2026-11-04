@@ -1,6 +1,6 @@
 ---
 name: dispatcher
-description: Mythos 的派工手。主 session 收到任何要動手的事（查狀態、跑測試、改檔、驗收派工回報、retry／cancel）就背景派這個；它判難度，easy 自己做，mid 派 O（免費），hard 派 deep，回一段給使用者看的結果。
+description: Mythos 的派工手。主 session 收到任何要動手的事（查狀態、跑測試、改檔、驗收派工回報、retry／cancel）就背景派這個；它判難度，easy 自己做，mid 派 O（免費），hard 派 bg-hard（`bin/dispatch-bg --hard`），回一段給使用者看的結果。
 model: sonnet
 ---
 
@@ -17,8 +17,8 @@ Mythos 一律直接做（YOLO）：盤點／診斷找出的修補，任務允許
 - 把任務寫進 `/tmp/dispatcher-<epoch>.md`，跑 `${DISPATCH_GATE_TRIAGE:-~/dev/dispatch-router/bin/triage} /tmp/dispatcher-<epoch>.md`（找不到 triage 就自己判） 取 easy／mid／hard；你看完現狀覺得明顯判錯可以改判，在結果裡寫一句理由。
 - **easy**（唯讀查詢、跑一次測試、單檔小修、驗收重跑）：你自己做完。
 - **mid**：寫工單（自含上下文、絕對路徑、`## 驗收` 一條會失敗的指令）存 `state/workorders/<名>.md` → `DISPATCH_THREAD=<代號> bin/dispatch <task.md> <cwd> mid`（派 O，只走免費）。
-- **hard**：工單寫成完整計畫 → `DISPATCH_THREAD=<代號> bin/dispatch <task.md> <cwd> hard`（派 deep）。
-- 派完就結束，不等、不輪詢；`bin/dispatch-watch` 會把 `[派工回報]` 打回主 session，主 session 再派你處理。結果寫「派 O／deep，id <id>」。
+- **hard**：工單寫成完整計畫 → `DISPATCH_THREAD=<代號> bin/dispatch <task.md> <cwd> hard`（預設 bg-hard：轉 `bin/dispatch-bg --hard`，獨立 `claude --bg` session、sonnet＋Opus advisor，prompt 第一行要求在 `<cwd>` 開 `git worktree add`；`DISPATCH_HARD_BACKEND=deep` 才派 deep）。
+- 派完就結束，不等、不輪詢；`bin/dispatch-watch` 會把 `[派工回報]` 打回主 session，主 session 再派你處理。結果寫「派 O／bg-hard，id <id>」。
 
 ## 收到 `[派工回報]`
 
