@@ -11,6 +11,7 @@ cleanup() {
     for k in $(pgrep -P "$p" 2>/dev/null); do kill "$k" 2>/dev/null || true; done
     kill "$p" 2>/dev/null || true
   done
+  chflags -R nouchg "$TMP" 2>/dev/null || true  # 8b 中途失敗時 events.jsonl 還帶 uchg，rm 刪不掉
   [ -n "${KEEP:-}" ] || rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -179,8 +180,8 @@ track
 [ "$(status_of "$idc")" = queued ] || fail "7：C 跟 B 同輪被拉起：$(status_of "$idc")"
 [ "$(started "$idc")" = 0 ] || fail '7：C 跟 B 同輪啟動了 runner'
 
-# 8) F2：runner 直接 exit 1、不寫 handle → 未逾 DEEP_HANDOFF_SEC 不動；逾時一輪只寫 rc=127＋handoff，
-#    ledger 不改、由第 1 步出 FAIL（extra 帶原因），同 repo 的 queued 同一輪被拉起。寫不了（events 目錄唯讀）下輪可重掃。
+# 8) F2：runner 直接 exit 1、不寫 handle → 未逾 DEEP_HANDOFF_SEC 不動；逾時一輪只寫 handoff＋rc=127，
+#    ledger 不改、由第 1 步出 FAIL（extra 帶原因），同 repo 的 queued 同一輪被拉起。寫不了（事件寫入失敗）下輪可重掃。
 section f3
 printf '#!/bin/sh\nexit 1\n' > "$H/dead-runner"; chmod +x "$H/dead-runner"
 : > "$TMP/tF-a.md"; : > "$TMP/tF-b.md"
@@ -196,7 +197,8 @@ awk -v id="$ida" -v t="$old" -F'\t' 'BEGIN{OFS="\t"} $1==id { $4=t } { print }' 
 watch
 track
 [ "$(tr -d '[:space:]' < "$MYTHOS_DIR/state/deep/$ida.rc")" = 127 ] || fail '8：rc 不是 127'
-case "$(status_of "$ida")" in pending|failed) ;; *) fail "8：A 列狀態不是 pending 也不是 failed：$(status_of "$ida")" ;; esac
+# F4：未 ACK 時該列精確仍是 pending（不准被改成 failed）
+[ "$(status_of "$ida")" = pending ] || fail "8：未 ACK 時該列不是 pending：$(status_of "$ida")"
 fail_n="$(jq -s --arg id "$ida" '[.[] | select(.job_id==$id and .status=="FAIL")] | length' "$MYTHOS_DIR/state/events.jsonl")"
 [ "$fail_n" = 1 ] || fail "8：沒有正好一則 FAIL 事件：$(cat "$MYTHOS_DIR/state/events.jsonl" 2>&1)"
 jq -e --arg id "$ida" 'select(.job_id==$id and .status=="FAIL" and (.extra | contains("runner 未啟動")))' "$MYTHOS_DIR/state/events.jsonl" >/dev/null \
@@ -206,22 +208,45 @@ jq -e --arg id "$ida" 'select(.job_id==$id and .status=="FAIL" and (.extra | con
 watch
 [ "$(jq -s --arg id "$ida" '[.[] | select(.job_id==$id)] | length' "$MYTHOS_DIR/state/events.jsonl")" = 1 ] || fail '8：failed 的票下一輪又發事件'
 
-# 8b) 寫不了就不能吞掉（可重掃）：state 在、deep 子目錄不存在且建不了 → 一輪不動（連 rc 都沒寫）；
-#     恢復可寫 → 下一輪就寫 rc=127＋handoff 並出 FAIL 事件
+# 8b) F4：state 可寫，只有事件寫入失敗 → 一輪照寫 handoff＋rc=127，列仍 pending、沒有 FAIL；
+#     恢復 → 下一輪恰好一則 FAIL（同 event_id 只一則）；模擬 ACK → 列轉 notified-FAIL。
+#     注入點：lib-events.mjs 寫入＝同目錄暫存檔＋rename，events.jsonl 設 uchg（不可變旗標）→ rename 拿 EPERM，
+#     讀取照常、state 目錄與兩把鎖都不受影響（chmod 444 擋不住 rename，目錄唯讀會連 watcher 鎖都建不了）。
 section f3b
 printf '#!/bin/sh\nexit 1\n' > "$H/dead2-runner"; chmod +x "$H/dead2-runner"
+# 照 tests/test_dispatch_watch.sh 的 ACK 手法：send-keys -l 的文字追加成一筆 user 紀錄進 transcript；capture-pane 回閒置畫面
+cat > "$H/tmux-ack" <<'FAKETMUX'
+#!/bin/sh
+case " $* " in
+  " -L mythos send-keys -t mythos -l "*)esc="$(printf '%s' "$8" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+    printf '{"type":"user","message":{"role":"user","content":"%s"}}\n' "$esc" >> "$MYTHOS_TRANSCRIPT_DIR/router.jsonl" ;;
+  *" capture-pane "*) printf 'idle screen\n' ;;
+esac
+exit 0
+FAKETMUX
+chmod +x "$H/tmux-ack"
 : > "$TMP/tG-a.md"
 idh="$(DISPATCH_DEEP_RUN_BIN="$H/dead2-runner" dispatch "$TMP/tG-a.md" "$TMP/repoH")"
 old=$(( $(date +%s) - 121 ))
 awk -v id="$idh" -v t="$old" -F'\t' 'BEGIN{OFS="\t"} $1==id { $4=t } { print }' "$TSV" > "$TSV.k" && mv "$TSV.k" "$TSV"
-rmdir "$MYTHOS_DIR/state/deep" && chmod 0555 "$MYTHOS_DIR/state" || fail '8b：準備唯讀環境失敗'
-watch
-[ ! -d "$MYTHOS_DIR/state/deep" ] || fail '8b：寫不了卻建出了 state/deep'
-jq -e --arg id "$idh" 'select(.job_id==$id)' "$MYTHOS_DIR/state/events.jsonl" >/dev/null 2>&1 && fail '8b：寫不了卻有事件'
-chmod 0755 "$MYTHOS_DIR/state"
-watch
-jq -e --arg id "$idh" 'select(.job_id==$id and .status=="FAIL")' "$MYTHOS_DIR/state/events.jsonl" >/dev/null \
-  || fail "8b：恢復可寫後下一輪沒出 FAIL：$(cat "$MYTHOS_DIR/state/events.jsonl" 2>&1)"
+EV="$MYTHOS_DIR/state/events.jsonl"
+: > "$EV"
+chflags uchg "$EV" || fail '8b：設不了 uchg，事件寫入失敗做不出來'
+TMUX_BIN="$H/tmux-ack" watch
+[ "$(tr -d '[:space:]' < "$MYTHOS_DIR/state/deep/$idh.rc")" = 127 ] || fail '8b：事件寫不進去就連 rc 都沒寫'
+[ "$(status_of "$idh")" = pending ] || fail "8b：事件寫不進去時列變了：$(status_of "$idh")"
+[ ! -s "$EV" ] || fail "8b：uchg 沒擋住事件寫入：$(cat "$EV")"
+jq -e --arg id "$idh" 'select(.job_id==$id and .status=="FAIL")' "$EV" >/dev/null 2>&1 && fail '8b：事件寫不進去卻有 FAIL'
+chflags nouchg "$EV"
+TMUX_BIN="$H/tmux-ack" watch   # 恢復：這輪建 FAIL 並送進 transcript；ACK 掃描在投遞之前，下一輪才看得到
+[ "$(jq -s --arg id "$idh" '[.[] | select(.job_id==$id and .status=="FAIL")] | length' "$EV")" = 1 ] \
+  || fail "8b：恢復後不是恰好一則 FAIL：$(cat "$EV" 2>&1)"
+[ "$(status_of "$idh")" = pending ] || fail "8b：未 ACK 就改了狀態：$(status_of "$idh")"
+grep -qF "event_id=${idh}-FAIL" "$MYTHOS_TRANSCRIPT_DIR/router.jsonl" || fail "8b：恢復那輪沒送出事件：$(tail -1 "$MYTHOS_TRANSCRIPT_DIR/router.jsonl")"
+TMUX_BIN="$H/tmux-ack" watch   # 掃到 ACK
+[ "$(jq -s --arg id "$idh" '[.[] | select(.job_id==$id and .status=="FAIL")] | length' "$EV")" = 1 ] \
+  || fail "8b：ACK 那輪又發了 FAIL：$(cat "$EV" 2>&1)"
+[ "$(status_of "$idh")" = notified-FAIL ] || fail "8b：ACK 後不是 notified-FAIL：$(status_of "$idh")"
 
 # 8c) F1：票已落地（rc 已寫／ledger 列非 pending）→ 遲到的 runner 不啟動、不寫 handle
 printf '#!/bin/sh\necho "$*" >> "%s"
@@ -237,6 +262,49 @@ printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' land-fail hard "$TMP/tG-b.md" "$(date 
 MYTHOS_DIR="$MYTHOS_DIR" DEEP_RUN_BIN="$H/late-runner" bash "$ROOT/bin/dispatch-deep-run" land-fail "$TMP/tG-b.md" "$TMP/repoH" 2>"$H/late.err" || fail "8c：列 failed 時 runner 非零退出：$(cat "$H/late.err")"
 [ "$(wc -l < "$STUB_LOG" | tr -d ' ')" = "$n0" ] || fail '8c：列 failed 卻還是呼叫了 deep-run'
 [ ! -f "$MYTHOS_DIR/state/deep/land-fail.handle" ] || fail '8c：列 failed 卻寫了 handle'
+
+# 8d) F1：handoff 與 runner 寫 handle 交錯。真的做出交錯：測試先拿走 ledger 鎖，watcher 掃 ledger 時還沒有 handle、
+#     進 fail_handoff 卡在拿鎖；這時才寫 handle（模擬 runner 在鎖內寫第一版 handle）再放鎖
+#     → 鎖內重查看到 handle：沒有 rc、沒有 handoff，同 top 的 queued 不被拉起
+section f1x
+row ia $(( $(date +%s) - 300 )) pending "$TMP/repoI"
+row ia-q "$(date +%s)" queued "$TMP/repoI"
+LF="$MYTHOS_DIR/state/.ledger.flock"; : > "$LF"
+perl -MFcntl=:flock -e 'open(my $f,">>",$ARGV[0]) or exit 2; flock($f,LOCK_EX) or exit 3; open(my $m,">",$ARGV[1]); close $m;
+  for (1..300) { exit 0 if -e $ARGV[2]; select(undef,undef,undef,0.1) } exit 4' "$LF" "$H/held" "$H/release" &
+holder=$!; BG_PIDS+=("$holder")
+for _ in $(seq 50); do [ -e "$H/held" ] && break; sleep 0.1; done
+[ -e "$H/held" ] || fail '8d：測試拿不到 ledger 鎖'
+: > "$STUB_LOG"
+bash "$ROOT/bin/dispatch-watch" 9>&- & wpid=$!; BG_PIDS+=("$wpid")
+# watcher 打開鎖檔（ledger_lock 的 exec 9>>）＝已過鎖外檢查、正在等鎖；0a 是 watcher 第一個拿 ledger 鎖的地方
+seen=''
+for _ in $(seq 80); do
+  if lsof -t -- "$LF" 2>/dev/null | grep -vx "$holder" | grep -q .; then seen=1; break; fi
+  sleep 0.1
+done
+[ -n "$seen" ] || fail '8d：watcher 沒有卡在 ledger 鎖，交錯沒做出來'
+[ ! -e "$MYTHOS_DIR/state/deep/ia.rc" ] || fail '8d：還沒拿到鎖就寫了 rc'
+printf 'pid=1\n' > "$MYTHOS_DIR/state/deep/ia.handle"
+: > "$H/release"
+wait "$holder" || fail '8d：鎖持有者異常結束'
+wait "$wpid" || fail '8d：dispatch-watch 非零退出'
+track
+[ ! -e "$MYTHOS_DIR/state/deep/ia.rc" ] || fail '8d：鎖內已有 handle 仍寫了 rc'
+[ ! -e "$MYTHOS_DIR/state/deep/ia.handoff" ] || fail '8d：鎖內已有 handle 仍寫了 handoff'
+[ "$(status_of ia-q)" = queued ] || fail "8d：handle 在、票還在跑，同 top 的 queued 卻被拉起：$(status_of ia-q)"
+[ "$(started ia-q)" = 0 ] || fail '8d：同 top 的 queued 啟動了 runner'
+
+# 8e) F3：原因寫不進去（handoff 目的地預先建成目錄）→ 這輪不寫 rc；移除後下一輪 rc=127＋原因
+section f3c
+row ib $(( $(date +%s) - 300 )) pending "$TMP/repoJ"
+mkdir "$MYTHOS_DIR/state/deep/ib.handoff"
+watch
+[ ! -e "$MYTHOS_DIR/state/deep/ib.rc" ] || fail '8e：原因寫不進去仍寫了 rc'
+rmdir "$MYTHOS_DIR/state/deep/ib.handoff"
+watch
+[ "$(tr -d '[:space:]' < "$MYTHOS_DIR/state/deep/ib.rc" 2>/dev/null)" = 127 ] || fail '8e：原因可寫後沒寫 rc=127'
+grep -q 'runner 未啟動' "$MYTHOS_DIR/state/deep/ib.handoff" || fail "8e：handoff 檔沒寫原因：$(cat "$MYTHOS_DIR/state/deep/ib.handoff" 2>&1)"
 
 # 9) F5：入列 7 小時的 queued 升級 → epoch 改成升級當下；dispatch-watch 不發 REVIEW、watchdog 不告警 pending 逾 6 小時
 section f5
