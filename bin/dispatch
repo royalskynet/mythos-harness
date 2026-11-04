@@ -41,17 +41,28 @@ if [ "$route" = deep ]; then
   name="${base%.md}"
   # 加 $$：同一秒、同檔名（不同目錄）的兩張票由不同行程派出，id 不撞
   id="deep-${epoch}-$$-${name}"
+  # DISPATCH_DEEP_RUN_BIN：測試換 runner 的覆寫點（dispatch-watch 拉起 queued 用同一條）
+  runner="${DISPATCH_DEEP_RUN_BIN:-$ROOT_DIR/bin/dispatch-deep-run}"
+  # 測試守門（F1）：MYTHOS_TEST_SANDBOX 非空時 runner 必須在它底下；不在就先拒跑，ledger 不寫任何列
+  if [ -n "${MYTHOS_TEST_SANDBOX:-}" ]; then
+    case "$runner" in
+      "$MYTHOS_TEST_SANDBOX"/*) ;;
+      *) echo "測試模式拒跑真 runner" >&2; exit 97 ;;
+    esac
+  fi
   mkdir -p "$MYTHOS_DIR/state/deep"
   ledger_lock || nolock
   # 同 repo 佇列（C3）：持鎖後才查，兩張同時派不會都看到「沒人在跑」。
-  # 同 top 已有 pending、未寫 rc 的 deep 票 → 本列寫 queued、不啟動 runner（由 dispatch-watch 拉起）。
+  # 同 top 已有 pending／queued、未寫 rc 的 deep 票 → 本列寫 queued、不啟動 runner（由 dispatch-watch 拉起）。
   # DISPATCH_REPO_QUEUE=0 關掉（只給測單票生命週期的舊測試用；佇列行為由 tests/test-repo-queue.sh 驗）
   st=pending
   queued=''
   if [ "${DISPATCH_REPO_QUEUE:-1}" != 0 ] && [ -f "$MYTHOS_DIR/state/dispatch-jobs.tsv" ]; then
     top="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null 9>&- || printf %s "$cwd")"
     while IFS=$'\t' read -r oid _ _ _ ost ocwd _ obackend; do
-      [ "$ost" = pending ] && [ "$obackend" = deep ] || continue
+      # F4：queued 也算有人在跑，否則新票插隊、queued 永遠拉不起來
+      case "$ost" in pending|queued) ;; *) continue ;; esac
+      [ "$obackend" = deep ] || continue
       [ -f "$MYTHOS_DIR/state/deep/$oid.rc" ] && continue
       otop="$(git -C "$ocwd" rev-parse --show-toplevel 2>/dev/null 9>&- || printf %s "$ocwd")"
       [ "$otop" = "$top" ] && { queued="$oid"; break; }
@@ -68,8 +79,7 @@ if [ "$route" = deep ]; then
   fi
   handle="$MYTHOS_DIR/state/deep/$id.handle"
   # 9>&-：長壽子行程不繼承 ledger 鎖的 fd（這裡已放鎖，仍防呆）
-  # DISPATCH_DEEP_RUN_BIN：測試換 runner 的覆寫點（dispatch-watch 拉起 queued 用同一條）
-  nohup "${DISPATCH_DEEP_RUN_BIN:-$ROOT_DIR/bin/dispatch-deep-run}" "$id" "$task" "$cwd" >/dev/null 2>&1 9>&- &
+  nohup "$runner" "$id" "$task" "$cwd" >/dev/null 2>&1 9>&- &
   # 等 runner 寫好 handle 才回：派完馬上 cancel 也有 handle 可用（最多約 5 秒）
   n=0
   while [ ! -s "$handle" ] && [ "$n" -lt 50 ]; do sleep 0.1; n=$((n + 1)); done

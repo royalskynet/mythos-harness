@@ -6,6 +6,7 @@
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/knob-timing-test.XXXXXX")"
+. "$(dirname "$0")/lib-test-guard.sh" "$TMP"  # F1：沒設的 runner／tmux 換 guard stub（本檔只在單一指令前綴設 stub）
 trap '[ -n "${KEEP:-}" ] || rm -rf "$TMP"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 

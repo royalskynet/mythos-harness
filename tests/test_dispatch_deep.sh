@@ -3,7 +3,16 @@ set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/dispatch-deep-test.XXXXXX")"
-trap 'rm -rf "$TMP"' EXIT
+# F2：只殺自己記下的 pid；retry 工單帶著本輪唯一前綴，結束時只刪自己那幾個檔
+PIDS=()
+cleanup() {
+  for p in ${PIDS[@]+"${PIDS[@]}"}; do kill "$p" 2>/dev/null || true; done
+  rm -f "${RETRY_FILES[@]+"${RETRY_FILES[@]}"}"
+  [ -n "${KEEP:-}" ] || rm -rf "$TMP"
+}
+trap cleanup EXIT
+RETRY_FILES=()
+RETRY_PREFIX="dd-$(basename "$TMP")"   # 本輪唯一的工單名前綴，retry 產生的 /tmp/dc-worker/<前綴>-rN.md 只可能是自己的
 
 export MYTHOS_DIR="$TMP/mythos"
 export DCQ_HOME="$TMP/dcq"
@@ -18,6 +27,13 @@ export DCQ_BIN="$TMP/dcq-fail"
 export MYTHOS_TRANSCRIPT_DIR="$TMP/router-transcript"
 # 這支只驗單票路由／生命週期；同一 cwd 連派多張 hard 的佇列行為由 tests/test-repo-queue.sh 驗，這裡關掉
 export DISPATCH_REPO_QUEUE=0
+# F1：bin/dispatch 在測試模式只肯跑 sandbox 內的 runner；這層 shim 轉給 repo 的 dispatch-deep-run，
+# 它再驗下一層 DEEP_RUN_BIN 也在 sandbox 內
+mkdir -p "$TMP/shim"
+printf '#!/bin/sh\nexec "%s/bin/dispatch-deep-run" "$@"\n' "$ROOT" > "$TMP/shim/dispatch-deep-run"
+chmod +x "$TMP/shim/dispatch-deep-run"
+export DISPATCH_DEEP_RUN_BIN="$TMP/shim/dispatch-deep-run"
+. "$(dirname "$0")/lib-test-guard.sh" "$TMP"  # F1：自己的 stub 設好之後才 source；沒設的 runner／tmux 換 guard stub
 
 mkdir -p "$MYTHOS_DIR/state" "$DCQ_HOME" "$CLAUDE_PROJECTS_DIR" "$DEEP_TASK_DIR" "$MYTHOS_TRANSCRIPT_DIR"
 : > "$TMUX_LOG"
@@ -51,7 +67,7 @@ task="$1"
 case "$(basename "$task")" in
   *fail*) printf 'CLAIM_MISMATCH\n'; exit 1 ;;
 esac
-if [ "${FAKE_DEEP_SLEEP:-0}" = 1 ]; then sleep 300; fi
+if [ "${FAKE_DEEP_SLEEP:-0}" = 1 ]; then exec sleep 300; fi
 exit 0
 DEEP
 chmod +x "$DEEP_RUN_BIN"
@@ -103,6 +119,10 @@ task3="$TMP/sleep-task.md"; printf 'sleep task\n' > "$task3"
 export FAKE_DEEP_SLEEP=1
 id3="$(bash "$ROOT/bin/dispatch" "$task3" "$cwd" hard)"
 unset FAKE_DEEP_SLEEP
+# sleeper 的 pid 等 runner 寫進 handle 才記（runner 寫好 deep_pid 就在執行 deep-run 了）
+for i in $(seq 1 50); do grep -q '^deep_pid=' "$MYTHOS_DIR/state/deep/$id3.handle" 2>/dev/null && break; sleep 0.1; done
+dp3="$(awk -F= '$1=="deep_pid"{print $2}' "$MYTHOS_DIR/state/deep/$id3.handle" 2>/dev/null)"
+[ -n "$dp3" ] && PIDS+=("$dp3")
 # touch .out and jsonl 20 min ago
 python3 - "$MYTHOS_DIR/state/deep/$id3.out" "$CLAUDE_PROJECTS_DIR" "$cwd" <<'PY'
 import os,sys,time
@@ -125,6 +145,8 @@ if grep -q 'send-keys' "$TMUX_LOG"; then fail 'stall re-reported'; fi
 old_epoch=$(( $(date +%s) - 1860 ))
 id4="deep-${old_epoch}-review-task"
 printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id4" hard "$TMP/review-task.md" "$old_epoch" pending "$cwd" >> "$TSV"
+# 在跑的 deep 票有 runner 寫的 handle；沒有會被 F3 的 handoff 逾時收成 failed
+printf 'fixture=1\n' > "$MYTHOS_DIR/state/deep/$id4.handle"
 printf 'review task\n' > "$TMP/review-task.md"
 slug="$(printf '%s' "$cwd" | sed 's/[\/.]/-/g')"
 mkdir -p "$CLAUDE_PROJECTS_DIR/$slug"
@@ -157,13 +179,15 @@ if grep -q 'send-keys' "$TMUX_LOG"; then fail 'busy sent message'; fi
 [ ! -f "$MYTHOS_DIR/state/deep/$id5.last-review" ] || fail 'last-review created while busy'
 
 # 7. dispatch-retry 產生新工單含追加指示；第 4 次 exit 1
-rtask="$TMP/retry-task.md"; printf 'retry body\n' > "$rtask"
+rtask="$TMP/$RETRY_PREFIX.md"; printf 'retry body\n' > "$rtask"
 rid="$(bash "$ROOT/bin/dispatch" "$rtask" "$cwd" hard)"
 wait_rc "$rid" || fail 'retry rc not produced'
 # first retry
 newid="$(bash "$ROOT/bin/dispatch-retry" "$rid" "補充指示文字")"
-grep -q '## 追加指示（第 1 次重派' "/tmp/dc-worker/$(basename "$rtask" .md)-r1.md" || fail 'retry file missing header'
-grep -q '補充指示文字' "/tmp/dc-worker/$(basename "$rtask" .md)-r1.md" || fail 'retry file missing extra'
+RETRY_FILE="/tmp/dc-worker/${RETRY_PREFIX}-r1.md"
+RETRY_FILES+=("$RETRY_FILE")
+grep -q '## 追加指示（第 1 次重派' "$RETRY_FILE" || fail 'retry file missing header'
+grep -q '補充指示文字' "$RETRY_FILE" || fail 'retry file missing extra'
 # trigger 4th rejection
 set +e
 bash "$ROOT/bin/dispatch-retry" "$rid" "a" >/dev/null 2>&1
@@ -179,6 +203,9 @@ ctask="$TMP/cancel-task.md"; printf 'cancel body\n' > "$ctask"
 export FAKE_DEEP_SLEEP=1
 cid="$(bash "$ROOT/bin/dispatch" "$ctask" "$cwd" hard)"
 unset FAKE_DEEP_SLEEP
+for i in $(seq 1 50); do grep -q '^deep_pid=' "$MYTHOS_DIR/state/deep/$cid.handle" 2>/dev/null && break; sleep 0.1; done
+dpc="$(awk -F= '$1=="deep_pid"{print $2}' "$MYTHOS_DIR/state/deep/$cid.handle" 2>/dev/null)"
+[ -n "$dpc" ] && PIDS+=("$dpc")
 bash "$ROOT/bin/dispatch-cancel" "$cid"
 [ "$(cat "$MYTHOS_DIR/state/deep/$cid.rc")" = 130 ] || fail 'cancel rc not 130'
 # find row status
@@ -190,9 +217,6 @@ rc=$?
 set -e
 [ "$rc" -eq 1 ] || fail "non-deep cancel expected exit 1 got $rc"
 
-rm -f /tmp/dc-worker/retry-task-r*.md   # 7 產生的暫存檔
-# kill stray sleepers
-pkill -f "sleep 300" 2>/dev/null || true
 
 echo PASS
 

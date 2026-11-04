@@ -2,8 +2,10 @@
 # 回覆延遲量測（C2）：Telegram 訊息進來，到 Router 第一次 mcp__telegram__reply 的時間差。零 token、只讀。
 #   bin/latency-report [--days N] [--json]
 # 樣本：type=user 且 content 是字串、含 `<channel source="telegram"` 的行；
-# 終點：其後第一個 type=assistant 的 tool_use，name 以 __reply 結尾。
-# 下一則使用者訊息先到＝這筆記 no-reply。時間取每行 .timestamp（ISO8601）。
+# 終點：`mcp__telegram__reply` 的 tool_use id 對到、is_error 不為 true 的 tool_result（失敗的 reply 不消帳）。
+# 每個 transcript 檔各自配對（檔與檔之間不互相消帳）；同檔連發的多則使用者訊息併成一筆，起點取第一則。
+# 檔尾還在等（沒有成功的 reply 結果）的另計 pending_tail，不算沒回。時間取每行 .timestamp（ISO8601）。
+# no_reply：欄位保留（7 欄格式）；連發併筆後「下一則先到」不再成立，未配對的一律歸 pending_tail，現口徑恆為 0。
 # 百分位取最近秩（nearest rank，p90 = 第 ceil(0.9n) 名）。只印數字，不印任何訊息內文。
 set -u
 
@@ -11,7 +13,8 @@ days=7
 json=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --days) days="${2:-}"; shift 2 ;;
+    # F9：--days 缺值時 shift 2 不動、不帶 set -e 就無限迴圈
+    --days) [ $# -ge 2 ] || { echo "--days 缺值" >&2; exit 2; }; days="$2"; shift 2 ;;
     --days=*) days="${1#*=}"; shift ;;
     --json) json=1; shift ;;
     *) echo "用法：bin/latency-report [--days N] [--json]" >&2; exit 2 ;;
@@ -29,7 +32,8 @@ res="$("${NODE_BIN:-node}" -e '
 const fs = require("fs"), path = require("path")
 const [dir, days] = [process.argv[1], Number(process.argv[2])]
 const since = Date.now() - days * 86400000
-const rows = []
+const lat = []
+let pending = 0
 for (const f of fs.readdirSync(dir)) {
   if (!f.endsWith(".jsonl")) continue
   let st
@@ -37,6 +41,10 @@ for (const f of fs.readdirSync(dir)) {
   if (st.mtimeMs < since) continue
   let lines
   try { lines = fs.readFileSync(path.join(dir, f), "utf8").split("\n") } catch { continue }
+  // 單檔狀態：waiting＝這輪等回覆的第一則 user 時間（null＝沒有在等）
+  // ponytail: replyIds 收整檔全部的 reply tool_use id；單檔數萬行還撐得住，再大就改成邊掃邊記
+  const replyIds = new Set(), done_ = new Set()
+  let waiting = null
   for (const line of lines) {
     if (!line) continue
     let o
@@ -44,30 +52,38 @@ for (const f of fs.readdirSync(dir)) {
     const t = Date.parse(o.timestamp || "")
     if (!(t >= since)) continue
     const c = o.message && o.message.content
-    if (o.type === "user" && typeof c === "string" && c.includes("<channel source=\"telegram\"")) {
-      rows.push({ t, kind: "user" })
-    } else if (o.type === "assistant" && Array.isArray(c) && c.some(x => x && x.type === "tool_use" && /__reply$/.test(x.name || ""))) {
-      rows.push({ t, kind: "reply" })
+    if (o.type === "user") {
+      if (typeof c === "string") {
+        if (!c.includes("<channel source=\"telegram\"")) continue
+        if (waiting === null) waiting = t // 連發只取第一則
+        continue
+      }
+      if (!Array.isArray(c) || waiting === null) continue
+      for (const x of c) {
+        if (!x || x.type !== "tool_result" || x.is_error === true || !replyIds.has(x.tool_use_id)) continue
+        if (done_.has(x.tool_use_id)) continue
+        done_.add(x.tool_use_id)
+        lat.push((t - waiting) / 1000)
+        waiting = null
+        break
+      }
+      continue
+    }
+    if (o.type !== "assistant" || !Array.isArray(c)) continue
+    for (const x of c) {
+      if (x && x.type === "tool_use" && x.id && /__reply$/.test(x.name || "")) replyIds.add(x.id)
     }
   }
+  if (waiting !== null) pending++
 }
-rows.sort((a, b) => a.t - b.t || (a.kind === "user" ? -1 : 1))
-// 同一 timestamp 撞序：user 先（reply 不算在它前面）
-const lat = []
-let waiting = null
-for (const r of rows) {
-  if (r.kind === "user") { if (waiting !== null) lat.push(null); waiting = r.t }
-  else if (waiting !== null) { lat.push((r.t - waiting) / 1000); waiting = null }
-}
-if (waiting !== null) lat.push(null)
-const ok = lat.filter(x => x !== null).sort((a, b) => a - b)
+const ok = lat.slice().sort((a, b) => a - b)
 const rank = p => ok.length ? ok[Math.ceil(p * ok.length) - 1] : 0
 console.log(JSON.stringify({ n: lat.length, p50_s: rank(0.5), p90_s: rank(0.9), max_s: ok.length ? ok[ok.length - 1] : 0,
-  over60: ok.filter(x => x > 60).length, no_reply: lat.length - ok.length }))
+  over60: ok.filter(x => x > 60).length, no_reply: 0, pending_tail: pending }))
 ' "$dir" "$days")" || { echo "量測失敗：$dir" >&2; exit 1; }
 
 if [ "$json" = 1 ]; then
   printf '%s\n' "$res"
   exit 0
 fi
-printf '%s\n' "$res" | jq -r '[.n, .p50_s, .p90_s, .max_s, .over60, .no_reply] | @tsv'
+printf '%s\n' "$res" | jq -r '[.n, .p50_s, .p90_s, .max_s, .over60, .no_reply, .pending_tail] | @tsv'

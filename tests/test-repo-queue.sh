@@ -27,6 +27,7 @@ export DISPATCH_DEEP_RUN_BIN="$H/stub-runner"
 export STUB_LOG="$H/stub.log"
 export STUB_PIDS="$H/stub.pids"
 export REVIEW_JUDGE="$H/no-judge"
+. "$(dirname "$0")/lib-test-guard.sh" "$TMP"  # F1：自己的 stub 設好之後才 source；沒設的 runner／tmux 換 guard stub
 mkdir -p "$MYTHOS_DIR/state/deep" "$DCQ_HOME/done" "$DCQ_HOME/failed" "$DCQ_HOME/running" "$DCQ_HOME/pending" \
   "$CLAUDE_PROJECTS_DIR" "$MYTHOS_TRANSCRIPT_DIR"
 printf '%s\n' '{"type":"user","message":{"content":"hi"}}' > "$MYTHOS_TRANSCRIPT_DIR/router.jsonl"
@@ -108,5 +109,121 @@ BRIEF="$H/brief/mythos-watchdog.tsv"
 [ -f "$BRIEF" ] || fail '5：watchdog 沒寫出告警檔'
 grep -qF "派工 $id5 queued 逾 6 小時" "$BRIEF" || fail "5：queued 逾 6 小時沒另計告警：$(cat "$BRIEF")"
 grep -F "$id5" "$BRIEF" | grep -q '卡在 pending' && fail '5：queued 被當成 pending 逾時告警'
+
+# ---------- 以下每段換一個乾淨的 MYTHOS_DIR，ledger 內容完全由本段決定 ----------
+section() { # 名稱 → 換 MYTHOS_DIR／TSV，清 stub 紀錄
+  export MYTHOS_DIR="$TMP/$1/mythos"
+  TSV="$MYTHOS_DIR/state/dispatch-jobs.tsv"
+  mkdir -p "$MYTHOS_DIR/state/deep"
+}
+row() { printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" hard "$TMP/$1.md" "$2" "$3" "$4" - deep >> "$TSV"; }
+epoch_of() { awk -F'\t' -v id="$1" '$1 == id { print $4; exit }' "$TSV"; }
+for r in C D E F G; do mkdir -p "$TMP/repo$r"; git -C "$TMP/repo$r" init -q; done
+NOW="$(date +%s)"
+
+# 6) F8：一次真升級，非目標列原文不變。升級前放 cancelled、notified-PASS、本輪排不進去的 queued、dcq 列。
+section f8
+row c-done $((NOW - 50)) pending "$TMP/repoC"; printf '0\n' > "$MYTHOS_DIR/state/deep/c-done.rc"
+row c-target $((NOW - 40)) queued "$TMP/repoC"
+row c-cxl $((NOW - 30)) cancelled "$TMP/repoC"
+row c-noti $((NOW - 30)) notified-PASS "$TMP/repoC"
+row d-run $((NOW - 20)) pending "$TMP/repoD"; printf 'fixture=1\n' > "$MYTHOS_DIR/state/deep/d-run.handle"
+row d-wait $((NOW - 10)) queued "$TMP/repoD"
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' o-1 mid "$TMP/o.md" "$NOW" pending "$TMP" - dcq >> "$TSV"
+cp -R "$MYTHOS_DIR" "$TMP/f8/snapshot"
+before="$TMP/f8/before.tsv"; cp "$TSV" "$before"
+nontarget() { # $1 ledger → 印出 before 裡非目標列中，在 $1 找不到原文的列
+  grep -v '^c-target	' "$before" | while IFS= read -r line; do grep -qxF -- "$line" "$1" || printf '%s\n' "$line"; done
+}
+: > "$STUB_LOG"
+watch
+track
+[ "$(status_of c-target)" = pending ] || fail "6：c-target 沒被升級：$(status_of c-target)"
+[ "$(started c-target)" = 1 ] || fail '6：c-target 沒被拉起 runner'
+[ "$(status_of d-wait)" = queued ] || fail "6：被 d-run 擋住的 d-wait 被升級了：$(status_of d-wait)"
+m="$(nontarget "$TSV")"
+[ -z "$m" ] || fail "6：升級時改到了非目標列：$(printf '%s\n' "$m" | sed -n l)"
+awk -F'\t' 'NF != 8 { bad=1 } END { exit bad }' "$TSV" || fail "6：ledger 不再是 8 欄 tab 分隔：$(sed -n l "$TSV")"
+# 突變：dispatch-watch 的 promote_rows 改成「每列都設 pending」，同一份 ledger 真跑一輪，逐列比對必須抓到
+MUT="$H/mut"; mkdir -p "$MUT"
+ln -sf "$ROOT/bin/lib-ledger.sh" "$MUT/lib-ledger.sh"; ln -sf "$ROOT/bin/lib-events.mjs" "$MUT/lib-events.mjs"
+[ "$(grep -cx '# end promote_rows' "$ROOT/bin/dispatch-watch")" = 1 ] || fail '6：dispatch-watch 找不到 promote_rows 結尾標記，突變做不了'
+awk '{ print } $0 == "# end promote_rows" {
+  print "promote_rows() { awk -F\"\\t\" -v now=\"$3\" '"'"'BEGIN { OFS=\"\\t\" } NR==FNR { next } { NF=8; $5=\"pending\"; $4=now } { print }'"'"' \"$1\" \"$2\"; }"
+}' "$ROOT/bin/dispatch-watch" > "$MUT/dispatch-watch"
+cmp -s "$ROOT/bin/dispatch-watch" "$MUT/dispatch-watch" && fail '6：突變沒生效'
+rm -rf "$MYTHOS_DIR"; cp -R "$TMP/f8/snapshot" "$MYTHOS_DIR"
+bash "$MUT/dispatch-watch" 9>&- || true
+track
+[ "$(status_of c-cxl)" = pending ] || fail "6：突變版沒把 cancelled 改成 pending，突變本身沒生效：$(status_of c-cxl)"
+m="$(nontarget "$TSV")"
+[ -n "$m" ] || fail '6：突變版（無條件全部 pending）也通過逐列比對，測試抓不到'
+
+# 7) F4：A 已寫 rc、B queued，watcher 還沒跑時派 C → C 也 queued；跑 watcher → 先拉起 B
+section f4
+: > "$TMP/tE-a.md"; : > "$TMP/tE-b.md"; : > "$TMP/tE-c.md"
+: > "$STUB_LOG"
+ida="$(dispatch "$TMP/tE-a.md" "$TMP/repoE")"
+idb="$(dispatch "$TMP/tE-b.md" "$TMP/repoE")"
+track
+[ "$(status_of "$idb")" = queued ] || fail "7：B 不是 queued：$(status_of "$idb")"
+printf '0\n' > "$MYTHOS_DIR/state/deep/$ida.rc"
+idc="$(dispatch "$TMP/tE-c.md" "$TMP/repoE")"
+track
+[ "$(status_of "$idc")" = queued ] || fail "7：A 落地、B 還在排，C 卻插隊：$(status_of "$idc")"
+[ "$(started "$idc")" = 0 ] || fail '7：插隊的 C 啟動了 runner'
+watch
+track
+[ "$(status_of "$idb")" = pending ] || fail "7：watcher 沒先拉起 B：$(status_of "$idb")"
+[ "$(started "$idb")" = 1 ] || fail '7：B 沒啟動 runner'
+[ "$(status_of "$idc")" = queued ] || fail "7：C 跟 B 同輪被拉起：$(status_of "$idc")"
+[ "$(started "$idc")" = 0 ] || fail '7：C 跟 B 同輪啟動了 runner'
+
+# 8) F3：runner 直接 exit 1、不寫 handle → 未逾 DEEP_HANDOFF_SEC 不動；逾時一輪後 failed、rc=127、
+#    發一則「runner 未啟動」事件，同 repo 的 queued 同一輪被拉起
+section f3
+printf '#!/bin/sh\nexit 1\n' > "$H/dead-runner"; chmod +x "$H/dead-runner"
+: > "$TMP/tF-a.md"; : > "$TMP/tF-b.md"
+: > "$STUB_LOG"
+ida="$(DISPATCH_DEEP_RUN_BIN="$H/dead-runner" dispatch "$TMP/tF-a.md" "$TMP/repoF")"
+idb="$(dispatch "$TMP/tF-b.md" "$TMP/repoF")"
+[ "$(status_of "$ida")" = pending ] || fail "8：A 不是 pending：$(status_of "$ida")"
+[ "$(status_of "$idb")" = queued ] || fail "8：B 不是 queued：$(status_of "$idb")"
+watch
+[ "$(status_of "$ida")" = pending ] || fail "8：還沒逾 DEEP_HANDOFF_SEC 就被收成：$(status_of "$ida")"
+old=$(( $(date +%s) - 121 ))
+awk -v id="$ida" -v t="$old" -F'\t' 'BEGIN{OFS="\t"} $1==id { $4=t } { print }' "$TSV" > "$TSV.k" && mv "$TSV.k" "$TSV"
+watch
+track
+[ "$(status_of "$ida")" = failed ] || fail "8：啟動失敗的票沒落 failed：$(status_of "$ida")"
+[ "$(tr -d '[:space:]' < "$MYTHOS_DIR/state/deep/$ida.rc")" = 127 ] || fail '8：rc 不是 127'
+[ "$(jq -s --arg id "$ida" '[.[] | select(.job_id==$id and .status=="FAIL" and (.extra | contains("runner 未啟動")))] | length' "$MYTHOS_DIR/state/events.jsonl")" = 1 ] \
+  || fail "8：沒有正好一則 runner 未啟動事件：$(cat "$MYTHOS_DIR/state/events.jsonl" 2>&1)"
+[ "$(status_of "$idb")" = pending ] || fail "8：A 釋放後 B 沒被拉起：$(status_of "$idb")"
+[ "$(started "$idb")" = 1 ] || fail '8：B 沒啟動 runner'
+watch
+[ "$(jq -s --arg id "$ida" '[.[] | select(.job_id==$id)] | length' "$MYTHOS_DIR/state/events.jsonl")" = 1 ] || fail '8：failed 的票下一輪又發事件'
+
+# 9) F5：入列 7 小時的 queued 升級 → epoch 改成升級當下；dispatch-watch 不發 REVIEW、watchdog 不告警 pending 逾 6 小時
+section f5
+row g-done $((NOW - 25300)) pending "$TMP/repoG"; printf '0\n' > "$MYTHOS_DIR/state/deep/g-done.rc"
+row g-q $((NOW - 25200)) queued "$TMP/repoG"
+: > "$STUB_LOG"
+t0="$(date +%s)"
+watch
+track
+[ "$(status_of g-q)" = pending ] || fail "9：g-q 沒被升級：$(status_of g-q)"
+[ "$(epoch_of g-q)" -ge "$t0" ] || fail "9：升級後 epoch 還是入列時間：$(epoch_of g-q)"
+jq -e 'select(.job_id=="g-q" and .status=="REVIEW")' "$MYTHOS_DIR/state/events.jsonl" >/dev/null 2>&1 && fail '9：剛升級就發 REVIEW'
+rm -rf "$H/brief"
+MYTHOS_BRIEF_DIR="$H/brief" WATCHDOG_CLAUDE_BIN="$H/true" WATCHDOG_LLM_LEGS="$H/false" WATCHDOG_SCRUB_CMD="$H/false" \
+  WATCHDOG_CANARY_CMD="$H/true" WATCHDOG_LLM_TIMEOUT_S=3 bash "$ROOT/bin/watchdog" >/dev/null 2>&1 || true
+grep -F 'g-q' "$H/brief/mythos-watchdog.tsv" 2>/dev/null | grep -q '卡在 pending' && fail '9：剛升級的票被當成 pending 逾 6 小時'
+# 對照：同一份 watchdog 對真的老 pending 會告警（確認上一行不是因為 watchdog 沒跑）
+row g-old $((NOW - 25200)) pending "$TMP/repoC"; printf 'fixture=1\n' > "$MYTHOS_DIR/state/deep/g-old.handle"
+rm -rf "$H/brief"
+MYTHOS_BRIEF_DIR="$H/brief" WATCHDOG_CLAUDE_BIN="$H/true" WATCHDOG_LLM_LEGS="$H/false" WATCHDOG_SCRUB_CMD="$H/false" \
+  WATCHDOG_CANARY_CMD="$H/true" WATCHDOG_LLM_TIMEOUT_S=3 bash "$ROOT/bin/watchdog" >/dev/null 2>&1 || true
+grep -F 'g-old' "$H/brief/mythos-watchdog.tsv" 2>/dev/null | grep -q '卡在 pending' || fail "9：對照組老 pending 沒告警，上面的斷言無效：$(cat "$H/brief/mythos-watchdog.tsv" 2>&1)"
 
 echo 'REPO-QUEUE PASS'

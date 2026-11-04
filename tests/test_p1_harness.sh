@@ -20,6 +20,13 @@ export MYTHOS_TRANSCRIPT_DIR="$TMP/router"
 export MYTHOS_BRIEF_DIR="$TMP/brief"
 export HOME="$TMP/home"
 export TMP   # 下面引號 heredoc 產生的假 tmux／judge 會在執行時讀 $TMP
+# F1：bin/dispatch 在測試模式只肯跑 sandbox 內的 runner；這層 shim 轉給 repo 的 dispatch-deep-run，
+# 它再驗下一層 DEEP_RUN_BIN 也在 sandbox 內
+mkdir -p "$TMP/shim"
+printf '#!/bin/sh\nexec "%s/bin/dispatch-deep-run" "$@"\n' "$ROOT" > "$TMP/shim/dispatch-deep-run"
+chmod +x "$TMP/shim/dispatch-deep-run"
+export DISPATCH_DEEP_RUN_BIN="$TMP/shim/dispatch-deep-run"
+. "$(dirname "$0")/lib-test-guard.sh" "$TMP"  # F1：自己的 stub 設好之後才 source；沒設的 runner／tmux 換 guard stub
 mkdir -p "$MYTHOS_DIR/state" "$DCQ_HOME"/{done,failed,running,pending} "$CLAUDE_PROJECTS_DIR" "$DEEP_TASK_DIR" "$MYTHOS_TRANSCRIPT_DIR" "$HOME"
 : > "$TMUX_LOG"
 : > "$TMP/all-sent.log"
@@ -279,6 +286,8 @@ grep -q 'event_id=o-cxl-PASS' "$TMUX_LOG" && fail '4：ledger 已 cancelled 的 
 # ---------- 5. REVIEW／STALL 不暴增 ----------
 rid='deep-99-rev-task'
 printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$rid" hard "$TMP/rev-task.md" "$(( $(now) - 1900 ))" pending "$TMP" >> "$TSV"
+# 在跑的 deep 票都有 runner 寫的 handle；沒 handle 會被 F3 的 handoff 逾時收成 failed
+printf 'fixture=1\n' > "$MYTHOS_DIR/state/deep/$rid.handle"
 printf 'rev task\n' > "$TMP/rev-task.md"
 mkdir -p "$CLAUDE_PROJECTS_DIR/$TMP"
 printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"FakeTool","input":{"file_path":"/tmp/x"}}]}}\n' > "$CLAUDE_PROJECTS_DIR/$TMP/rev.jsonl"
@@ -297,6 +306,7 @@ J
 chmod +x "$TMP/judge-slow"
 jid='deep-98-slow-task'
 printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$jid" hard "$TMP/slow-task.md" "$(( $(now) - 1900 ))" pending "$TMP" >> "$TSV"
+printf 'fixture=1\n' > "$MYTHOS_DIR/state/deep/$jid.handle"
 printf 'slow task\n' > "$TMP/slow-task.md"
 rm -f "$MYTHOS_DIR/state/deep/$jid.last-review"
 # 另一張票這一輪就有終態，投遞不能被 judge 拖住
@@ -403,6 +413,8 @@ due_review() { # id cwd
   local slug
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" hard "$F/$1.md" "$(( $(now) - 1860 ))" pending "$2" - deep >> "$F/mythos/state/dispatch-jobs.tsv"
   printf 'task %s\n' "$1" > "$F/$1.md"
+  # 在跑的 deep 票有 runner 寫的 handle；沒有會被 F3 的 handoff 逾時收成 failed
+  mkdir -p "$F/mythos/state/deep"; printf 'fixture=1\n' > "$F/mythos/state/deep/$1.handle"
   slug="$(printf '%s' "$2" | sed 's/[\/.]/-/g')"
   mkdir -p "$F/projects/$slug"
   printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"FakeTool","input":{"file_path":"/tmp/x"}}]}}\n' > "$F/projects/$slug/p.jsonl"

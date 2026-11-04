@@ -41,5 +41,7 @@
 !/tests/test-knob-timing.sh
 !/tests/test-latency-report.sh
 !/tests/test-repo-queue.sh
+!/tests/lib-test-guard.sh
+!/tests/test-test-guard.sh
 *.bak*
 __pycache__/
