@@ -54,6 +54,7 @@
 !/tests/test-test-guard.sh
 !/tests/test-dispatch-bg.sh
 !/tests/test-dispatch-bg-watch.sh
+!/tests/test-dispatch-watch-deadline.sh
 !/tests/test-dispatch-gate-bg.sh
 !/tests/test-dispatch-bg-e2e.sh
 # 工單 D：Router 寫給 dispatch-bg 的 prompt 檔與 worker 的 result（runtime，不進 git）
