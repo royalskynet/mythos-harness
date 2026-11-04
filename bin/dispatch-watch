@@ -8,13 +8,13 @@ MYTHOS_DIR="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 DCQ_HOME="${DCQ_HOME:-$HOME/.dcq}"
 TMUX_BIN="${TMUX_BIN:-tmux}"
 TIMEOUT_MIN="${DISPATCH_TIMEOUT_MIN:-90}"
-# 旋鈕（11-04）：bin/watchdog L2 寫 state/watchdog-knobs.env（KEY=整數）。只認這三條、不 source／不 eval；
-# 環境變數優先，沒設才用檔內值。ponytail: 目前只有三個旋鈕，新增要同步改這裡的 case 與測試白名單。
+# 旋鈕（11-04）：bin/watchdog L2 寫 state/watchdog-knobs.env（KEY=整數）。只認這四條、不 source／不 eval；
+# 環境變數優先，沒設才用檔內值。ponytail: 目前只有四個旋鈕，新增要同步改這裡的 case 與測試白名單。
 KNOBS_FILE="$MYTHOS_DIR/state/watchdog-knobs.env"
 if [ -f "$KNOBS_FILE" ]; then
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
-      DEEP_STALL_MIN=*|DEEP_REVIEW_MIN=*|DEEP_HANDOFF_SEC=*) ;;
+      DEEP_STALL_MIN=*|DEEP_REVIEW_MIN=*|DEEP_HANDOFF_SEC=*|BG_STALL_MIN=*) ;;
       *) continue ;;
     esac
     k="${line%%=*}" v="${line#*=}"
@@ -27,8 +27,10 @@ DEEP_STALL_MIN="${DEEP_STALL_MIN:-15}"
 DEEP_REVIEW_MIN="${DEEP_REVIEW_MIN:-30}"
 # F3：pending 逾時還沒寫 handle／rc 就當啟動失敗，落 failed 終態釋放 repo
 DEEP_HANDOFF_SEC="${DEEP_HANDOFF_SEC:-120}"
+# bg／bg-hard 停在 working 超過它的分鐘數 → STALL 事件（worker 卡在權限提示或卡死）
+BG_STALL_MIN="${BG_STALL_MIN:-60}"
 if [ "${DISPATCH_WATCH_PRINT_KNOBS:-}" = 1 ]; then
-  printf 'DEEP_STALL_MIN=%s DEEP_REVIEW_MIN=%s DEEP_HANDOFF_SEC=%s\n' "$DEEP_STALL_MIN" "$DEEP_REVIEW_MIN" "$DEEP_HANDOFF_SEC"
+  printf 'DEEP_STALL_MIN=%s DEEP_REVIEW_MIN=%s DEEP_HANDOFF_SEC=%s BG_STALL_MIN=%s\n' "$DEEP_STALL_MIN" "$DEEP_REVIEW_MIN" "$DEEP_HANDOFF_SEC" "$BG_STALL_MIN"
   exit 0
 fi
 # 抽查兩段過濾（11-02）：fast path 是這支腳本的 mtime／間隔判斷，slow path 交免費模型，
@@ -145,6 +147,69 @@ while IFS=$'\t' read -r id _ task epoch status _ _ backend; do
   [ -f "$MYTHOS_DIR/state/deep/$id.handle" ] && continue
   case "$epoch" in ''|*[!0-9]*) continue ;; esac
   [ $((now - epoch)) -gt "$DEEP_HANDOFF_SEC" ] && fail_handoff "$id"
+done < <(ledger_fields < "$TSV")
+
+# 1) bg／bg-hard：state 以 `claude agents --json --all` 為準（sessionId 前 8 碼＝短 id）。
+#    done → 讀 state/bg/<短id>.result 走既有事件投遞；缺檔退讀 `claude logs` 並標「result 缺檔」。
+#    working 超過 BG_STALL_MIN 分鐘 → STALL。每輪只叫一次 claude agents（20 秒硬上限）。
+bg_pending=0
+# 順序有講究：3.2 的 $'' 從不外銷，命令行上寫 TAB 照樣存成 Tab，傳給子行程（claude stub 的 cat 也讀它）
+while IFS="$(printf '	')" read -r _bgid _bgtier _bgtask _bgepoch _bgstatus _bgcwd _bgth _bgbackend; do
+  if [ "$_bgstatus" = pending ]; then
+    case "$_bgbackend" in bg|bg-hard) bg_pending=1; break ;; esac
+  fi
+done < <(ledger_fields < "$TSV")
+AGENTS_JSON=''
+if [ "$bg_pending" = 1 ]; then
+  export AGENTS_JSON
+  # 只挑一個 timer：`timeout … || 無 timeout 版` 會讓 claude agents 每輪跑兩次
+  # 兩個子行程都 </dev/null：`while read` 的行不能被子行程（stub 的 cat）吃進 stdin
+  if command -v timeout >/dev/null 2>&1; then TO=(timeout -k 5 20)
+  elif command -v gtimeout >/dev/null 2>&1; then TO=(gtimeout -k 5 20)
+  else TO=()
+  fi
+  AGENTS_JSON="$("${TO[@]}" "${CLAUDE_BIN:-claude}" agents --json --all </dev/null 9>&- 2>/dev/null)" || AGENTS_JSON=''
+
+  printf '%s' "$AGENTS_JSON" | "$NODE_BIN" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{if(Array.isArray(JSON.parse(s)))process.exit(0)}catch{}process.exit(1)})' 9>&- 2>/dev/null || AGENTS_JSON=''
+fi
+# 短 id → state（沒有就空）
+bg_state() {
+  [ -n "$AGENTS_JSON" ] || return 0
+  printf '%s' "$AGENTS_JSON" | "$NODE_BIN" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const id=process.argv[1];let a=[];try{a=JSON.parse(s)}catch{return}const hit=a.find(x=>(x.sessionId||"").startsWith(id))||a.find(x=>x.id===id);if(hit)process.stdout.write(String(hit.state||"")||"")})' "${1#bg-}" 9>&- 2>/dev/null
+}
+# 1a) bg／bg-hard 掃描：done 走事件投遞、working 逾時發 STALL
+while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend; do
+  [ "$status" = pending ] || continue
+  case "$backend" in bg|bg-hard) ;; *) continue ;; esac
+  sid="${id#bg-}"
+  st="$(bg_state "$id")"
+  case "$st" in
+    done|completed|exited)
+      rf="$MYTHOS_DIR/state/bg/$sid.result"
+      extra=''
+      if [ -s "$rf" ]; then
+        extra="$(tr '\t\n' '  ' < "$rf" | cut -c1-300)"
+      else
+        extra="$("${TO[@]}" "${CLAUDE_BIN:-claude}" logs "$sid" </dev/null 9>&- 2>/dev/null)" || extra=''
+
+        extra="result 缺檔；${extra:-讀不到 claude logs}"
+        extra="$(printf '%s' "$extra" | tr '\t\n' '  ' | cut -c1-300)"
+      fi
+      guide="看結果決定：要續派用 bin/dispatch-bg --thread $thread <prompt檔>，卡死就 bin/dispatch-cancel $id"
+      add_event "$id" PASS "$task" "$extra" "$guide" >/dev/null
+      ;;
+    working|busy|running|active)
+      case "$epoch" in ''|*[!0-9]*) continue ;; esac
+      [ $((now - epoch)) -ge $((BG_STALL_MIN * 60)) ] || continue
+      last="$MYTHOS_DIR/state/bg/$sid.last-stall"
+      if [ -f "$last" ] && [ $((now - $(tr -d '[:space:]' < "$last" 2>/dev/null || echo 0))) -lt $((BG_STALL_MIN * 60)) ]; then
+        continue
+      fi
+      guide="判斷是否卡死；卡死就 bin/dispatch-cancel $id 再用 bin/dispatch-bg --thread $thread <prompt檔> 重派"
+      add_event "$id" STALL "$task" "" "$guide" >/dev/null || late=1
+      todo "$last" "$now"
+      ;;
+  esac
 done < <(ledger_fields < "$TSV")
 
 # F8：升級只改被拉起的列（補成 8 欄、OFS 用 tab），其餘原樣寫回；抽成函式給 tests/test-repo-queue.sh 做突變。
