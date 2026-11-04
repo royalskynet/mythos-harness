@@ -190,7 +190,7 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
       if [ -s "$rf" ]; then
         extra="$(tr '\t\n' '  ' < "$rf" | cut -c1-300)"
       else
-        extra="$("${TO[@]}" "${CLAUDE_BIN:-claude}" logs "$sid" </dev/null 9>&- 2>/dev/null)" || extra=''
+        extra="$(${TO[@]+"${TO[@]}"} "${CLAUDE_BIN:-claude}" logs "$sid" </dev/null 9>&- 2>/dev/null)" || extra=''
 
         extra="result 缺檔；${extra:-讀不到 claude logs}"
         extra="$(printf '%s' "$extra" | tr '\t\n' '  ' | cut -c1-300)"
@@ -198,7 +198,7 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
       guide="看結果決定：要續派用 bin/dispatch-bg --thread $thread <prompt檔>，卡死就 bin/dispatch-cancel $id"
       add_event "$id" PASS "$task" "$extra" "$guide" >/dev/null
       ;;
-    working|busy|running|active)
+    working|busy|running|active|blocked)
       case "$epoch" in ''|*[!0-9]*) continue ;; esac
       [ $((now - epoch)) -ge $((BG_STALL_MIN * 60)) ] || continue
       last="$MYTHOS_DIR/state/bg/$sid.last-stall"
@@ -208,6 +208,19 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
       guide="判斷是否卡死；卡死就 bin/dispatch-cancel $id 再用 bin/dispatch-bg --thread $thread <prompt檔> 重派"
       add_event "$id" STALL "$task" "" "$guide" >/dev/null || late=1
       todo "$last" "$now"
+      ;;
+    stopped|failed|error|killed)
+      # F4：worker 沒寫 result 就停了 → 終態 FAIL，不再永遠 pending
+      rf="$MYTHOS_DIR/state/bg/$sid.result"
+      if [ -s "$rf" ]; then
+        extra="$(tr '\t\n' '  ' < "$rf" | cut -c1-300)"
+      else
+        extra="$(${TO[@]+"${TO[@]}"} "${CLAUDE_BIN:-claude}" logs "$sid" </dev/null 9>&- 2>/dev/null)" || extra=''
+        extra="result 缺檔；${extra:-讀不到 claude logs}"
+        extra="$(printf '%s' "$extra" | tr '\t\n' '  ' | cut -c1-300)"
+      fi
+      guide="worker 已停止（${st}）；要重來照原派工方式重派（bg-hard 記得 --hard 與原 repo），或 bin/dispatch-cancel $id 收掉"
+      add_event "$id" FAIL "$task" "$extra" "$guide" >/dev/null
       ;;
   esac
 done < <(ledger_fields < "$TSV")
