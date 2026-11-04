@@ -99,6 +99,50 @@ add_event() { # id status task extra guide
 
 todo() { printf '%s\t%s\n' "$1" "$2" >> "$TODOS"; }
 
+# 0) 同 repo 佇列（C3）：持鎖把 queued 依 epoch 由舊到新拉起。同一個 top 已有 pending、未寫 rc 的 deep 票就跳過，
+#    每個 top 這輪最多啟一張；啟動跟 bin/dispatch 同一條（DISPATCH_DEEP_RUN_BIN 可換）。
+#    queued 卻已有 rc（異常落地）→ 只改回 pending 不啟動，交給下面第 1 步照一般 deep 票出 PASS／FAIL。
+#    ponytail: 每張 queued 都重掃全表算 top，O(n²)；票上百張再改成先算好各列 top。
+top_of() { git -C "$1" rev-parse --show-toplevel 2>/dev/null 9>&- || printf %s "$1"; }
+if awk -F'\t' '$5=="queued"' "$TSV" 2>/dev/null | grep -q .; then
+  ledger_lock || exit 0
+  QDIR="$(mktemp -d "${TMPDIR:-/tmp}/dispatch-watch-queue.XXXXXX")" || { ledger_unlock; exit 0; }
+  : > "$QDIR/promote"; : > "$QDIR/launch"; : > "$QDIR/tops"
+  while IFS=$'\t' read -r qid _ qtask _ qst qcwd _ qbackend; do
+    [ "$qst" = queued ] && [ "$qbackend" = deep ] || continue
+    if [ -f "$MYTHOS_DIR/state/deep/$qid.rc" ]; then
+      printf '%s\n' "$qid" >> "$QDIR/promote"
+      continue
+    fi
+    top="$(top_of "$qcwd")"
+    grep -qxF -- "$top" "$QDIR/tops" && continue
+    busy=0
+    while IFS=$'\t' read -r oid _ _ _ ost ocwd _ obackend; do
+      [ "$ost" = pending ] && [ "$obackend" = deep ] || continue
+      [ -f "$MYTHOS_DIR/state/deep/$oid.rc" ] && continue
+      [ "$(top_of "$ocwd")" = "$top" ] && { busy=1; break; }
+    done < <(ledger_fields < "$TSV")
+    [ "$busy" = 1 ] && continue
+    printf '%s\n' "$qid" >> "$QDIR/promote"
+    printf '%s\t%s\t%s\n' "$qid" "$qtask" "$qcwd" >> "$QDIR/launch"
+    printf '%s\n' "$top" >> "$QDIR/tops"
+  done < <(ledger_fields < "$TSV" | sort -t$'\t' -k4,4n)
+  # 只改被拉起的列（補成 8 欄、OFS 用 tab），其餘原樣寫回
+  if [ -s "$QDIR/promote" ] \
+    && awk -F'\t' 'BEGIN { OFS="\t" } NR==FNR { up[$1]=1; next } ($1 in up) { NF=8; $5="pending" } { print }' \
+         "$QDIR/promote" "$TSV" > "$QDIR/tsv" \
+    && mv "$QDIR/tsv" "$TSV"; then
+    ledger_unlock
+    while IFS=$'\t' read -r qid qtask qcwd; do
+      [ -n "$qid" ] || continue
+      nohup "${DISPATCH_DEEP_RUN_BIN:-${LIB%/*}/dispatch-deep-run}" "$qid" "$qtask" "$qcwd" >/dev/null 2>&1 9>&- &
+    done < "$QDIR/launch"
+  else
+    ledger_unlock
+  fi
+  rm -rf "$QDIR"
+fi
+
 # 1) 掃描 ledger：終態只寫事件、不動 ledger
 while IFS=$'\t' read -r id tier task epoch status cwd thread backend; do
   [ -n "$id" ] || continue

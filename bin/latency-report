@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# 回覆延遲量測（C2）：Telegram 訊息進來，到 Router 第一次 mcp__telegram__reply 的時間差。零 token、只讀。
+#   bin/latency-report [--days N] [--json]
+# 樣本：type=user 且 content 是字串、含 `<channel source="telegram"` 的行；
+# 終點：其後第一個 type=assistant 的 tool_use，name 以 __reply 結尾。
+# 下一則使用者訊息先到＝這筆記 no-reply。時間取每行 .timestamp（ISO8601）。
+# 百分位取最近秩（nearest rank，p90 = 第 ceil(0.9n) 名）。只印數字，不印任何訊息內文。
+set -u
+
+days=7
+json=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --days) days="${2:-}"; shift 2 ;;
+    --days=*) days="${1#*=}"; shift ;;
+    --json) json=1; shift ;;
+    *) echo "用法：bin/latency-report [--days N] [--json]" >&2; exit 2 ;;
+  esac
+done
+case "$days" in ''|*[!0-9]*|0) echo "--days 要是正整數：$days" >&2; exit 2 ;; esac
+
+# 目錄不寫死使用者名：~/bots/mythos 的 transcript 目錄＝路徑把非英數字換成 -
+user="$(basename "$HOME")"
+dir="${MYTHOS_TRANSCRIPT_DIR:-$HOME/.claude/projects/$(printf '%s' "$HOME/bots/mythos" | sed 's/[^A-Za-z0-9]/-/g')}"
+[ -d "$dir" ] || { echo "找不到 transcript 目錄：$dir" >&2; exit 1; }
+
+# ponytail: node 一次載入所有近 N 天的 jsonl；單機 transcript 量級沒問題，再多就改成逐檔流式（已被 node 的 readline 逐行處理）
+res="$("${NODE_BIN:-node}" -e '
+const fs = require("fs"), path = require("path")
+const [dir, days] = [process.argv[1], Number(process.argv[2])]
+const since = Date.now() - days * 86400000
+const rows = []
+for (const f of fs.readdirSync(dir)) {
+  if (!f.endsWith(".jsonl")) continue
+  let st
+  try { st = fs.statSync(path.join(dir, f)) } catch { continue }
+  if (st.mtimeMs < since) continue
+  let lines
+  try { lines = fs.readFileSync(path.join(dir, f), "utf8").split("\n") } catch { continue }
+  for (const line of lines) {
+    if (!line) continue
+    let o
+    try { o = JSON.parse(line) } catch { continue }
+    const t = Date.parse(o.timestamp || "")
+    if (!(t >= since)) continue
+    const c = o.message && o.message.content
+    if (o.type === "user" && typeof c === "string" && c.includes("<channel source=\"telegram\"")) {
+      rows.push({ t, kind: "user" })
+    } else if (o.type === "assistant" && Array.isArray(c) && c.some(x => x && x.type === "tool_use" && /__reply$/.test(x.name || ""))) {
+      rows.push({ t, kind: "reply" })
+    }
+  }
+}
+rows.sort((a, b) => a.t - b.t || (a.kind === "user" ? -1 : 1))
+// 同一 timestamp 撞序：user 先（reply 不算在它前面）
+const lat = []
+let waiting = null
+for (const r of rows) {
+  if (r.kind === "user") { if (waiting !== null) lat.push(null); waiting = r.t }
+  else if (waiting !== null) { lat.push((r.t - waiting) / 1000); waiting = null }
+}
+if (waiting !== null) lat.push(null)
+const ok = lat.filter(x => x !== null).sort((a, b) => a - b)
+const rank = p => ok.length ? ok[Math.ceil(p * ok.length) - 1] : 0
+console.log(JSON.stringify({ n: lat.length, p50_s: rank(0.5), p90_s: rank(0.9), max_s: ok.length ? ok[ok.length - 1] : 0,
+  over60: ok.filter(x => x > 60).length, no_reply: lat.length - ok.length }))
+' "$dir" "$days")" || { echo "量測失敗：$dir" >&2; exit 1; }
+
+if [ "$json" = 1 ]; then
+  printf '%s\n' "$res"
+  exit 0
+fi
+printf '%s\n' "$res" | jq -r '[.n, .p50_s, .p90_s, .max_s, .over60, .no_reply] | @tsv'

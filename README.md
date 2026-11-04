@@ -60,6 +60,7 @@ tmux -L mythos attach -t mythos
 | `bin/watchdog` | L0：死鎖、重送用盡、Router 未回（只認成功的 reply 結果）、pending 逾 6 小時、deep transcript 停滯、`claude agents` 背景 worker blocked；L1：log 錯誤行交免費模型判 KNOWN／NEW／NOISE（出機前欄位白名單→scrub 去識別→sensitive-canary 掃去識別後文字，scrub 每日自檢，退路鏈 beam-free→OC Go 次選→local-llm→`state/watchdog-known.tsv`）；L2：只提議白名單旋鈕，兩棒不同體系同值才套用；`bin/watchdog ask "<問題>"` |
 | `bin/dispatch`、`dispatch-retry`、`dispatch-cancel`、`dispatch-deep-run` | 派工（先持鎖登錄再啟動後端）、重派、取消（deep 只照 `state/deep/<id>.handle`）、deep 背景執行 |
 | `bin/dispatch-watch` | 回報＋停滯／抽查，pane 閒置才打進去 |
+| `bin/latency-report` | 唯讀、零 token：Telegram 使用者訊息到第一個 `__reply` 的延遲摘要（`n p50_s p90_s max_s over60 no_reply`，`--days N`、`--json`） |
 | `bin/review-judge`、`oc-free-ask`、`local-llm` | 免費模型判 Worker 有沒有跑歪；判不出來或格式不對一律 UNKNOWN＝照舊喚醒 Router |
 | `bin/idle-reset` | 04／05／06 點試，pane 不忙且 30 分沒動才 `/clear`，一天一次 |
 
@@ -74,6 +75,7 @@ bash tests/test-review-judge.sh && bash tests/test-dispatch-route.sh && bash tes
 bash tests/test_dispatch_deep.sh && bash tests/test_dispatch_watch.sh
 bash tests/test_launchd_install.sh     # 範本無寫死路徑、換完是合法 plist、ONLY= 只產一份
 bash tests/test-watchdog.sh            # watchdog v2：L0 不叫模型、上限、白名單／canary（含突變）、scrub 自檢、退路、L2
+bash tests/test-knob-timing.sh && bash tests/test-latency-report.sh && bash tests/test-repo-queue.sh   # 旋鈕時序（含突變）、延遲量測、同 repo 佇列
 ```
 
 ## 限制 / Limits
