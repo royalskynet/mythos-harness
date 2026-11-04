@@ -1,0 +1,118 @@
+#!/usr/bin/env node
+// 直發：把 bg 單的 PASS 結果直接 push 給使用者（E2），不經 Router。
+//   bin/tg-send --thread <th> --job <id>   （文字讀 stdin）
+// 回傳碼：0＝Telegram 回 ok（stdout 印 message_id）；1＝確定沒送（連線失敗、逾時前沒送完、非 2xx）；
+//   2＝不明（逾時、回應解析失敗、沒有「確定沒送」證據——含 DNS 以外的早期失敗）。
+// 只管送與記帳，判斷「該不該送、同一個 event_id 怎麼收」在 bin/dispatch-watch。不印 token。
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const ROOT = process.env.MYTHOS_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
+const STATE_DIR = process.env.TELEGRAM_STATE_DIR || path.join(process.env.HOME, '.mythos/telegram')
+const BASE = process.env.TG_API_BASE || 'https://api.telegram.org'
+const TIMEOUT_MS = Number(process.env.TG_SEND_TIMEOUT_MS) || 15000
+const MAX_CHARS = 3500
+
+const die = (code, msg) => {
+  process.stderr.write(`tg-send: ${msg}\n`)
+  process.exit(code)
+}
+
+// 測試守門：sandbox 裡只准打本機 stub，免得測試真的推到使用者手機
+const sandbox = process.env.MYTHOS_TEST_SANDBOX
+if (sandbox && !BASE.startsWith('http://127.0.0.1:')) die(97, '測試模式拒連真的 Telegram')
+
+let thread = '',
+  job = ''
+for (let i = 2; i < process.argv.length; i++) {
+  const a = process.argv[i]
+  if (a === '--thread' && i + 1 < process.argv.length) thread = process.argv[++i]
+  else if (a.startsWith('--thread=')) thread = a.slice(9)
+  else if (a === '--job' && i + 1 < process.argv.length) job = process.argv[++i]
+  else if (a.startsWith('--job=')) job = a.slice(6)
+  else die(1, `不認識的參數 ${a}（用法：tg-send --thread <th> --job <id> < 文字）`)
+}
+if (!thread || !job) die(1, '缺 --thread／--job')
+
+function botToken() {
+  if (process.env.TELEGRAM_BOT_TOKEN) return process.env.TELEGRAM_BOT_TOKEN
+  let txt
+  try {
+    txt = fs.readFileSync(path.join(STATE_DIR, '.env'), 'utf8')
+  } catch {
+    return ''
+  }
+  const m = /^TELEGRAM_BOT_TOKEN=(.*)$/m.exec(txt)
+  return m ? m[1].trim() : ''
+}
+
+function chatId() {
+  try {
+    const a = JSON.parse(fs.readFileSync(path.join(STATE_DIR, 'access.json'), 'utf8'))
+    const f = Array.isArray(a.allowFrom) ? a.allowFrom[0] : undefined
+    return f === undefined || f === null ? '' : String(f)
+  } catch {
+    return ''
+  }
+}
+
+let text = fs.readFileSync(0, 'utf8')
+if (text.length > MAX_CHARS) {
+  const short = /^bg-([0-9a-f]{8})/.exec(job)?.[1] || job
+  const tail = `…（截斷，全文 state/bg/${short}.result）`
+  text = text.slice(0, MAX_CHARS - tail.length) + tail
+}
+
+const token = botToken()
+if (!token) die(1, 'TELEGRAM_BOT_TOKEN 沒有（env 與 .env 都沒有）')
+const chat = chatId()
+if (!chat) die(1, `access.json 沒有 allowFrom[0]（${STATE_DIR}）`)
+
+// 逾時涵蓋連線、回應與 body：AbortController 一觸發連 fetch 帶 body 的讀取一起斷
+const ac = new AbortController()
+const timer = setTimeout(() => ac.abort(), TIMEOUT_MS)
+let res, body
+try {
+  res = await fetch(`${BASE}/bot${token}/sendMessage`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ chat_id: chat, text, disable_web_page_preview: true }),
+    signal: ac.signal,
+  })
+} catch (e) {
+  clearTimeout(timer)
+  // 逾時＝結果不明；連線被拒、名稱解析失敗＝確定沒送（已在逾時前就失敗）
+  if (e?.name === 'AbortError') die(2, `逾時 ${TIMEOUT_MS}ms，結果不明`)
+  die(1, `連線失敗，沒送出：${e?.cause?.code || e?.message || e}`)
+}
+try {
+  body = await res.text()
+} catch (e) {
+  clearTimeout(timer)
+  die(2, `讀回應失敗，結果不明：${e?.name === 'AbortError' ? '逾時' : e?.message || e}`)
+}
+clearTimeout(timer)
+if (!res.ok) die(1, `Telegram 回 HTTP ${res.status}，沒送出`)
+let mid
+try {
+  const j = JSON.parse(body)
+  if (j?.ok !== true) die(1, 'Telegram 回 ok=false，沒送出')
+  mid = j.result?.message_id
+} catch {
+  die(2, '回應解析失敗，結果不明')
+}
+if (mid === undefined || mid === null) die(2, '回應沒有 message_id，結果不明')
+
+// 對照表：哪一則發出訊息對到哪個 thread／job（E3 proxy 回覆標註用）。寫不進去不算發送失敗。
+try {
+  const dir = path.join(ROOT, 'state')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.appendFileSync(
+    path.join(dir, 'tg-msg-thread.tsv'),
+    [chat, mid, thread, job, Math.floor(Date.now() / 1000)].join('\t') + '\n',
+  )
+} catch (e) {
+  process.stderr.write(`tg-send: 對照表寫入失敗 ${e?.message || e}\n`)
+}
+process.stdout.write(String(mid) + '\n')

@@ -25,7 +25,14 @@
 !/bin/review-judge
 !/bin/latency-report
 !/bin/latency-scan.cjs
+!/bin/tg-send
+!/bin/tg-plugin-patch
+!/bin/tg-commands.mjs
 /tests/*
+!/tests/test-tg-send.sh
+!/tests/test-tg-plugin-patch.sh
+!/tests/test-tg-reply-thread.sh
+!/tests/test_tg_commands.mjs
 !/tests/test_dispatch_gate.mjs
 !/tests/test-review-judge.sh
 !/tests/test-watchdog.sh
