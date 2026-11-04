@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # 測試守門（F1）：被 source 後 export MYTHOS_TEST_SANDBOX="$1"（呼叫端傳自己的 TMP）。
-# DISPATCH_DEEP_RUN_BIN／DEEP_RUN_BIN／TMUX_BIN 沒設定的，改指 guard 在 sandbox 自建的 stub；
+# DISPATCH_DEEP_RUN_BIN／DEEP_RUN_BIN／TMUX_BIN／CLAUDE_BIN 沒設定的，改指 guard 在 sandbox 自建的 stub；
 # 已設定的一律不動（測試自己的 stub 要在 source 之前設好）。
-# 已設定卻指到 sandbox 外的 runner，由 bin/dispatch、bin/dispatch-watch、bin/dispatch-deep-run
+# 已設定卻指到 sandbox 外的 runner，由 bin/dispatch、bin/dispatch-bg、bin/dispatch-watch、bin/dispatch-cancel（bg）、bin/dispatch-deep-run
 # 在 MYTHOS_TEST_SANDBOX 非空時 exit 97 擋下（tests/test-test-guard.sh 驗）。
 # 用法：TMP="$(mktemp -d)" ; <設好自己的 stub> ; . "$(dirname "$0")/lib-test-guard.sh" "$TMP"
 # stub 只把 argv（前面記 stub 名）追加到 $MYTHOS_TEST_SANDBOX/stub-calls.log 後 exit 0。
@@ -34,5 +34,6 @@ _guard_var() { # VAR 名稱：沒設定（或空字串）才換成 stub；已設
 _guard_var DISPATCH_DEEP_RUN_BIN
 _guard_var DEEP_RUN_BIN
 _guard_var TMUX_BIN
+_guard_var CLAUDE_BIN  # 工單 D：dispatch-bg／dispatch-watch（bg 列）／dispatch-cancel（bg 列）都叫 claude
 unset _guard_v
 unset -f _guard_var

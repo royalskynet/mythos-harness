@@ -2,11 +2,15 @@
 # P1 驗收（11-03）：事件 ACK 佇列、thread 續派、watchdog、統一 job schema＋共同鎖。
 # 全部用暫存 MYTHOS_DIR／假 tmux／假 dcq／假 transcript，不碰真的 state、tmux、launchd、brief-lines。
 set -eu
+export DISPATCH_HARD_BACKEND=deep  # 工單 D：hard 預設改 bg-hard；本檔驗的是 deep 舊路徑，明設才走 deep-run
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/p1-harness.XXXXXX")"
 # 背景 sleep 一律登記到 BG_PIDS：中途 fail 也要收掉，否則 ppid=1 成孤兒（見 tests/test-no-orphan-sleep.sh）
 BG_PIDS=()
+# 每次執行唯一的 sleep 秒數（600.<本行程 PID>）：並行跑的另一個 harness 留下的孤兒不會被 test-no-orphan-sleep 算進來（D0）
+P1_SLEEP_TAG="${P1_SLEEP_TAG:-600.$$}"
+export P1_SLEEP_TAG
 trap 'kill ${BG_PIDS[@]+"${BG_PIDS[@]}"} 2>/dev/null || true; [ -n "${KEEP:-}" ] || rm -rf "$TMP"' EXIT
 
 export MYTHOS_DIR="$TMP/mythos"
@@ -546,8 +550,8 @@ printf '%s\n' '#!/bin/sh' "printf '%s\\n' \"\$*\" >> \"$F/tmux.log\"" 'exit 0' >
 chmod +x "$F/tmux"; : > "$F/tmux.log"
 printf 'same body\n' > "$F/a.md"; printf 'same body\n' > "$F/b.md"; printf 'same body\n' > "$F/a2.md"
 # sleep 以外的子程序（含背景 sleep 自己）stdio 都要導掉：$( … ) 會等「所有」握著 stdout 的程序
-sleep 600 >/dev/null 2>&1 & pA=$!; BG_PIDS+=("$pA")
-sleep 600 >/dev/null 2>&1 & pB=$!; BG_PIDS+=("$pB")
+sleep "$P1_SLEEP_TAG" >/dev/null 2>&1 & pA=$!; BG_PIDS+=("$pA")
+sleep "$P1_SLEEP_TAG" >/dev/null 2>&1 & pB=$!; BG_PIDS+=("$pB")
 [ "${P1_FORCE_FAIL_AT:-}" = 23 ] && fail '強制失敗（P1_FORCE_FAIL_AT=23）'
 J23="$F/mythos/state/dispatch-jobs.tsv"
 printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' deep-1-1-a hard "$F/a.md" 1 pending "$TMP" - deep >> "$J23"
@@ -573,7 +577,7 @@ kill -0 "$pB" 2>/dev/null || fail '23：取消 A 殺了 B 的 runner'
 rm -f "$F/mythos/state/deep/deep-1-1-a.rc"
 awk -F'\t' 'BEGIN{OFS="\t"} $1=="deep-1-1-a"{$5="pending"} 1' "$J23" > "$J23.tmp" && mv "$J23.tmp" "$J23"
 # handle 沒記 start（舊格式，分不出 pid 是否被重用）→ pid 視為空、不送訊號、exit 1
-sleep 600 >/dev/null 2>&1 & pA=$!; BG_PIDS+=("$pA")
+sleep "$P1_SLEEP_TAG" >/dev/null 2>&1 & pA=$!; BG_PIDS+=("$pA")
 printf 'pid=%s\n' "$pA" > "$F/mythos/state/deep/deep-1-1-a.handle"
 set +e; out="$(c23 deep-1-1-a 2>&1)"; rc=$?; set -e
 [ "$rc" = 1 ] || fail "23n：handle 沒 pid_start 卻 exit ${rc}"

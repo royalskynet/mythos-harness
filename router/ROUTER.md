@@ -9,10 +9,11 @@
 ## 收到任務（PreToolUse 硬擋，不靠你自律）
 
 - 純聊天、回答你已知的事：直接回。
-- 其餘一律：第一個工具呼叫就是 Agent 派背景 `dispatcher`（`run_in_background` 不設或 true），prompt 帶使用者原話＋你知道的脈絡；接著回使用者一句「已派 dispatcher」就結束本回合。
+- 其餘一律預設走 `bin/dispatch-bg`（獨立 `claude --bg` worker，Router 重啟不斷）：`Write` prompt 到 `state/bg/<代號>-<epoch>.md` → `Bash` 跑剛好一行 `bin/dispatch-bg <代號> state/bg/<檔>.md`（續派 `bin/dispatch-bg --thread <代號> <代號> state/bg/<檔>.md`）→ 回使用者一句「已派 worker」就結束本回合。
+- fallback：`bin/dispatch-bg` exit 非 0 才用 Agent 派背景 `dispatcher`（`run_in_background` 不設或 true），prompt 帶使用者原話＋你知道的脈絡。
 - 派 dispatcher 時 prompt 第一行寫 `thread=<代號>`（英數＋連字號，例 `t-wakepy`），並用 Agent 工具回傳的 agent id 記住 thread→agent。
-- `bin/dispatch-gate.mjs`（matcher `*`，整份白名單）擋主 session：只放行 Telegram 工具、`ToolSearch`、`TaskStop`、`SendMessage`、背景 `dispatcher`；Bash、讀寫檔、Web、Skill、TaskOutput 與其他 MCP 全擋，閘出錯也擋。子代理的工具呼叫帶 `agent_id`，閘放行，但不准直接回 Telegram。
-- dispatcher 判難度（重派、取消用 `bin/dispatch-retry`／`bin/dispatch-cancel`，也是它跑）：easy 自己做；mid 寫工單（`## 驗收` 一條會失敗的指令）→ `bin/dispatch <task.md> <cwd> mid`（dcq 免費模型層）；hard 寫完整計畫 → `bin/dispatch <task.md> <cwd> hard`（背景 `deep-run`）。
+- `bin/dispatch-gate.mjs`（matcher `*`，整份白名單）擋主 session：只放行 Telegram 工具、`ToolSearch`、`TaskStop`、`SendMessage`、背景 `dispatcher`，外加一條完全符合 `^bin/dispatch-bg( --thread [A-Za-z0-9-]+)? [A-Za-z0-9-]+ state/bg/[A-Za-z0-9._-]+\.md$` 的 Bash 與 `state/bg/` 的 Write；其他 Bash、讀寫檔、Web、Skill、TaskOutput 與其他 MCP 全擋，閘出錯也擋。worker（transcript 在 worker 目錄的 slug 下）走 worker 模式：pinGuard 照擋、不准回 Telegram。子代理的工具呼叫帶 `agent_id`，閘放行，但不准直接回 Telegram。
+- dispatcher 判難度（重派、取消用 `bin/dispatch-retry`／`bin/dispatch-cancel`，也是它跑）：easy 自己做；mid 寫工單（`## 驗收` 一條會失敗的指令）→ `bin/dispatch <task.md> <cwd> mid`（dcq 免費模型層）；hard 寫完整計畫 → `bin/dispatch <task.md> <cwd> hard`（預設 bg-hard：`bin/dispatch-bg --hard`，sonnet＋Opus advisor、worktree 裡跑；`DISPATCH_HARD_BACKEND=deep` 才走背景 `deep-run`）。
 
 ## 派完之後
 

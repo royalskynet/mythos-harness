@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# 背景 worker（計畫 dispatcher-bg-plan 第 2／3／6 項）：dispatcher 活在獨立 claude session 裡，
+# Router 重啟／/clear／idle-reset 都殺不到它。
+# 用法：
+#   bin/dispatch-bg <thread> <prompt檔>          新開一張
+#   bin/dispatch-bg --thread <thread> <prompt檔> ledger 找同 thread 最新 bg 列的 sessionId 續派，找不到就新開
+#   bin/dispatch-bg --hard [--cwd <repo>] …      同上，worker 用 hard.json（sonnet＋Opus advisor），backend=bg-hard；
+#                                                prompt 第一行要求在 <repo> 開 git worktree（bin/dispatch hard 會帶 --cwd）
+# 成功：stdout 印 ledger id（bg-<短id>）；取不到 claude 印的短 id → stderr 原文、ledger 不寫、exit 1。
+set -u
+
+MYTHOS_DIR="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+CLAUDE="${CLAUDE_BIN:-claude}"
+# 工具白名單（計畫第 1 項）：不帶 mcp__telegram__*，worker 不能直接回使用者
+ALLOWED_TOOLS='Bash Read Write Edit Glob Grep'
+# 測試守門（F1）：sandbox 非空時 claude 必須也在 sandbox 裡，否則一律拒跑、ledger 不寫
+if [ -n "${MYTHOS_TEST_SANDBOX:-}" ]; then
+  case "$CLAUDE" in
+    "$MYTHOS_TEST_SANDBOX"/*) ;;
+    *) echo "測試模式拒跑真 runner" >&2; exit 97 ;;
+  esac
+fi
+. "$ROOT_DIR/bin/lib-ledger.sh"
+
+hard=''
+thread=''
+thflag=''
+tcwd=''
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --hard) hard=1 ;;
+    --thread) thread="${2:-}"; thflag=1; shift ;;
+    --thread=*) thread="${1#--thread=}"; thflag=1 ;;
+    --cwd) tcwd="${2:-}"; shift ;;
+    --) shift; break ;;
+    -) break ;;  # thread=-（bin/dispatch 沒帶 DISPATCH_THREAD）
+    -*) echo "不認得的選項：$1" >&2; exit 2 ;;
+    *) break ;;
+  esac
+  shift
+done
+# 用法 2 是 [--hard] --thread <thread> <prompt檔>；用法 1 是 [--hard] <thread> <prompt檔>
+[ -n "$thread" ] || thread="${1:-}"
+prompt="${2:-}"
+# --thread 之後只給一個非旗標參數時，它就是 prompt 檔（thread 已由 --thread 給）
+if [ -n "$thflag" ] && [ -z "$prompt" ] && [ -f "${1:-}" ]; then prompt="$1"; fi
+# Router 的寫法是 --thread <代號> <代號> state/bg/<檔>.md（gate 第 5 項）：兩個代號不一致就拒跑，免得續到別的 thread
+if [ -n "$thflag" ] && [ $# -ge 2 ] && [ "$1" != "$thread" ]; then
+  echo "--thread $thread 與位置參數 thread $1 不一致" >&2; exit 2
+fi
+# thread＝- 只准新開（bin/dispatch 沒帶 DISPATCH_THREAD 時）；--thread 續派一定要真代號
+[ "$thread" = - ] && [ -z "$thflag" ] && thread=_none
+case "$thread" in
+  _none) thread=- ;;
+  ''|-|*[!A-Za-z0-9-]*) echo "用法：bin/dispatch-bg [--hard] [--thread <代號>] <thread> <prompt檔>" >&2; exit 2 ;;
+esac
+[ -n "$prompt" ] && [ -f "$prompt" ] || { echo "prompt 檔不存在：${prompt}" >&2; exit 2; }
+case "$prompt" in /*) ;; *) prompt="$PWD/$prompt" ;; esac  # ledger 記絕對路徑（Router 給的是 state/bg/ 相對路徑）
+
+WORKER_DIR="${MYTHOS_WORKER_DIR:-$HOME/bots/mythos-worker}"
+[ -d "$WORKER_DIR" ] || { echo "worker 目錄不存在：${WORKER_DIR}（跑 run.sh 會從 router/worker 同步）" >&2; exit 1; }
+mkdir -p "$MYTHOS_DIR/state/bg"
+
+resume=''
+if [ -n "$thflag" ] && [ -f "$MYTHOS_DIR/state/dispatch-jobs.tsv" ]; then
+  resume="$(awk -F'\t' -v th="$thread" '
+    { if (NF < 8) $8 = $8 }
+    ($7 == th && ($8 == "bg" || $8 == "bg-hard")) { sid = substr($1, 4) }
+    END { print sid }' "$MYTHOS_DIR/state/dispatch-jobs.tsv" 2>/dev/null)"
+fi
+
+args=(--bg --model sonnet --allowedTools "$ALLOWED_TOOLS" --name "mythos:$thread")
+backend=bg
+settings=''
+if [ -n "$hard" ]; then
+  settings="$WORKER_DIR/.claude/hard.json"
+  [ -f "$settings" ] || { echo "找不到 $settings" >&2; exit 1; }
+  args+=(--settings "$settings")
+  backend=bg-hard
+fi
+[ -n "$resume" ] && args+=(--resume "$resume")
+# 最後一個參數才是 prompt 內容
+body="$(cat "$prompt")"
+if [ -n "$hard" ]; then
+  # bg-hard 一律在 worktree 跑（計畫第 6 項）：prompt 第一行就要求 git worktree add，不直接改現役 repo
+  repo="${tcwd:-<要改的 repo>}"
+  wt="${TMPDIR:-/tmp}/bg-hard-$(date +%s)-$$"
+  body="第一步：git -C '$repo' worktree add -b bg-hard/$(basename "$wt") '$wt'；之後所有改動只在 ${wt} 裡做，不直接改 ${repo}，不 merge、不 push，結果寫 worktree 路徑與 branch。
+定方向、卡關、宣告完成前各叫一次 advisor。最後一步寫 ${MYTHOS_DIR}/state/bg/<短id>.result。
+
+$body"
+fi
+args+=("$body")
+# 9>&-：claude 會活過本行程，不能繼承 ledger 鎖
+out="$(cd "$WORKER_DIR" && "$CLAUDE" "${args[@]}" 2>&1 9>&-)"
+rc=$?
+sid="$(printf '%s\n' "$out" | grep -oE '[0-9a-f]{8}' | head -1)"
+if [ "$rc" != 0 ] || [ -z "$sid" ]; then
+  printf '%s\n' "$out" >&2
+  echo "claude --bg 沒印出短 id（exit ${rc}），未登錄" >&2
+  exit 1
+fi
+
+id="bg-$sid"
+row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$id" "$([ -n "$hard" ] && echo hard || echo mid)" "$prompt" "$(date +%s)" pending "$WORKER_DIR" "$thread" "$backend")"
+if ! ledger_lock; then echo "拿不到 ledger 鎖，未登錄：${id}" >&2; exit 1; fi
+if ! printf '%s\n' "$row" >> "$MYTHOS_DIR/state/dispatch-jobs.tsv"; then
+  ledger_unlock; echo "寫 ledger 失敗：${id}" >&2; exit 1
+fi
+ledger_unlock
+echo "$id"

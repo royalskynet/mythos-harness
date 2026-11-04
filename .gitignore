@@ -10,6 +10,7 @@
 !/router/
 /bin/*
 !/bin/dispatch
+!/bin/dispatch-bg
 !/bin/dispatch-cancel
 !/bin/dispatch-deep-run
 !/bin/dispatch-gate.mjs
@@ -44,5 +45,11 @@
 !/tests/test-repo-queue.sh
 !/tests/lib-test-guard.sh
 !/tests/test-test-guard.sh
+!/tests/test-dispatch-bg.sh
+!/tests/test-dispatch-bg-watch.sh
+!/tests/test-dispatch-gate-bg.sh
+!/tests/test-dispatch-bg-e2e.sh
+# 工單 D：Router 寫給 dispatch-bg 的 prompt 檔與 worker 的 result（runtime，不進 git）
+/state/bg/
 *.bak*
 __pycache__/

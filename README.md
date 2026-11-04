@@ -3,18 +3,18 @@
 [![test](https://github.com/royalskynet/mythos-harness/actions/workflows/test.yml/badge.svg)](https://github.com/royalskynet/mythos-harness/actions/workflows/test.yml)
 
 用 Claude Code 實作 [DeepSeek Harness super-agent](https://x.com/DeepSeekHarness/article/2116857257245987236) 的**雙層架構**：
-你跟 **Sonnet** 聊天（Router），它只聊天、派工、轉述：每件事都交給背景 **dispatcher** 子代理，dispatcher 判難度後自己做或**派到背景 Worker**（免費模型層或 `deep-run`），做完由零 token 腳本把結果打回對話。Router 自己不跑指令、不讀檔（派工閘全工具白名單硬擋）。
+你跟 **Sonnet** 聊天（Router），它只聊天、派工、轉述：每件事都交給獨立的背景 **worker**（`bin/dispatch-bg` 起的 `claude --bg` session，Router 重啟也不斷；起不來才退回 dispatcher 子代理），它判難度後自己做或**派到背景 Worker**（免費模型層、bg-hard 或 `deep-run`），做完由零 token 腳本把結果打回對話。Router 自己不跑指令、不讀檔（派工閘全工具白名單硬擋）。
 
 A Claude Code implementation of the two-layer (Router / Worker) super-agent pattern:
 chat with Sonnet; every request goes to a background dispatcher subagent that triages and delegates real work to background workers.
 
 ```
 你 ──Telegram──▶ Router：Sonnet（只聊天、派工、轉述）
-                    │  PreToolUse 派工閘：主 session 只能 Telegram／ToolSearch／TaskStop／背景 dispatcher
-                    └─ Agent(dispatcher, 背景) ─▶ dispatcher：判難度、驗收、retry／cancel
+                    │  PreToolUse 派工閘：主 session 只能 Telegram／ToolSearch／TaskStop／背景 dispatcher＋一條 bin/dispatch-bg
+                    └─ bin/dispatch-bg（claude --bg worker；失敗才 Agent(dispatcher)）─▶ 判難度、驗收、retry／cancel
                                        ├─ easy ─▶ 自己做
                                        ├─ mid  ─▶ bin/dispatch ─▶ dcq（免費模型層）
-                                       └─ hard ─▶ bin/dispatch ─▶ deep-run（背景多步自主）
+                                       └─ hard ─▶ bin/dispatch ─▶ dispatch-bg --hard（sonnet＋Opus advisor，worktree；DISPATCH_HARD_BACKEND=deep 才走 deep-run）
                                                       ▲
         dispatch-watch（每 2 分、零 token）── 先落 events.jsonl；ACK＝Router 已收到事件，不代表處理完 ──▶ 打回 Router
                        │                 未 ACK 10 分鐘重送、上限 5 次；取消的票不再投遞
@@ -29,7 +29,7 @@ chat with Sonnet; every request goes to a background dispatcher subagent that tr
 |---|---|
 | 兩層架構（Router 不執行） | `bin/dispatch-gate.mjs`：PreToolUse 全工具白名單，主 session 只放 Telegram 回覆三個工具、ToolSearch、TaskStop、SendMessage 與背景 dispatcher，不靠 prompt 自律（文章 7.1：只靠 prompt 叫自己派工，5 跑 0 次） |
 | 何時定方向／宣告完成 | dispatcher（子代理）；`router/ROUTER.md` 是 Router 的規則 |
-| Worker 一次性行程 | `bin/dispatch`：mid → `dcq`，hard → `deep-run`，背景跑、Router 不等 |
+| Worker 一次性行程 | `bin/dispatch-bg`：獨立 `claude --bg` session（worker 目錄 `~/bots/mythos-worker`，範本 `router/worker/` 由 `router/worker-sync.sh` 同步）；`bin/dispatch`：mid → `dcq`，hard → bg-hard（`DISPATCH_HARD_BACKEND=deep` 才 `deep-run`），背景跑、Router 不等 |
 | 全雙工／async start() | `bin/dispatch-watch`：結果事後打進 Router 的 tmux pane，Router 派完就回去聊天 |
 | Watchdog | `dispatch-watch` 停滯／逾時偵測＋`bin/review-judge` 兩段過濾 |
 | session 生命週期 | `bin/idle-reset`：每天清晨閒置才 `/clear` |
@@ -58,7 +58,8 @@ tmux -L mythos attach -t mythos
 | `bin/dispatch-gate.mjs` | 主 session 全工具白名單（Telegram 只放 reply／react／edit_message）；子代理不能直接回 Telegram；pinGuard、fail-closed |
 | `bin/lib-ledger.sh`、`lib-events.mjs` | 共同 ledger 鎖（flock，行程死了自動釋放；ledger 與 events 同一把）、8 欄 schema、事件佇列（原子替換寫入）與精確 ACK 比對 |
 | `bin/watchdog` | L0：死鎖、重送用盡、Router 未回（只認成功的 reply 結果）、pending 逾 6 小時、deep transcript 停滯、`claude agents` 背景 worker blocked；L1：log 錯誤行交免費模型判 KNOWN／NEW／NOISE（出機前欄位白名單→scrub 去識別→sensitive-canary 掃去識別後文字，scrub 每日自檢，退路鏈 beam-free→OC Go 次選→local-llm→`state/watchdog-known.tsv`）；L2：只提議白名單旋鈕，兩棒不同體系同值才套用；`bin/watchdog ask "<問題>"` |
-| `bin/dispatch`、`dispatch-retry`、`dispatch-cancel`、`dispatch-deep-run` | 派工（先持鎖登錄再啟動後端）、重派、取消（deep 只照 `state/deep/<id>.handle`）、deep 背景執行 |
+| `bin/dispatch`、`dispatch-retry`、`dispatch-cancel`、`dispatch-deep-run` | 派工（先持鎖登錄再啟動後端）、重派（沿用原後端）、取消（deep 只照 `state/deep/<id>.handle`；bg 用 `claude stop <短id>`，停不掉不標 cancelled）、deep 背景執行 |
+| `bin/dispatch-bg`、`router/worker/`、`router/worker-sync.sh` | 背景 worker：`claude --bg`（工具白名單 `Bash Read Write Edit Glob Grep`、不給 Telegram），ledger 記 `bg-<短id>`；`--thread` 續同一 session、`--hard` 用 `hard.json`（sonnet＋advisor）並要求 worktree；結果寫 `state/bg/<短id>.result`，`dispatch-watch` 以 `claude agents --json --all` 判 done／STALL（`BG_STALL_MIN`，預設 60） |
 | `bin/dispatch-watch` | 回報＋停滯／抽查，pane 閒置才打進去 |
 | `bin/latency-report` | 唯讀、零 token：Telegram 使用者訊息到第一個 `__reply` 的延遲摘要（`n p50_s p90_s max_s over60 no_reply pending_tail`：終點取 `mcp__telegram__reply` 對到、成功的 tool_result 時間；每檔各自配對、連發併一筆；`pending_tail`＝檔尾還在等、不算沒回；`no_reply`＝上一輪沒回、距本輪最後一則使用者訊息超過 `LATENCY_MERGE_SEC`（環境變數，預設 300 秒）又來新訊息，舊輪算沒回並重起一輪，沒超過就併筆；`--days N`、`--json`；`--max-detail` 只印一行 `max_s= start= merged= file=`（最大延遲的秒數、起點、併筆數、檔名），不印訊息內文） |
 | `bin/review-judge`、`oc-free-ask`、`local-llm` | 免費模型判 Worker 有沒有跑歪；判不出來或格式不對一律 UNKNOWN＝照舊喚醒 Router |
@@ -76,6 +77,8 @@ bash tests/test_dispatch_deep.sh && bash tests/test_dispatch_watch.sh
 bash tests/test_launchd_install.sh     # 範本無寫死路徑、換完是合法 plist、ONLY= 只產一份
 bash tests/test-watchdog.sh            # watchdog v2：L0 不叫模型、上限、白名單／canary（含突變）、scrub 自檢、退路、L2
 bash tests/test-knob-timing.sh && bash tests/test-latency-report.sh && bash tests/test-repo-queue.sh   # 旋鈕時序（含突變）、延遲量測、同 repo 佇列
+bash tests/test-dispatch-bg.sh && bash tests/test-dispatch-bg-watch.sh && bash tests/test-dispatch-gate-bg.sh   # 背景 worker：啟動／續派／hard、回報與取消、Router 閘
+MYTHOS_E2E=1 bash tests/test-dispatch-bg-e2e.sh   # 真 claude --bg（haiku）；沒設 MYTHOS_E2E 只印 SKIP
 ```
 
 ## 限制 / Limits
@@ -92,7 +95,7 @@ bash tests/test-knob-timing.sh && bash tests/test-latency-report.sh && bash test
 
 ## English summary
 
-**Architecture.** You chat with a Sonnet **Router** over Telegram. The Router never runs tools itself: a PreToolUse hook (`bin/dispatch-gate.mjs`) allows only Telegram replies, `ToolSearch`, `TaskStop`, `SendMessage` and background `dispatcher` subagents, so delegation is enforced by code, not by prompt. The dispatcher triages each request: easy → does it itself; mid → `bin/dispatch` to `dcq` (free-model tier); hard → `deep-run` (background multi-step agent).
+**Architecture.** You chat with a Sonnet **Router** over Telegram. The Router never runs tools itself: a PreToolUse hook (`bin/dispatch-gate.mjs`) allows only Telegram replies, `ToolSearch`, `TaskStop`, `SendMessage`, background `dispatcher` subagents, and exactly one Bash shape (`bin/dispatch-bg <thread> state/bg/<file>.md`, plus `Write` into `state/bg/`), so delegation is enforced by code, not by prompt. By default the Router hands each request to an independent `claude --bg` worker (`bin/dispatch-bg`) that survives Router restarts; the in-process dispatcher subagent is the fallback. The worker triages: easy → does it itself; mid → `bin/dispatch` to `dcq` (free-model tier); hard → `bin/dispatch-bg --hard` (Sonnet with an Opus advisor, in a git worktree; `DISPATCH_HARD_BACKEND=deep` keeps the old `deep-run`).
 
 **Results and supervision (zero Router tokens).**
 - `bin/dispatch-watch` (every 2 min) writes worker results to `state/events.jsonl` first, then delivers them to the Router pane; un-ACKed events are resent every 10 min, up to 5 times. Terminal states are delivered before any review; `bin/review-judge` (free model, hard time budget) filters out ON_TRACK spot checks so they never wake the Router.

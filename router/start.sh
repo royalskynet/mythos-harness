@@ -9,6 +9,7 @@ CHANNELS="${CHANNELS-plugin:telegram@claude-plugins-official}"
 args=(--settings "$ROOT/router/settings.json" --append-system-prompt-file "$ROOT/router/ROUTER.md")
 [ -n "$CHANNELS" ] && args+=(--channels "$CHANNELS")
 mkdir -p "$ROOT/.claude/agents" && ln -sf "$ROOT/router/agents/dispatcher.md" "$ROOT/.claude/agents/dispatcher.md"  # Router 唯一的手
+bash "$ROOT/router/worker-sync.sh" || echo "worker 目錄同步失敗（router/worker-sync.sh），dispatch-bg 派不出去，Agent dispatcher 仍可用"
 tmux -L mythos has-session -t "$SESSION" 2>/dev/null && { echo "tmux session $SESSION 已在跑：tmux -L mythos attach -t $SESSION"; exit 0; }
 tmux -L mythos new-session -d -s "$SESSION" -c "$ROOT" "claude $(printf '%q ' "${args[@]}")"
 echo "已啟動：tmux -L mythos attach -t $SESSION"

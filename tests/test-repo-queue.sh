@@ -3,6 +3,7 @@
 # 全部用暫存 MYTHOS_DIR／DCQ_HOME／假 tmux／假 runner（DISPATCH_DEEP_RUN_BIN），不碰真的 state、tmux、dcq。
 # 假 runner 只記 argv 後 exec sleep 30；背景 pid 登記到 BG_PIDS，EXIT trap 一律清掉。
 set -eu
+export DISPATCH_HARD_BACKEND=deep  # 工單 D：hard 預設改 bg-hard；本檔驗的是 deep 舊路徑，明設才走 deep-run
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/repo-queue-test.XXXXXX")"
 BG_PIDS=()

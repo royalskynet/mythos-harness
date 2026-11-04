@@ -56,7 +56,7 @@ WATCH_LOG="$MYTHOS_DIR/logs/dispatch-watch.log"
 # 測試守門（F1／F3）：放在第一次讀寫 $TSV 或 events 之前，任何改動都不會落地
 RUNNER="${DISPATCH_DEEP_RUN_BIN:-$(cd "$(dirname "$0")" && pwd)/dispatch-deep-run}"
 if [ -n "${MYTHOS_TEST_SANDBOX:-}" ]; then
-  for b in "$RUNNER" "$TMUX_BIN"; do
+  for b in "$RUNNER" "$TMUX_BIN" "${CLAUDE_BIN:-claude}"; do
     case "$b" in
       "$MYTHOS_TEST_SANDBOX"/*) ;;
       *) echo "測試模式拒跑真 runner" >&2; exit 97 ;;

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 派工入口：寫好工單後呼叫。路由只看難度，不分急緩（11-02 使用者定）：
 #   easy／mid → dcq 派of（DCQ_ORDER=free，只走免費層，全敗就 FAIL 回報，不扣訂閱）
-#   hard      → deep（OpenCode Go 訂閱，背景多步自主）
+#   hard      → bg-hard（獨立 claude --bg session，11-04）；DISPATCH_HARD_BACKEND=deep 回舊的 deep-run
 # 用法：bin/dispatch <task.md 絕對路徑> <cwd 絕對路徑> <easy|mid|hard>
 # 舊的第四參數（urgent／later）照收不理，免得還沒重開的 Mythos 派工被 exit 2 擋掉。
 # DISPATCH_THREAD=<代號>（B）：同一個 thread 的追問／重派都帶同一個代號；沒給就寫 -。
@@ -29,6 +29,12 @@ case "$tier" in
   *) echo "難度只能是 easy／mid／hard：$tier" >&2; exit 2 ;;
 esac
 
+# hard 預設走 bg-hard（獨立 claude --bg session，11-04）；DISPATCH_HARD_BACKEND=deep 回舊的 deep-run
+if [ "$tier" = hard ] && [ "${DISPATCH_HARD_BACKEND:-bg}" != deep ]; then
+  # 新開一個 session（不帶 --thread 續派：呼叫端常是同 thread 的 worker 自己，續派會續到它自己身上）；
+  # cwd 交給 dispatch-bg 寫進 prompt 第一行（git worktree add），bg-hard 不進 C3 repo 佇列
+  exec "${DISPATCH_BG_BIN:-$ROOT_DIR/bin/dispatch-bg}" --hard --cwd "$cwd" "$thread" "$task"
+fi
 if [ "$tier" = hard ]; then route=deep; else route=dcq; export DCQ_ORDER=free; fi
 mkdir -p "$MYTHOS_DIR/state"
 # 順序（P0，11-04）：持鎖寫 pending 列 → 放鎖 → 才啟動後端。拿不到鎖就什麼都不派，

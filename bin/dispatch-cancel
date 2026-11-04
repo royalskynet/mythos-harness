@@ -18,8 +18,8 @@ fi
 row="$(awk -F'\t' -v id="$id" '$1 == id { print; exit }' "$TSV" 2>/dev/null | ledger_fields)"
 backend="$(printf '%s' "$row" | cut -f8)"
 case "$backend" in
-  deep|dcq) ;;
-  *) case "$id" in deep-*) backend=deep ;; *) backend=dcq ;; esac ;;
+  deep|dcq|bg|bg-hard) ;;
+  *) case "$id" in deep-*) backend=deep ;; bg-*) backend=bg ;; *) backend=dcq ;; esac ;;
 esac
 
 # 取消後撤銷該票未 ACK 的事件（標 cancelled:true，dispatch-watch 的 pending_events 會排除）
@@ -69,6 +69,22 @@ fail_ledger() {
 
 if [ "$backend" = dcq ]; then
   "$DCQ" cancel "$id" || { echo "dcq cancel 失敗：$id" >&2; exit 1; }
+  mark_cancelled || fail_ledger "拿不到鎖或寫檔失敗"
+  exit 0
+fi
+
+# bg／bg-hard：worker 是獨立 claude session，只能 claude stop <短id>。停不掉就不標 cancelled（下輪 watch 照舊回報）。
+if [ "$backend" = bg ] || [ "$backend" = bg-hard ]; then
+  sid="${id#bg-}"
+  # 測試守門（F1）：sandbox 非空時 claude 必須也在 sandbox 裡
+  if [ -n "${MYTHOS_TEST_SANDBOX:-}" ]; then
+    case "${CLAUDE_BIN:-claude}" in "$MYTHOS_TEST_SANDBOX"/*) ;; *) echo "測試模式拒跑真 runner" >&2; exit 97 ;; esac
+  fi
+  case "$sid" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+    *) echo "id 取不出短 session id：$id" >&2; exit 1 ;;
+  esac
+  "${CLAUDE_BIN:-claude}" stop "$sid" || { echo "claude stop 失敗，未標 cancelled：$sid" >&2; exit 1; }
   mark_cancelled || fail_ledger "拿不到鎖或寫檔失敗"
   exit 0
 fi
