@@ -29,6 +29,18 @@ case "$tier" in
   *) echo "難度只能是 easy／mid／hard：$tier" >&2; exit 2 ;;
 esac
 
+# 驗收路徑過期守門（拍 pin 之前）：驗收引用的檔案／glob 已不存在就不派，STALE 行原樣轉出。
+# 只有 exit 1（STALE）拒派；2（無驗收區塊）等其它 rc 照舊放行。LINT_SKIP=1 略過（測試用）。
+if [ "${LINT_SKIP:-}" != 1 ]; then
+  lint_out="$("$ROOT_DIR/bin/accept-paths-lint" "$task" 2>&1)"
+  lint_rc=$?
+  if [ "$lint_rc" -eq 1 ]; then
+    printf '%s\n' "$lint_out" | grep '^STALE: ' >&2
+    echo "驗收引用的路徑已過期，拒派：${task}" >&2
+    exit 1
+  fi
+fi
+
 # hard 預設走 bg-hard（獨立 claude --bg session，11-04）；DISPATCH_HARD_BACKEND=deep 回舊的 deep-run
 if [ "$tier" = hard ] && [ "${DISPATCH_HARD_BACKEND:-bg}" != deep ]; then
   # 新開一個 session（不帶 --thread 續派：呼叫端常是同 thread 的 worker 自己，續派會續到它自己身上）；
