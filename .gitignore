@@ -22,6 +22,7 @@
 !/bin/local-llm
 !/bin/oc-free-ask
 !/bin/review-judge
+!/bin/latency-report
 /tests/*
 !/tests/test_dispatch_gate.mjs
 !/tests/test-review-judge.sh
@@ -37,5 +38,8 @@
 !/tests/test-watch-knobs.sh
 !/tests/test-dispatch-gate-handson.sh
 !/tests/mk-path.sh
+!/tests/test-knob-timing.sh
+!/tests/test-latency-report.sh
+!/tests/test-repo-queue.sh
 *.bak*
 __pycache__/

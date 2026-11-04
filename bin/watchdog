@@ -394,6 +394,11 @@ if [ -f "$TSV" ]; then
     [ -n "$id" ] || continue
     alert "pending-$id" "派工 $id 卡在 pending 超過 6 小時"
   done < <(awk -F'\t' -v now="$now" '$5=="pending" && $4 ~ /^[0-9]+$/ && now-$4 >= 21600 {print $1"\t"$4}' "$TSV")
+  # 同 repo 佇列的票（C3）沒 runner 在跑，另計、不混進 pending
+  while IFS=$'\t' read -r id epoch; do
+    [ -n "$id" ] || continue
+    alert "queued-$id" "派工 $id queued 逾 6 小時"
+  done < <(awk -F'\t' -v now="$now" '$5=="queued" && $4 ~ /^[0-9]+$/ && now-$4 >= 21600 {print $1"\t"$4}' "$TSV")
 fi
 
 # 5a) deep tmux session 還在，但對應 transcript 超過 DEEP_STALL_MIN 分鐘沒動 → 告警

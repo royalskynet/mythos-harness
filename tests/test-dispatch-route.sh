@@ -6,6 +6,8 @@ SRC="$(cd "$(dirname "$0")/../bin" && pwd)/dispatch"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
+# 這支只驗單票路由／生命週期；同一 cwd 連派多張 hard 的佇列行為由 tests/test-repo-queue.sh 驗，這裡關掉
+export DISPATCH_REPO_QUEUE=0
 
 # dispatch 用自己的位置找 bin/dispatch-deep-run，所以整支搬進假目錄
 mkdir -p "$TMP/m/bin"

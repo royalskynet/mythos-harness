@@ -16,6 +16,8 @@ export DCQ_BIN="$TMP/dcq-fail"
 # A（11-03）：送進 tmux 不算數，Mythos transcript 出現 event_id=… 的 user 紀錄才 ACK；
 # 假 tmux 在 send-keys -l 時追加一筆 user 紀錄，模擬 Router 收到。
 export MYTHOS_TRANSCRIPT_DIR="$TMP/router-transcript"
+# 這支只驗單票路由／生命週期；同一 cwd 連派多張 hard 的佇列行為由 tests/test-repo-queue.sh 驗，這裡關掉
+export DISPATCH_REPO_QUEUE=0
 
 mkdir -p "$MYTHOS_DIR/state" "$DCQ_HOME" "$CLAUDE_PROJECTS_DIR" "$DEEP_TASK_DIR" "$MYTHOS_TRANSCRIPT_DIR"
 : > "$TMUX_LOG"

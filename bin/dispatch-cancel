@@ -34,10 +34,13 @@ mark_events() {
   done <<< "$ids"
 }
 
-mark_cancelled() {
+mark_cancelled() { # [只在持鎖時 status 仍等於此值才改，否則回 2]
   [ -f "$TSV" ] || return 0
   ledger_lock || { echo "拿不到 ledger 鎖" >&2; return 1; }
-  local rc=0 tmp
+  local rc=0 tmp want="${1:-}"
+  if [ -n "$want" ] && [ "$(awk -F'\t' -v id="$id" '$1 == id { print $5; exit }' "$TSV")" != "$want" ]; then
+    ledger_unlock; return 2
+  fi
   tmp="$(mktemp "${TMPDIR:-/tmp}/dispatch-cancel.XXXXXX")" || { ledger_unlock; return 1; }
   # 舊列不改寫：只有這張票被改成 cancelled，其餘原樣
   awk -F'\t' -v id="$id" 'BEGIN{OFS="\t"} $1==id {$5="cancelled"; if (NF<8) NF=8} {print}' "$TSV" > "$tmp" \
@@ -46,6 +49,18 @@ mark_cancelled() {
   ledger_unlock
   return "$rc"
 }
+
+# queued 票（C3）：還沒啟動 runner、沒有 handle。持鎖確認仍是 queued 才標 cancelled：
+# dispatch-watch 拉起 queued 也在同一把鎖內改 pending，所以這裡改成 cancelled 後它就不會再啟動。
+# 持鎖時已不是 queued（剛被拉起）→ 往下走一般 deep 取消（看 handle）。
+if [ "$(printf '%s' "$row" | cut -f5)" = queued ]; then
+  mark_cancelled queued
+  case $? in
+    0) exit 0 ;;
+    2) ;;
+    *) echo "拿不到 ledger 鎖或寫檔失敗：${id}" >&2; exit 1 ;;
+  esac
+fi
 
 fail_ledger() {
   echo "後端已取消：${id}；ledger 未更新（$1）：請稍後重跑 bin/dispatch-cancel $id 或手動確認" >&2
