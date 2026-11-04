@@ -179,8 +179,8 @@ track
 [ "$(status_of "$idc")" = queued ] || fail "7：C 跟 B 同輪被拉起：$(status_of "$idc")"
 [ "$(started "$idc")" = 0 ] || fail '7：C 跟 B 同輪啟動了 runner'
 
-# 8) F3：runner 直接 exit 1、不寫 handle → 未逾 DEEP_HANDOFF_SEC 不動；逾時一輪後 failed、rc=127、
-#    發一則「runner 未啟動」事件，同 repo 的 queued 同一輪被拉起
+# 8) F2：runner 直接 exit 1、不寫 handle → 未逾 DEEP_HANDOFF_SEC 不動；逾時一輪只寫 rc=127＋handoff，
+#    ledger 不改、由第 1 步出 FAIL（extra 帶原因），同 repo 的 queued 同一輪被拉起。寫不了（events 目錄唯讀）下輪可重掃。
 section f3
 printf '#!/bin/sh\nexit 1\n' > "$H/dead-runner"; chmod +x "$H/dead-runner"
 : > "$TMP/tF-a.md"; : > "$TMP/tF-b.md"
@@ -195,14 +195,48 @@ old=$(( $(date +%s) - 121 ))
 awk -v id="$ida" -v t="$old" -F'\t' 'BEGIN{OFS="\t"} $1==id { $4=t } { print }' "$TSV" > "$TSV.k" && mv "$TSV.k" "$TSV"
 watch
 track
-[ "$(status_of "$ida")" = failed ] || fail "8：啟動失敗的票沒落 failed：$(status_of "$ida")"
 [ "$(tr -d '[:space:]' < "$MYTHOS_DIR/state/deep/$ida.rc")" = 127 ] || fail '8：rc 不是 127'
-[ "$(jq -s --arg id "$ida" '[.[] | select(.job_id==$id and .status=="FAIL" and (.extra | contains("runner 未啟動")))] | length' "$MYTHOS_DIR/state/events.jsonl")" = 1 ] \
-  || fail "8：沒有正好一則 runner 未啟動事件：$(cat "$MYTHOS_DIR/state/events.jsonl" 2>&1)"
+case "$(status_of "$ida")" in pending|failed) ;; *) fail "8：A 列狀態不是 pending 也不是 failed：$(status_of "$ida")" ;; esac
+fail_n="$(jq -s --arg id "$ida" '[.[] | select(.job_id==$id and .status=="FAIL")] | length' "$MYTHOS_DIR/state/events.jsonl")"
+[ "$fail_n" = 1 ] || fail "8：沒有正好一則 FAIL 事件：$(cat "$MYTHOS_DIR/state/events.jsonl" 2>&1)"
+jq -e --arg id "$ida" 'select(.job_id==$id and .status=="FAIL" and (.extra | contains("runner 未啟動")))' "$MYTHOS_DIR/state/events.jsonl" >/dev/null \
+  || fail "8：FAIL 的 extra 沒帶 runner 未啟動：$(cat "$MYTHOS_DIR/state/events.jsonl" 2>&1)"
 [ "$(status_of "$idb")" = pending ] || fail "8：A 釋放後 B 沒被拉起：$(status_of "$idb")"
 [ "$(started "$idb")" = 1 ] || fail '8：B 沒啟動 runner'
 watch
 [ "$(jq -s --arg id "$ida" '[.[] | select(.job_id==$id)] | length' "$MYTHOS_DIR/state/events.jsonl")" = 1 ] || fail '8：failed 的票下一輪又發事件'
+
+# 8b) 寫不了就不能吞掉（可重掃）：state 在、deep 子目錄不存在且建不了 → 一輪不動（連 rc 都沒寫）；
+#     恢復可寫 → 下一輪就寫 rc=127＋handoff 並出 FAIL 事件
+section f3b
+printf '#!/bin/sh\nexit 1\n' > "$H/dead2-runner"; chmod +x "$H/dead2-runner"
+: > "$TMP/tG-a.md"
+idh="$(DISPATCH_DEEP_RUN_BIN="$H/dead2-runner" dispatch "$TMP/tG-a.md" "$TMP/repoH")"
+old=$(( $(date +%s) - 121 ))
+awk -v id="$idh" -v t="$old" -F'\t' 'BEGIN{OFS="\t"} $1==id { $4=t } { print }' "$TSV" > "$TSV.k" && mv "$TSV.k" "$TSV"
+rmdir "$MYTHOS_DIR/state/deep" && chmod 0555 "$MYTHOS_DIR/state" || fail '8b：準備唯讀環境失敗'
+watch
+[ ! -d "$MYTHOS_DIR/state/deep" ] || fail '8b：寫不了卻建出了 state/deep'
+jq -e --arg id "$idh" 'select(.job_id==$id)' "$MYTHOS_DIR/state/events.jsonl" >/dev/null 2>&1 && fail '8b：寫不了卻有事件'
+chmod 0755 "$MYTHOS_DIR/state"
+watch
+jq -e --arg id "$idh" 'select(.job_id==$id and .status=="FAIL")' "$MYTHOS_DIR/state/events.jsonl" >/dev/null \
+  || fail "8b：恢復可寫後下一輪沒出 FAIL：$(cat "$MYTHOS_DIR/state/events.jsonl" 2>&1)"
+
+# 8c) F1：票已落地（rc 已寫／ledger 列非 pending）→ 遲到的 runner 不啟動、不寫 handle
+printf '#!/bin/sh\necho "$*" >> "%s"
+' "$STUB_LOG" > "$H/late-runner"; chmod +x "$H/late-runner"
+: > "$TMP/tG-b.md"
+section f1
+n0="$(wc -l < "$STUB_LOG" | tr -d ' ')"
+printf '0\n' > "$MYTHOS_DIR/state/deep/land-rc.rc"
+MYTHOS_DIR="$MYTHOS_DIR" DEEP_RUN_BIN="$H/late-runner" bash "$ROOT/bin/dispatch-deep-run" land-rc "$TMP/tG-b.md" "$TMP/repoH" 2>"$H/late.err" || fail "8c：rc 已存在時 runner 非零退出：$(cat "$H/late.err")"
+[ "$(wc -l < "$STUB_LOG" | tr -d ' ')" = "$n0" ] || fail '8c：rc 已存在卻還是呼叫了 deep-run'
+[ ! -f "$MYTHOS_DIR/state/deep/land-rc.handle" ] || fail '8c：rc 已存在卻寫了 handle'
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' land-fail hard "$TMP/tG-b.md" "$(date +%s)" failed "$TMP/repoH" - deep >> "$TSV"
+MYTHOS_DIR="$MYTHOS_DIR" DEEP_RUN_BIN="$H/late-runner" bash "$ROOT/bin/dispatch-deep-run" land-fail "$TMP/tG-b.md" "$TMP/repoH" 2>"$H/late.err" || fail "8c：列 failed 時 runner 非零退出：$(cat "$H/late.err")"
+[ "$(wc -l < "$STUB_LOG" | tr -d ' ')" = "$n0" ] || fail '8c：列 failed 卻還是呼叫了 deep-run'
+[ ! -f "$MYTHOS_DIR/state/deep/land-fail.handle" ] || fail '8c：列 failed 卻寫了 handle'
 
 # 9) F5：入列 7 小時的 queued 升級 → epoch 改成升級當下；dispatch-watch 不發 REVIEW、watchdog 不告警 pending 逾 6 小時
 section f5

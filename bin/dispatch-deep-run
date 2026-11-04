@@ -18,6 +18,7 @@ fi
 
 MYTHOS_DIR="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 DEEP_TASK_DIR="${DEEP_TASK_DIR:-${DC_HOME:-$HOME/.deepclaude}/work/.deep}"
+TSV="$MYTHOS_DIR/state/dispatch-jobs.tsv"
 
 id="${1:-}"
 task="${2:-}"
@@ -28,12 +29,6 @@ if [ -z "$id" ] || [ -z "$task" ] || [ -z "$cwd" ]; then
   exit 2
 fi
 
-mkdir -p "$MYTHOS_DIR/state/deep"
-out="$MYTHOS_DIR/state/deep/$id.out"
-rcf="$MYTHOS_DIR/state/deep/$id.rc"
-pidf="$MYTHOS_DIR/state/deep/$id.pid"
-handle="$MYTHOS_DIR/state/deep/$id.handle"
-
 # 原子寫 handle：先寫暫存再 mv，cancel 不會讀到半份
 write_handle() {
   printf '%s\n' "$@" > "$handle.tmp.$$" && mv "$handle.tmp.$$" "$handle"
@@ -41,9 +36,25 @@ write_handle() {
 # lstart 原樣寫（含連續空白），dispatch-cancel 用同一個 ps 格式逐字比對
 start_of() { ps -o lstart= -p "$1" 2>/dev/null; }
 
+mkdir -p "$MYTHOS_DIR/state/deep"
+out="$MYTHOS_DIR/state/deep/$id.out"
+rcf="$MYTHOS_DIR/state/deep/$id.rc"
+pidf="$MYTHOS_DIR/state/deep/$id.pid"
+handle="$MYTHOS_DIR/state/deep/$id.handle"
+
+# F1：票已落地（rc 寫了，或 ledger 該列不是 pending）就不啟動遲到的 runner。直呼測試沒有 ledger 列，照舊跑。
+#   檢查與第一版 handle 同一把鎖：第 1 步看到 handle 才不會先判成啟動失敗（F2）。
+. "$(cd "$(dirname "$0")" && pwd)/lib-ledger.sh"
+ledger_lock || exit 75
+if [ -f "$rcf" ] || { [ -f "$TSV" ] && awk -F'\t' -v id="$id" '$1==id { NF=8; print $5; exit }' "$TSV" | grep -qv '^pending$'; }; then
+  ledger_unlock
+  echo "票已落地，不啟動：$id" >&2
+  exit 0
+fi
 : > "$out"
 printf '%s\n' "$$" > "$pidf"
 write_handle "pid=$$" "pid_start=$(start_of $$)"
+ledger_unlock
 
 "${DEEP_RUN_BIN:-deep-run}" "$task" "$cwd" > "$out" 2>&1 &
 dp=$!

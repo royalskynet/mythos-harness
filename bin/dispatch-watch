@@ -51,11 +51,23 @@ NODE_BIN="${NODE_BIN:-node}"
 LIB="$(cd "$(dirname "$0")" && pwd)/lib-events.mjs"
 WATCH_LOG="$MYTHOS_DIR/logs/dispatch-watch.log"
 
+# 測試守門（F1／F3）：放在第一次讀寫 $TSV 或 events 之前，任何改動都不會落地
+RUNNER="${DISPATCH_DEEP_RUN_BIN:-$(cd "$(dirname "$0")" && pwd)/dispatch-deep-run}"
+if [ -n "${MYTHOS_TEST_SANDBOX:-}" ]; then
+  for b in "$RUNNER" "$TMUX_BIN"; do
+    case "$b" in
+      "$MYTHOS_TEST_SANDBOX"/*) ;;
+      *) echo "測試模式拒跑真 runner" >&2; exit 97 ;;
+    esac
+  done
+fi
+
+# lib 跟腳本走（不跟 MYTHOS_DIR）：測試／別處呼叫時 MYTHOS_DIR 是暫存目錄，沒有 bin/
+. "$(cd "$(dirname "$0")" && pwd)/lib-ledger.sh"
+
 [ -f "$TSV" ] || exit 0
 mkdir -p "$MYTHOS_DIR/state" 2>/dev/null || exit 0
 mkdir -p "$MYTHOS_DIR/state/deep" 2>/dev/null || true
-# lib 跟腳本走（不跟 MYTHOS_DIR）：測試／別處呼叫時 MYTHOS_DIR 是暫存目錄，沒有 bin/
-. "$(cd "$(dirname "$0")" && pwd)/lib-ledger.sh"
 
 LOCK="$MYTHOS_DIR/state/.dispatch-watch.lock"
 mkdir "$LOCK" 2>/dev/null || exit 0
@@ -106,24 +118,17 @@ todo() { printf '%s\t%s\n' "$1" "$2" >> "$TODOS"; }
 #    queued 卻已有 rc（異常落地）→ 只改回 pending 不啟動，交給下面第 1 步照一般 deep 票出 PASS／FAIL。
 #    ponytail: 每張 queued 都重掃全表算 top，O(n²)；票上百張再改成先算好各列 top。
 top_of() { git -C "$1" rev-parse --show-toplevel 2>/dev/null 9>&- || printf %s "$1"; }
-RUNNER="${DISPATCH_DEEP_RUN_BIN:-${LIB%/*}/dispatch-deep-run}"
 
 # 0a) F3 啟動交接失敗：deep 票 pending、沒 rc、沒 handle、距 epoch 超過 DEEP_HANDOFF_SEC
-#     → 寫 rc=127、該列改 failed、發一則 FAIL 事件「runner 未啟動」，repo 才不會被永遠起不來的票占住。
-#     放在拉 queued 之前：同一輪就能把同 top 的下一張拉起。只改那一列，其餘原樣寫回。
+#     → 只寫 rc=127＋<id>.handoff（原因），不改 ledger、不發事件（F2）。repo 由第 1 步照一般 deep 票出 FAIL 釋放，
+#     寫失敗（例如 events 目錄唯讀、鎖拿不到）只留到下輪重掃，可重試。放在拉 queued 之前。
 fail_handoff() { # id task
-  local id="$1" task="$2" rc
-  printf '127\n' > "$MYTHOS_DIR/state/deep/$id.rc" || return 0
-  # 拿不到鎖：rc 已寫，下面第 1 步照一般 deep 票出 FAIL，repo 一樣會釋放
-  ledger_lock || return 0
-  awk -F'\t' -v id="$id" 'BEGIN { OFS="\t" } $1==id && $5=="pending" { NF=8; $5="failed" } { print }' \
-    "$TSV" > "$TSV.handoff.$$" && mv "$TSV.handoff.$$" "$TSV"
-  rc=$?
-  ledger_unlock
-  [ "$rc" = 0 ] || { rm -f "$TSV.handoff.$$"; return 0; }
-  log "handoff 逾時 ${DEEP_HANDOFF_SEC}s：$id 落 failed"
-  add_event "$id" FAIL "$task" "runner 未啟動（${DEEP_HANDOFF_SEC}s 內沒寫 handle）" \
-    "看 state/deep/$id.out；確認後用 bin/dispatch-retry $id \"<補充指示>\" 重派" >/dev/null || true
+  local id="$1" rcf="$MYTHOS_DIR/state/deep/$1.rc" msg
+  msg="runner 未啟動（${DEEP_HANDOFF_SEC}s 內沒寫 handle）"
+  # 只落結果、不碰 ledger／events：rc 已存在就什麼都不做（F1 不覆寫既有結果），第 1 步照一般 deep 票出 FAIL
+  ( set -o noclobber; printf '127\n' > "$rcf" ) 2>/dev/null || return 0
+  printf '%s\n' "$msg" > "$MYTHOS_DIR/state/deep/$id.handoff"
+  log "handoff 逾時 ${DEEP_HANDOFF_SEC}s：$id 寫 rc=127＋handoff"
 }
 while IFS=$'\t' read -r id _ task epoch status _ _ backend; do
   [ "$status" = pending ] && [ "$backend" = deep ] || continue
@@ -162,13 +167,6 @@ if awk -F'\t' '$5=="queued"' "$TSV" 2>/dev/null | grep -q .; then
     printf '%s\t%s\t%s\n' "$qid" "$qtask" "$qcwd" >> "$QDIR/launch"
     printf '%s\n' "$top" >> "$QDIR/tops"
   done < <(ledger_fields < "$TSV" | sort -t$'\t' -k4,4n)
-  # 測試守門（F1）：要啟動 runner 時 MYTHOS_TEST_SANDBOX 非空且 runner 在它外面 → 什麼都不改、exit 97
-  if [ -s "$QDIR/launch" ] && [ -n "${MYTHOS_TEST_SANDBOX:-}" ]; then
-    case "$RUNNER" in
-      "$MYTHOS_TEST_SANDBOX"/*) ;;
-      *) ledger_unlock; rm -rf "$QDIR"; echo "測試模式拒跑真 runner" >&2; exit 97 ;;
-    esac
-  fi
   if [ -s "$QDIR/promote" ] \
     && promote_rows "$QDIR/promote" "$TSV" "$now" > "$QDIR/tsv" \
     && mv "$QDIR/tsv" "$TSV"; then
@@ -201,6 +199,11 @@ while IFS=$'\t' read -r id tier task epoch status cwd thread backend; do
       extra=""
       if [ "$st" = FAIL ]; then
         extra="$(tail -n 3 "$outfile" 2>/dev/null | tr '\t\n' '  ' | cut -c1-300)"
+        # F2：handoff 寫的 rc 沒有 out 可看，原因放進 extra
+        hf="$MYTHOS_DIR/state/deep/$id.handoff"
+        if [ -f "$hf" ]; then
+          extra="$(head -1 "$hf" | tr '\t\n' '  ')${extra:+；$extra}"
+        fi
       fi
       case "$st" in
         PASS) guide="請重跑工單驗收並看改動範圍後收尾" ;;

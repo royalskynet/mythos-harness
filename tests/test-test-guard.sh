@@ -4,6 +4,8 @@
 #   (b) DISPATCH_DEEP_RUN_BIN 指 repo 的 bin/dispatch-deep-run（sandbox 外）跑 dispatch hard → exit 97、ledger 沒有列
 #   (c) 直接跑 bin/dispatch-deep-run 帶 MYTHOS_TEST_SANDBOX、下一層 DEEP_RUN_BIN 不在 sandbox → exit 97、什麼都不寫
 #   (d) dispatch-watch 要拉起 queued、runner 在 sandbox 外 → exit 97、ledger 原文不變
+#   (f) 守門在第一次讀寫 ledger／events 之前：逾時 deep 票＋同 cwd queued 也不得落地任何改動
+#   (g) TMUX_BIN 在 sandbox 外 → exit 97
 #   (e) guard 不覆蓋已設定的值；沒設定的換成 sandbox 內 stub
 # 萬一守門失效：DEEP_RUN_BIN 是 guard stub、PATH 前面放假 deep-run，就算被執行也只是記一行。
 set -eu
@@ -80,6 +82,35 @@ DISPATCH_DEEP_RUN_BIN="$ROOT/bin/dispatch-deep-run" MYTHOS_TRANSCRIPT_DIR="$TMP/
 cmp -s "$TSV" "$TMP/d.before" || fail "(d) ledger 被改了：$(cat "$TSV")"
 [ ! -d "$MYTHOS_DIR/state/.dispatch-watch.lock" ] || fail '(d) exit 97 後 watch 鎖沒放'
 echo '(d) ok'
+
+# (f) 守門前置（F5＋F4）：逾時 deep pending（無 handle 無 rc）＋同 cwd queued，runner 指 repo 的真 runner
+#     → exit 97；ledger 原文不變、state/deep 沒有新 rc、events 檔不存在或不變
+mkdir -p "$TMP/fcwd"
+old=$(( $(date +%s) - 200 ))
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' f-1 hard "$TMP/t.md" "$old" pending "$TMP/fcwd" - deep > "$TSV"
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' f-2 hard "$TMP/t.md" "$(date +%s)" queued "$TMP/fcwd" - deep >> "$TSV"
+cp "$TSV" "$TMP/f.before"
+before_deep="$(ls -A "$MYTHOS_DIR/state/deep" 2>/dev/null)"
+before_events=''
+[ -f "$MYTHOS_DIR/state/events.jsonl" ] && before_events="$TMP/f.events" && cp "$MYTHOS_DIR/state/events.jsonl" "$before_events"
+rc=0
+DISPATCH_DEEP_RUN_BIN="$ROOT/bin/dispatch-deep-run" MYTHOS_TRANSCRIPT_DIR="$TMP/router" CLAUDE_PROJECTS_DIR="$TMP/projects" \
+  bash "$ROOT/bin/dispatch-watch" 2>"$TMP/f.err" 9>&- || rc=$?
+[ "$rc" = 97 ] || fail "(f) 守門沒前置，得到 $rc"
+grep -q '測試模式拒跑真 runner' "$TMP/f.err" || fail "(f) 沒印拒跑訊息：$(cat "$TMP/f.err")"
+cmp -s "$TSV" "$TMP/f.before" || fail "(f) ledger 被改了：$(cat "$TSV")"
+[ "$(ls -A "$MYTHOS_DIR/state/deep" 2>/dev/null)" = "$before_deep" ] || fail "(f) state/deep 有新增：$(ls -A "$MYTHOS_DIR/state/deep")"
+if [ -n "$before_events" ]; then cmp -s "$MYTHOS_DIR/state/events.jsonl" "$before_events" || fail '(f) events 被改了'
+elif [ -f "$MYTHOS_DIR/state/events.jsonl" ]; then fail '(f) 新建了 events 檔'; fi
+echo '(f) ok'
+
+# (g) TMUX_BIN 在 sandbox 外 → 一樣 exit 97、ledger 不變
+cp "$TMP/f.before" "$TSV"
+rc=0
+TMUX_BIN=/usr/bin/true bash "$ROOT/bin/dispatch-watch" 2>"$TMP/g.err" 9>&- || rc=$?
+[ "$rc" = 97 ] || fail "(g) sandbox 外的 TMUX_BIN 應 exit 97，得到 $rc"
+cmp -s "$TSV" "$TMP/f.before" || fail '(g) ledger 被改了'
+echo '(g) ok'
 
 [ ! -s "$OUTSIDE/outside-calls.log" ] || fail "sandbox 外的 deep-run 被叫到了：$(cat "$OUTSIDE/outside-calls.log")"
 echo 'TEST-GUARD PASS'

@@ -58,12 +58,52 @@ j="$(MYTHOS_TRANSCRIPT_DIR="$X" bash "$ROOT/bin/latency-report" --json)"
 [ "$j" = '{"n":0,"p50_s":0,"p90_s":0,"max_s":0,"over60":0,"no_reply":0,"pending_tail":1}' ] \
   || fail "別檔的 reply 替這檔消帳了：${j}"
 
+# F8：挑得到 timeout／gtimeout 才跑 F9（跟 dispatch-watch 的挑法一樣：先 timeout 再 gtimeout）
+if command -v timeout >/dev/null 2>&1; then TO=timeout
+elif command -v gtimeout >/dev/null 2>&1; then TO=gtimeout
+else fail '缺 timeout/gtimeout'; fi
+
 # F9：--days 缺值要 exit 2，不能無限迴圈
 rc=0
-timeout 5 bash "$ROOT/bin/latency-report" --days >/dev/null 2>&1 || rc=$?
+"$TO" -k 5 5 bash "$ROOT/bin/latency-report" --days >/dev/null 2>&1 || rc=$?
 [ "$rc" = 2 ] || fail "--days 缺值應 exit 2，得到 $rc"
 
 # --days 0 不合法
 MYTHOS_TRANSCRIPT_DIR="$D" bash "$ROOT/bin/latency-report" --days 0 >/dev/null 2>&1 && fail '--days 0 沒被擋'
+
+# F6／F7 回合綁定與併筆門檻（LATENCY_MERGE_SEC＝300s）：
+#   d：A@0、reply 甲@1、result 甲@2（A 結清）、沒有等待時發的 reply 乙@50、B@100、該 reply 的 result@105 → 不消帳（pending_tail=1）
+#   e：A@0、reply 甲@1、result 甲@2、B@100、reply 乙@103、result 乙@105 → 兩筆 2 與 5
+#   f：A@0 未回、B@1000（距最後一則 > 300s）→ 舊輪 no_reply、以 B 重起；result@1030 → n=1 latency=30、no_reply=1
+#   g：A@0、B@200（< 300s）併筆 → result@230 → n=1 latency=230（起點取第一則）
+#   h：--max-detail 只印一行摘要，含 merged=，不含 fixture 訊息文字
+Q="$TMP/rules"; mkdir -p "$Q"
+{ user 0; reply 1 t1; result 2 t1; reply 50 t0; user 100; result 105 t0; } > "$Q/d.jsonl"
+{ user 0; reply 1 t1; result 2 t1; user 100; reply 103 t2; result 105 t2; } > "$Q/e.jsonl"
+{ user 0; user 1000; reply 1025 t1; result 1030 t1; } > "$Q/f.jsonl"
+{ user 0; user 200; reply 225 t1; result 230 t1; } > "$Q/g.jsonl"
+json_of() { rm -rf "$Q/o"; mkdir -p "$Q/o"; cp "$Q/$1" "$Q/o/"; MYTHOS_TRANSCRIPT_DIR="$Q/o" bash "$ROOT/bin/latency-report" --json; }
+j="$(json_of d.jsonl)"
+[ "$j" = '{"n":1,"p50_s":2,"p90_s":2,"max_s":2,"over60":0,"no_reply":0,"pending_tail":1}' ] || fail "d 不對：${j}"
+j="$(json_of e.jsonl)"
+[ "$j" = '{"n":2,"p50_s":2,"p90_s":5,"max_s":5,"over60":0,"no_reply":0,"pending_tail":0}' ] || fail "e 不對：${j}"
+j="$(json_of f.jsonl)"
+[ "$j" = '{"n":1,"p50_s":30,"p90_s":30,"max_s":30,"over60":0,"no_reply":1,"pending_tail":0}' ] || fail "f 不對：${j}"
+j="$(json_of g.jsonl)"
+[ "$j" = '{"n":1,"p50_s":230,"p90_s":230,"max_s":230,"over60":1,"no_reply":0,"pending_tail":0}' ] || fail "g 不對：${j}"
+det="$(MYTHOS_TRANSCRIPT_DIR="$Q" bash "$ROOT/bin/latency-report" --max-detail)"
+[ "$(printf '%s\n' "$det" | wc -l | tr -d ' ')" = 1 ] || fail "h：--max-detail 不只一行：${det}"
+case "$det" in max_s=*" start="*" merged="*" file="*) ;; *) fail "h：--max-detail 格式不對：${det}" ;; esac
+printf '%s' "$det" | grep -q 'hi' && fail "h：--max-detail 印了訊息內文：${det}"
+[ "$(MYTHOS_TRANSCRIPT_DIR="$Q" bash "$ROOT/bin/latency-report" --json | grep -c merged)" = 0 ] || fail 'h：--json 多了欄位'
+
+# 壓縮重寫：整條鏈追加到檔尾，user 保留原 timestamp、tool_result 改成壓縮當下。
+#   原份：A@0 → 33s、B@20000 → 12s；重寫份：user@0、reply t2@30（皆 < maxSeen−60s 跳過）、result t2@19990（在 60s 內不跳，但 t2 沒登記不結算）
+#   拿掉 maxSeen 跳過時：重寫份 user@0 重起一輪、t2 結算 → n=3、max_s=19990，這段必 FAIL
+R="$TMP/rewrite"; mkdir -p "$R"
+{ user 0; reply 30 t1; result 33 t1; user 20000; reply 20010 t3; result 20012 t3;
+  user 0; reply 30 t2; result 19990 t2; } > "$R/r.jsonl"
+j="$(MYTHOS_TRANSCRIPT_DIR="$R" bash "$ROOT/bin/latency-report" --json)"
+[ "$j" = '{"n":2,"p50_s":12,"p90_s":33,"max_s":33,"over60":0,"no_reply":0,"pending_tail":0}' ] || fail "壓縮重寫份被算進延遲：${j}"
 
 echo 'LATENCY-REPORT PASS'
