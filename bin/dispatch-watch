@@ -148,11 +148,20 @@ direct_unknown() { # job eid
   log "direct unknown $2"
 }
 # 只在 add_event 本輪新建 PASS 後呼叫：先標 sending（deliver 會跳過），再送；0 已送、1/97 確定沒送交 Router、其他不明
-direct_send() { # job eid thread result檔
+# 直發只送 result 裡寫給使用者的那段：「摘要：」到「---細節---」之間（11-04：整份 result 是寫給 Router 的術語）。
+# 兩個標記缺一或中間是空的 → 印空，呼叫端不直發，事件照舊交 Router 轉述。
+summary_of() { # result檔
+  awk '/^---細節---[[:space:]]*$/ { if (on) { ok = 1; exit } }
+       on { buf = buf $0 "\n"; next }
+       /^摘要[:：]/ { on = 1; sub(/^摘要[:：][[:space:]]*/, ""); if ($0 != "") buf = $0 "\n" }
+       END { if (ok) printf "%s", buf }' "$1" 2>/dev/null | sed '/./,$!d'
+}
+
+direct_send() { # job eid thread 摘要檔
   local rc
   mkdir -p "$(dirname "$WATCH_LOG")" 2>/dev/null
   ledger_events set "$EVENTS_FILE" "$2" '{"direct":"sending"}' >/dev/null || return 0
-  { printf '✅ %s（%s）\n' "$3" "$1"; cat "$4"; printf '\n\n回覆這則訊息，我會判斷是否續派同一個 worker。\n'; } \
+  { printf '✅ %s 做完了\n\n' "$3"; cat "$4"; printf '\n\n有問題直接回覆這則，我接著處理同一件事。\n'; } \
     | MYTHOS_DIR="$MYTHOS_DIR" "${NODE_BIN:-node}" "$TG_SEND_BIN" --thread "$3" --job "$1" 9>&- >/dev/null 2>>"$WATCH_LOG"
   rc=${PIPESTATUS[1]}
   case "$rc" in
@@ -251,7 +260,12 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
       fi
       guide="看結果決定：要續派用 bin/dispatch-bg --thread $thread <prompt檔>，卡死就 bin/dispatch-cancel $id"
       if add_event "$id" PASS "$task" "$extra" "$guide" >/dev/null && [ "$backend" = bg ] && [ -s "$rf" ]; then
-        direct_send "$id" "$id-PASS" "$thread" "$rf"
+        sf="$MYTHOS_DIR/state/bg/$sid.summary"
+        if summary_of "$rf" > "$sf" && [ -n "$(tr -d '[:space:]' < "$sf")" ]; then
+          direct_send "$id" "$id-PASS" "$thread" "$sf"
+        else
+          log "no summary, Router 轉述 $id-PASS"
+        fi
       fi
       ;;
     working|busy|running|active|blocked)
