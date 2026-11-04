@@ -23,6 +23,7 @@
 !/bin/oc-free-ask
 !/bin/review-judge
 !/bin/latency-report
+!/bin/latency-scan.cjs
 /tests/*
 !/tests/test_dispatch_gate.mjs
 !/tests/test-review-judge.sh
