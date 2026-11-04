@@ -4,7 +4,7 @@
 #   (b) 500：退回 Router 投遞；再跑一輪不直發
 #   (c) 回應不結束：時限內收掉成 unknown＋已 ACK＋brief-lines 告警；再跑一輪不重送
 #   (d) 上輪卡在 sending 超過 600 秒 → 照 unknown 收掉；(d2) 未逾時的 sending 不交 Router
-#   (e) bg-hard 不直發　(f) 截斷　(g) sandbox 指真 base → 97　(h) 未設 MYTHOS_DIR、cwd=/ → 對照表寫到腳本所在 repo
+#   (e) bg-hard 不直發　(f) 截斷　(g) sandbox 指真 base → 97　(h) 未設 MYTHOS_DIR、cwd=/ → 對照表寫到腳本所在 repo　(i) 送出後斷線 → exit 2
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/tg-send.XXXXXX")"
@@ -51,6 +51,7 @@ const srv = http.createServer((req, res) => {
     fs.appendFileSync(process.env.STUB_CALLS, b + '\n')
     const mode = fs.readFileSync(process.env.STUB_MODE, 'utf8').trim()
     if (mode === 'hang') { res.writeHead(200, { 'content-type': 'application/json' }); res.write('{"ok":'); return }
+    if (mode === 'destroy') { req.socket.destroy(); return }
     if (mode === '500') { res.writeHead(500); res.end('{"ok":false}'); return }
     res.setHeader('content-type', 'application/json')
     res.end(JSON.stringify({ ok: true, result: { message_id: mid++ } }))
@@ -167,6 +168,17 @@ set +e; echo hi | TG_API_BASE=https://api.telegram.org node "$ROOT/bin/tg-send" 
 [ "$rc" = 97 ] || fail "(g) 應 exit 97：$rc"
 [ "$(calls)" = 0 ] || fail '(g) 有請求送出'
 echo '(g) ok'
+
+# (i) 收完請求才斷線 → 不明（exit 2），不是確定沒送；連線被拒才是 exit 1
+echo destroy > "$STUB_MODE"; : > "$STUB_CALLS"
+set +e; echo hi | node "$ROOT/bin/tg-send" --thread t-i --job bg-i 2>/dev/null; rc=$?; set -e
+[ "$(calls)" = 1 ] || fail "(i) stub 應收到請求：$(calls)"
+[ "$rc" = 2 ] || fail "(i) 送出後斷線應 exit 2：$rc"
+closed=$(node -e "const s=require('net').createServer().listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})")
+set +e; echo hi | TG_API_BASE="http://127.0.0.1:$closed" node "$ROOT/bin/tg-send" --thread t-i --job bg-i 2>/dev/null; rc=$?; set -e
+[ "$rc" = 1 ] || fail "(i) 連線被拒應 exit 1：$rc"
+echo ok > "$STUB_MODE"
+echo '(i) ok'
 
 # (h) 未設 MYTHOS_DIR、cwd=/ → 對照表寫到腳本所在 repo 的 state/
 mkdir -p "$TMP/repo/bin"; cp "$ROOT/bin/tg-send" "$TMP/repo/bin/tg-send"
