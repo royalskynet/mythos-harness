@@ -4,7 +4,7 @@
 #   (b) 500：退回 Router 投遞；再跑一輪不直發
 #   (c) 回應不結束：時限內收掉成 unknown＋已 ACK＋brief-lines 告警；再跑一輪不重送
 #   (d) 上輪卡在 sending 超過 600 秒 → 照 unknown 收掉；(d2) 未逾時的 sending 不交 Router
-#   (e) bg-hard 不直發　(f) 截斷　(g) sandbox 指真 base → 97　(h) 未設 MYTHOS_DIR、cwd=/ → 對照表寫到腳本所在 repo　(i) 送出後斷線 → exit 2
+#   (e) bg-hard 不直發　(j) 沒摘要段不直發、交 Router　(f) 截斷　(g) sandbox 指真 base → 97　(h) 未設 MYTHOS_DIR、cwd=/ → 對照表寫到腳本所在 repo　(i) 送出後斷線 → exit 2
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/tg-send.XXXXXX")"
@@ -76,9 +76,9 @@ status_of() { awk -F '\t' -v i="$1" '$1==i {print $5; exit}' "$TSV"; }
 calls() { grep -c . "$STUB_CALLS" || true; }
 ev() { jq -r --arg e "$1" "select(.event_id==\$e) | $2" "$EV"; }
 agents=''
-done_job() { # 短id backend 結果文字
+done_job() { # 短id backend 摘要文字 [原樣寫入的 result]
   row "bg-$1" "$1" "$2"
-  printf '%s\n' "$3" > "$MYTHOS_DIR/state/bg/$1.result"
+  if [ $# -ge 4 ]; then printf '%s\n' "$4"; else printf 'thread=t-%s\n摘要：\n%s\n---細節---\n細節 rc=0 commit abc1234\n' "$1" "$3"; fi > "$MYTHOS_DIR/state/bg/$1.result"
   agents="$agents${agents:+,}{\"sessionId\":\"$1-1111-2222-3333-444455556666\",\"kind\":\"background\",\"state\":\"done\"}"
   printf '[%s]' "$agents" > "$FAKE_AGENTS"
 }
@@ -88,8 +88,9 @@ watch() { bash "$ROOT/bin/dispatch-watch" 9>&- || fail "dispatch-watch 非零退
 done_job aaaa0001 bg '[t-aaaa0001 結論] 全部做完'
 watch
 [ "$(calls)" = 1 ] || fail "(a) stub 應收到 1 次：$(calls)"
-grep -q '全部做完' "$STUB_CALLS" || fail '(a) stub 沒收到 result 全文'
-grep -q '回覆這則訊息' "$STUB_CALLS" || fail '(a) 缺續派提示'
+grep -q '全部做完' "$STUB_CALLS" || fail '(a) stub 沒收到摘要'
+if grep -q 'commit abc1234\|thread=t-aaaa0001' "$STUB_CALLS"; then fail '(a) 細節段／thread 行被發給使用者'; fi
+grep -q '有問題直接回覆這則' "$STUB_CALLS" || fail '(a) 缺續派提示'
 grep -q "$(printf '^42\t900\tt-aaaa0001\tbg-aaaa0001\t')" "$MAP" || fail "(a) 對照表沒登錄：$(cat "$MAP" 2>/dev/null)"
 if grep -q 'event_id=bg-aaaa0001-PASS' "$TMUX_LOG" 2>/dev/null; then fail '(a) 直發成功還投遞給 Router'; fi
 [ "$(ev bg-aaaa0001-PASS .direct)" = sent ] || fail "(a) direct 應是 sent：$(ev bg-aaaa0001-PASS .direct)"
@@ -150,6 +151,17 @@ watch
 [ "$(calls)" = "$n" ] || fail '(e) bg-hard 被直發'
 grep -q 'event_id=bg-eeee0005-PASS' "$TMUX_LOG" || fail '(e) bg-hard 沒走 Router'
 echo '(e) ok'
+
+# (j) 沒有摘要段、或少了 ---細節---：不直發，事件交 Router 轉述
+n=$(calls)
+done_job jjjj0010 bg '' '[t-jjjj0010 結論] 舊格式 rc=0'
+done_job jjjj0011 bg '' "$(printf 'thread=t\n摘要：只有摘要沒有細節標記')"
+watch
+[ "$(calls)" = "$n" ] || fail "(j) 沒摘要段還直發：$(calls)"
+grep -q 'event_id=bg-jjjj0010-PASS' "$TMUX_LOG" || fail '(j) 舊格式沒交 Router'
+grep -q 'event_id=bg-jjjj0011-PASS' "$TMUX_LOG" || fail '(j) 缺細節標記沒交 Router'
+[ "$(ev bg-jjjj0010-PASS .direct)" = null ] || fail "(j) 不該有 direct 狀態：$(ev bg-jjjj0010-PASS .direct)"
+echo '(j) ok'
 
 # (f) 截斷
 : > "$STUB_CALLS"
