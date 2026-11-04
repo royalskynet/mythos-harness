@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 回覆延遲量測（C2）：Telegram 訊息進來，到 Router 第一次 mcp__telegram__reply 的時間差。零 token、只讀。
-#   bin/latency-report [--days N] [--json] [--max-detail]
+#   bin/latency-report [--days N] [--json] [--max-detail] [--stages]
 # 樣本：type=user 且 content 是字串、含 `<channel source="telegram"` 的行；
 # 終點：`mcp__telegram__reply` 的 tool_use id 對到、is_error 不為 true 的 tool_result（失敗的 reply 不消帳）。
 # 每個 transcript 檔各自配對（檔與檔之間不互相消帳）；同檔連發的多則使用者訊息併成一筆，起點取第一則。
@@ -9,12 +9,16 @@
 # 以這則重起一輪；沒超過就併筆（起點不變、併筆數 +1）。檔尾還在等的不算沒回，歸 pending_tail。
 # F6／F7：reply 的 tool_use 只在 waiting 中登記（記下當時 waiting 起點），tool_result 只結算同一起點的配對。
 # --max-detail：只印一行 max_s／起點／併筆數／檔名，不印任何訊息內文。
+# --stages：慢／快對照（E1）。slow＝延遲 > 60s 的樣本；fast＝時間上離它們最近的 ≤60s 樣本（每筆取差距最小者、
+# 不重複、相距超過 10 分鐘的不配）。各印一行 TSV：kind(slow|fast) user_ts first_assistant_ts reply_use_ts result_ts total_s，
+# 時間是毫秒 epoch，只印數字不印內文。
 # 百分位取最近秩（nearest rank，p90 = 第 ceil(0.9n) 名）。只印數字，不印任何訊息內文。
 set -u
 
 days=7
 json=0
 detail=0
+stages=0
 merge_sec="${LATENCY_MERGE_SEC:-300}"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -23,7 +27,8 @@ while [ $# -gt 0 ]; do
     --days=*) days="${1#*=}"; shift ;;
     --json) json=1; shift ;;
     --max-detail) detail=1; shift ;;
-    *) echo "用法：bin/latency-report [--days N] [--json] [--max-detail]" >&2; exit 2 ;;
+    --stages) stages=1; shift ;;
+    *) echo "用法：bin/latency-report [--days N] [--json] [--max-detail] [--stages]" >&2; exit 2 ;;
   esac
 done
 case "$days" in ''|*[!0-9]*|0) echo "--days 要是正整數：$days" >&2; exit 2 ;; esac
@@ -35,7 +40,24 @@ dir="${MYTHOS_TRANSCRIPT_DIR:-$HOME/.claude/projects/$(printf '%s' "$HOME/bots/m
 [ -d "$dir" ] || { echo "找不到 transcript 目錄：$dir" >&2; exit 1; }
 
 # ponytail: node 一次載入所有近 N 天的 jsonl；單機 transcript 量級沒問題，再多就改成逐檔流式（已被 node 的 readline 逐行處理）
-res="$("${NODE_BIN:-node}" "$(cd "$(dirname "$0")" && pwd)/latency-scan.cjs" "$dir" "$days" "$merge_sec" "$detail")" || { echo "量測失敗：$dir" >&2; exit 1; }
+res="$("${NODE_BIN:-node}" "$(cd "$(dirname "$0")" && pwd)/latency-scan.cjs" "$dir" "$days" "$merge_sec" "$detail" "$stages")" || { echo "量測失敗：$dir" >&2; exit 1; }
+
+if [ "$stages" = 1 ]; then
+  # 慢樣本（>60s）由舊到新；每個慢樣本配時間最近、還沒被配走、相距 ≤600s 的快樣本（≤60s），沒有就只印 slow。
+  # jq 用單引號多行內嵌（不能用 jq -f /dev/stdin：那不是可尋位置檔）。
+  stages_prog='
+def line: [(if .s > 60 then "slow" else "fast" end), .user_ts, .first_assistant_ts, .reply_use_ts, .result_ts, .s] | @tsv;
+(.samples // []) as $all
+| [$all[] | select(.s > 60)] | sort_by(.user_ts) as $slow
+| [$all[] | select(.s <= 60)] as $fast
+| reduce $slow[] as $sl ({free: ($fast | length | [range(0; .)]), out: []};
+    ([$sl as $x | .free[] as $i
+      | {i: $i, d: (($fast[$i].user_ts - $x.user_ts) | if . < 0 then -. else . end)}] | min_by(.d) // null) as $pick
+    | if $pick == null then .out += [{sl: $sl}] else .free -= [$pick.i] | .out += [{sl: $sl, fa: $fast[$pick.i]}] end)
+| .out[] | (.sl | line), (.fa // empty | line)'
+  printf '%s\n' "$res" | jq -r "$stages_prog" || { echo "stages 輸出失敗" >&2; exit 1; }
+  exit 0
+fi
 
 if [ "$detail" = 1 ]; then
   printf '%s\n' "$res" | jq -r 'if .max_detail then "max_s=\(.max_detail.max_s) start=\(.max_detail.start) merged=\(.max_detail.merged) file=\(.max_detail.file)" else "max_s=0 start=- merged=0 file=-" end'

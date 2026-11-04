@@ -136,4 +136,61 @@ g0="$(ts 0 | sed 's/Z$/.000Z/')"
 [ "$(MYTHOS_TRANSCRIPT_DIR="$Q" bash "$ROOT/bin/latency-report" --max-detail)" = "max_s=230 start=$g0 merged=1 file=g.jsonl" ] \
   || fail "F6 --max-detail 不對：$(MYTHOS_TRANSCRIPT_DIR="$Q" bash "$ROOT/bin/latency-report" --max-detail)"
 
-echo 'LATENCY-REPORT PASS'
+
+# E1：seenUser 鍵＝channel 標籤的 chat_id＋message_id（兩個都有才用），沒有才退回 timestamp＋內容
+TAG() { printf '<channel source="telegram" chat_id="%s"%s>hi' "$1" "${2:+ message_id=\"$2\"}"; }
+ch() { jq -cn --arg t "$1" --arg c "$2" '{type:"user",timestamp:$t,message:{content:$c}}'; }
+# (1) 同 chat、同 message_id、timestamp 不同 → n=1（舊鍵含 timestamp，會得 2）
+M="$TMP/mid"; mkdir -p "$M"
+{ ch "$(ts 0)" "$(TAG 1 111)"; ch "$(ts 30)" "$(TAG 1 111)"; reply 40 t1; result 40 t1; } > "$M/a.jsonl"
+j="$(MYTHOS_TRANSCRIPT_DIR="$M" bash "$ROOT/bin/latency-report" --json)"
+[ "$j" = '{"n":1,"p50_s":40,"p90_s":40,"max_s":40,"over60":0,"no_reply":0,"pending_tail":0}' ] || fail "E1(1) 同 message_id 的重播沒去重：${j}"
+# (2) 不同 message_id、同毫秒同內容 → n=2
+rm -f "$M/a.jsonl"
+{ ch "$(ts 0)" "$(TAG 1 111)"; reply 10 t1; result 10 t1; ch "$(ts 100)" "$(TAG 1 222)"; reply 110 t2; result 110 t2; } > "$M/b.jsonl"
+j="$(MYTHOS_TRANSCRIPT_DIR="$M" bash "$ROOT/bin/latency-report" --json)"
+[ "$j" = '{"n":2,"p50_s":10,"p90_s":10,"max_s":10,"over60":0,"no_reply":0,"pending_tail":0}' ] || fail "E1(2) 不同 message_id 被併掉：${j}"
+# (3) 不同 chat、同 message_id → n=2
+rm -f "$M/b.jsonl"
+{ ch "$(ts 0)" "$(TAG 1 111)"; reply 10 t1; result 10 t1; ch "$(ts 100)" "$(TAG 2 111)"; reply 110 t2; result 110 t2; } > "$M/c.jsonl"
+j="$(MYTHOS_TRANSCRIPT_DIR="$M" bash "$ROOT/bin/latency-report" --json)"
+[ "$j" = '{"n":2,"p50_s":10,"p90_s":10,"max_s":10,"over60":0,"no_reply":0,"pending_tail":0}' ] || fail "E1(3) 不同 chat 同 message_id 被併掉：${j}"
+# 沒有 message_id 的舊格式：同 timestamp 同內容的重播仍按舊鍵去重（n=1）
+rm -f "$M/c.jsonl"
+{ ch "$(ts 0)" "$(TAG 1)"; ch "$(ts 0)" "$(TAG 1)"; reply 10 t1; result 10 t1; } > "$M/d.jsonl"
+j="$(MYTHOS_TRANSCRIPT_DIR="$M" bash "$ROOT/bin/latency-report" --json)"
+[ "$j" = '{"n":1,"p50_s":10,"p90_s":10,"max_s":10,"over60":0,"no_reply":0,"pending_tail":0}' ] || fail "E1 無 message_id 的舊鍵去重壞了：${j}"
+
+# E1：seenUse 交錯——user@0 → reply a → user@1000（>300s，上一輪算沒回）→ 重播 user@0／reply a → result a@1005
+# 重播的 user 會被 seenUser 擋掉，但 reply a 若再登記，會把 result 記到新一輪 → 多一筆 5s。
+# 期望：n=0 no_reply=1 pending_tail=1。突變：刪 seenUse 必 FAIL。
+IW="$TMP/interleave"; mkdir -p "$IW"
+{ user 0; reply 1 a; user 1000; reply 1 a; result 1005 a; } > "$IW/x.jsonl"
+j="$(MYTHOS_TRANSCRIPT_DIR="$IW" bash "$ROOT/bin/latency-report" --json)"
+[ "$j" = '{"n":0,"p50_s":0,"p90_s":0,"max_s":0,"over60":0,"no_reply":1,"pending_tail":1}' ] || fail "E1 seenUse 交錯消帳：${j}"
+
+# E1 --stages：固定 fixture，精確比對整段輸出（kind、毫秒 epoch、秒數；不印內文）。
+# 慢樣本 121s（起點 0）、60s（起點 5000，61s 算慢）；快樣本 10s（起點 1000）。
+# 配對：慢 121s 離快 10s 最近 → 先印它；慢 60s 的半徑內（±600s）沒有沒被配走的快樣本 → 不硬配、只印 slow。
+# 順序：slow 依起點，配到的 fast 緊接其後。
+ST="$TMP/stages"; mkdir -p "$ST"
+{ user 0; other_tool 2; reply 120 t1; result 121 t1
+  user 1000; other_tool 1001; reply 1010 t2; result 1010 t2
+  user 5000; reply 5061 t3; result 5061 t3; } > "$ST/s.jsonl"
+ms() { echo $(( (B + $1) * 1000 )); }
+want="$(printf 'slow\t%s\t%s\t%s\t%s\t121\nfast\t%s\t%s\t%s\t%s\t10\nslow\t%s\t%s\t%s\t%s\t61' \
+  "$(ms 0)" "$(ms 2)" "$(ms 121)" "$(ms 121)" \
+  "$(ms 1000)" "$(ms 1001)" "$(ms 1010)" "$(ms 1010)" \
+  "$(ms 5000)" "$(ms 5061)" "$(ms 5061)" "$(ms 5061)")"
+got="$(MYTHOS_TRANSCRIPT_DIR="$ST" bash "$ROOT/bin/latency-report" --stages)"
+[ "$got" = "$want" ] || fail "E1 --stages 輸出不對：
+--- got
+${got}
+--- want
+${want}"
+printf '%s' "$got" | grep -q 'hi' && fail 'E1 --stages 印了訊息內文'
+# --stages 與 --json 一樣不吃掉一般輸出：不加旗標時 TSV 照舊
+[ "$(MYTHOS_TRANSCRIPT_DIR="$ST" bash "$ROOT/bin/latency-report" --json)" = '{"n":3,"p50_s":61,"p90_s":121,"max_s":121,"over60":2,"no_reply":0,"pending_tail":0}' ] \
+  || fail "E1 fixture 的 --json 不對：$(MYTHOS_TRANSCRIPT_DIR="$ST" bash "$ROOT/bin/latency-report" --json)"
+
+
