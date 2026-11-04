@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // 直發：把 bg 單的 PASS 結果直接 push 給使用者（E2），不經 Router。
 //   bin/tg-send --thread <th> --job <id>   （文字讀 stdin）
-// 回傳碼：0＝Telegram 回 ok（stdout 印 message_id）；1＝確定沒送（連線失敗、逾時前沒送完、非 2xx）；
-//   2＝不明（逾時、回應解析失敗、沒有「確定沒送」證據——含 DNS 以外的早期失敗）。
+// 回傳碼：0＝Telegram 回 ok（stdout 印 message_id）；1＝確定沒送（連線被拒、DNS 失敗、非 2xx、ok=false）；
+//   2＝不明（逾時、送出後斷線、回應解析失敗）。
 // 只管送與記帳，判斷「該不該送、同一個 event_id 怎麼收」在 bin/dispatch-watch。不印 token。
 import fs from 'node:fs'
 import path from 'node:path'
@@ -13,6 +13,7 @@ const STATE_DIR = process.env.TELEGRAM_STATE_DIR || path.join(process.env.HOME, 
 const BASE = process.env.TG_API_BASE || 'https://api.telegram.org'
 const TIMEOUT_MS = Number(process.env.TG_SEND_TIMEOUT_MS) || 15000
 const MAX_CHARS = 3500
+const NOT_SENT = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH'])
 
 const die = (code, msg) => {
   process.stderr.write(`tg-send: ${msg}\n`)
@@ -82,9 +83,10 @@ try {
   })
 } catch (e) {
   clearTimeout(timer)
-  // 逾時＝結果不明；連線被拒、名稱解析失敗＝確定沒送（已在逾時前就失敗）
-  if (e?.name === 'AbortError') die(2, `逾時 ${TIMEOUT_MS}ms，結果不明`)
-  die(1, `連線失敗，沒送出：${e?.cause?.code || e?.message || e}`)
+  // 只有連線被拒、名稱解析失敗＝確定沒送；逾時、對方收完才斷線（UND_ERR_SOCKET、ECONNRESET…）＝結果不明（r12 F1）
+  const code = e?.cause?.code || ''
+  if (e?.name !== 'AbortError' && NOT_SENT.has(code)) die(1, `連線失敗，沒送出：${code}`)
+  die(2, `${e?.name === 'AbortError' ? `逾時 ${TIMEOUT_MS}ms` : `連線中斷 ${code || e?.message || e}`}，結果不明`)
 }
 try {
   body = await res.text()
