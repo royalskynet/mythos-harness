@@ -6,7 +6,8 @@
 set -eu
 if [ "${MYTHOS_E2E:-}" != 1 ]; then echo 'SKIP e2e（設 MYTHOS_E2E=1 才跑真 claude --bg）'; exit 0; fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/dispatch-bg-e2e.XXXXXX")"
+# claude --bg 要 workspace 已信任；無頭機按不了 trust 提示，固定建在已信任的 /private/tmp 底下（$TMPDIR 在 /var/folders 不信任）
+TMP="$(mktemp -d "${E2E_TMP_BASE:-/private/tmp}/dispatch-bg-e2e.XXXXXX")"
 REAL_CLAUDE="${E2E_CLAUDE:-$(command -v claude)}"
 [ -x "$REAL_CLAUDE" ] || { echo "FAIL: 找不到 claude" >&2; exit 1; }
 export MYTHOS_DIR="$TMP/mythos"
