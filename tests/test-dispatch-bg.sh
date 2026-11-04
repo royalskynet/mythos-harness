@@ -19,13 +19,17 @@ export MYTHOS_WORKER_DIR="$TMP/worker"
 export CLAUDE_LOG="$TMP/claude.log"
 export CLAUDE_BIN="$TMP/claude"
 export FAKE_ID="$TMP/fake-id"
+export FAKE_AGENTS="$TMP/fake-agents.json"
+export FAKE_NOTE="$TMP/fake-note"
 mkdir -p "$MYTHOS_DIR/state" "$MYTHOS_WORKER_DIR/.claude"
 WORKER_REAL="$(cd "$MYTHOS_WORKER_DIR" && pwd -P)"
 printf '{"model":"sonnet","advisorModel":"claude-opus-5-5"}\n' > "$MYTHOS_WORKER_DIR/.claude/hard.json"
 # stub 印「Started background session 0491f0d0-…」這種形態；cwd 也記下來
 cat > "$CLAUDE_BIN" <<'STUB'
 #!/bin/sh
+if [ "${1:-}" = agents ]; then cat "$FAKE_AGENTS" 2>/dev/null || echo '[]'; exit 0; fi
 printf 'CWD=%s\t%s\n' "$(pwd -P)" "$*" >> "$CLAUDE_LOG"
+if [ -f "$FAKE_NOTE" ]; then cat "$FAKE_NOTE"; exit 0; fi
 if [ -f "$FAKE_ID" ]; then
   printf 'Session started in background.\nid: %s\n' "$(cat "$FAKE_ID")"
 else
@@ -64,12 +68,13 @@ echo '(1) ok'
 # 2) 白名單常數就是這六個
 grep -q "ALLOWED_TOOLS='Bash Read Write Edit Glob Grep'" "$ROOT/bin/dispatch-bg" || fail '工具白名單不是 Bash Read Write Edit Glob Grep'
 
-# 3) --thread 續派
+# 3) --thread 續派：--resume 要帶完整 sessionId（短 id 會讓 claude 起一個不跑的 copy，11-04 實測）
+printf '[{"id":"0491f0d0","sessionId":"0491f0d0-1111-2222-3333-444455556666"},{"id":"7a7a7a7a","sessionId":"7a7a7a7a-0000-0000-0000-000000000000"}]\n' > "$FAKE_AGENTS"
 echo 7a7a7a7a-0000-0000-0000-000000000000 > "$FAKE_ID"
 : > "$CLAUDE_LOG"
 id2="$(bash "$ROOT/bin/dispatch-bg" --thread t-a "$TMP/p.md")"
 [ "$id2" = bg-7a7a7a7a ] || fail "續派 id 不對：$id2"
-grep -q -- '--resume 0491f0d0' "$CLAUDE_LOG" || fail "續派沒有 --resume：$(cat "$CLAUDE_LOG")"
+grep -q -- '--resume 0491f0d0-1111-2222-3333-444455556666 ' "$CLAUDE_LOG" || fail "續派沒帶完整 sessionId：$(cat "$CLAUDE_LOG")"
 # 沒命中的 thread → 不帶 --resume
 : > "$CLAUDE_LOG"
 bash "$ROOT/bin/dispatch-bg" --thread t-new "$TMP/p.md" >/dev/null
@@ -77,7 +82,18 @@ grep -q -- '--resume' "$CLAUDE_LOG" && fail "新 thread 竟然帶 --resume：$(c
 # 同 thread 兩列：取最新那列（7a7a7a7a）
 : > "$CLAUDE_LOG"
 bash "$ROOT/bin/dispatch-bg" --thread t-a "$TMP/p.md" >/dev/null
-grep -q -- '--resume 7a7a7a7a' "$CLAUDE_LOG" || fail "同 thread 沒取最新 session：$(cat "$CLAUDE_LOG")"
+grep -q -- '--resume 7a7a7a7a-0000-0000-0000-000000000000 ' "$CLAUDE_LOG" || fail "同 thread 沒取最新 session：$(cat "$CLAUDE_LOG")"
+# claude agents 列不到 → 不硬續短 id，改新開並在 stderr 說明
+echo '[]' > "$FAKE_AGENTS"
+: > "$CLAUDE_LOG"
+bash "$ROOT/bin/dispatch-bg" --thread t-a "$TMP/p.md" >/dev/null 2> "$TMP/e3"
+grep -q -- '--resume' "$CLAUDE_LOG" && fail "換不到完整 id 竟然還帶 --resume：$(cat "$CLAUDE_LOG")"
+grep -q '找不到 7a7a7a7a 的完整 sessionId' "$TMP/e3" || fail "換不到完整 id 沒說明：$(cat "$TMP/e3")"
+# 續派的真實輸出：note 行先出現原 session id，ledger 要記 backgrounded 那行的新 id
+printf 'note: session 0491f0d0 is already running in the background, so this started a copy as 5e5e5e5e. `claude attach 0491f0d0` opens the original.\nbackgrounded \302\267 5e5e5e5e \302\267 mythos:t-c\n' > "$FAKE_NOTE"
+id3="$(bash "$ROOT/bin/dispatch-bg" t-c "$TMP/p.md")"
+rm -f "$FAKE_NOTE"
+[ "$id3" = bg-5e5e5e5e ] || fail "note 行的原 id 被當成新 id：$id3"
 echo '(3) ok'
 
 # 4) --hard（換一個唯一短 id，免撞前面同 thread 的列）
