@@ -155,7 +155,8 @@ echo '(e) ok'
 : > "$STUB_CALLS"
 head -c 5000 /dev/zero | tr '\0' 'x' | node "$ROOT/bin/tg-send" --thread t-f --job bg-ffff0006 >/dev/null || fail '(f) tg-send 失敗'
 txt="$(head -1 "$STUB_CALLS" | jq -r .text)"
-[ "${#txt}" -le 3500 ] || fail "(f) 沒截到 3500 內：${#txt}"
+len="$(head -1 "$STUB_CALLS" | jq -r '.text | length')"   # 用 jq 算字數；bash ${#} 在 C locale 算的是位元組
+[ "$len" -le 3500 ] || fail "(f) 沒截到 3500 內：$len"
 case "$txt" in *'…（截斷，全文 state/bg/ffff0006.result）') ;; *) fail "(f) 截斷尾巴不對" ;; esac
 echo '(f) ok'
 

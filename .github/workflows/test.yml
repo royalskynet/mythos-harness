@@ -19,3 +19,14 @@ jobs:
       - run: bash tests/test_dispatch_watch.sh
       - run: bash tests/test_launchd_install.sh
       - run: bash tests/test-dispatch-gate-handson.sh
+      - run: bash tests/test-test-guard.sh
+      - run: bash tests/test-no-orphan-sleep.sh
+      - run: bash tests/test-knob-timing.sh
+      - run: bash tests/test-latency-report.sh
+      - run: bash tests/test-repo-queue.sh
+      - run: bash tests/test-dispatch-bg.sh
+      - run: bash tests/test-dispatch-bg-watch.sh
+      - run: bash tests/test-dispatch-gate-bg.sh
+      - run: bash tests/test-tg-send.sh
+      - run: bash tests/test-tg-plugin-patch.sh
+      - run: bash tests/test-tg-reply-thread.sh
