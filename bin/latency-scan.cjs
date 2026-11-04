@@ -17,21 +17,24 @@ for (const f of fs.readdirSync(dir)) {
   const replyUse = new Map() // id → 登記時的輪
   let w = null                // 這一輪正在等回覆：{ start: 起點, last: 本輪最後一則 user, merged: 併筆數 }，null＝沒有在等
   // 壓縮重寫會把整條對話鏈追加到檔尾：user 保留原 timestamp、tool_result 改成壓縮當下 → 假延遲。
-  // 時間倒退超過 60s 的列整列跳過（不登記 user／reply、不結算 result）；毫秒級亂序不受影響。
-  let maxSeen = -Infinity
+  // F2：按身分去重，不靠時間單調。seenUser＝user 原 timestamp＋內容（重寫份整則跳過）；
+  // seenUse＝reply tool_use id（重寫份同 id 不覆寫原本的登記）；settled＝已結算的 tool_use id（再出現的結果不結算）。
+  // ponytail: 三個集合都按檔累積，單檔數萬行沒問題；真的爆量再改成只留最近 N 筆的 Map。
+  const seenUser = new Set(), seenUse = new Set(), settled = new Set()
   for (const line of lines) {
     if (!line) continue
     let o
     try { o = JSON.parse(line) } catch { continue }
     const t = Date.parse(o.timestamp || "")
     if (!Number.isFinite(t)) continue
-    if (t < maxSeen - 60000) continue
-    if (t > maxSeen) maxSeen = t
     if (!(t >= since)) continue
     const c = o.message && o.message.content
     if (o.type === "user") {
       if (typeof c === "string") {
         if (!c.includes('<channel source="telegram"')) continue
+        const key = t + "\u0000" + c
+        if (seenUser.has(key)) continue
+        seenUser.add(key)
         if (w === null) {
           w = { start: t, last: t, merged: 0 }
           cur = w
@@ -48,9 +51,11 @@ for (const f of fs.readdirSync(dir)) {
       if (!Array.isArray(c) || w === null) continue
       for (const x of c) {
         if (!x || x.type !== "tool_result" || x.is_error === true) continue
+        if (settled.has(x.tool_use_id)) continue
         const start = replyUse.get(x.tool_use_id)
         if (start === undefined || start !== w.start) continue
         replyUse.delete(x.tool_use_id)
+        settled.add(x.tool_use_id)
         lat.push((t - w.start) / 1000)
         maxes.push({ s: (t - w.start) / 1000, start: w.start, merged: w.merged, file: f })
         w = null
@@ -61,7 +66,10 @@ for (const f of fs.readdirSync(dir)) {
     }
     if (o.type !== "assistant" || !Array.isArray(c) || w === null) continue
     for (const x of c) {
-      if (x && x.type === "tool_use" && x.id && /__reply$/.test(x.name || "")) replyUse.set(x.id, w.start)
+      if (!x || x.type !== "tool_use" || !x.id || !/__reply$/.test(x.name || "")) continue
+      if (seenUse.has(x.id)) continue
+      seenUse.add(x.id)
+      replyUse.set(x.id, w.start)
     }
   }
   if (cur !== null) pending++ // 這檔檔尾還在等

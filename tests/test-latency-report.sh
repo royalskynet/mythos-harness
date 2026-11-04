@@ -97,13 +97,43 @@ case "$det" in max_s=*" start="*" merged="*" file="*) ;; *) fail "h：--max-deta
 printf '%s' "$det" | grep -q 'hi' && fail "h：--max-detail 印了訊息內文：${det}"
 [ "$(MYTHOS_TRANSCRIPT_DIR="$Q" bash "$ROOT/bin/latency-report" --json | grep -c merged)" = 0 ] || fail 'h：--json 多了欄位'
 
-# 壓縮重寫：整條鏈追加到檔尾，user 保留原 timestamp、tool_result 改成壓縮當下。
-#   原份：A@0 → 33s、B@20000 → 12s；重寫份：user@0、reply t2@30（皆 < maxSeen−60s 跳過）、result t2@19990（在 60s 內不跳，但 t2 沒登記不結算）
-#   拿掉 maxSeen 跳過時：重寫份 user@0 重起一輪、t2 結算 → n=3、max_s=19990，這段必 FAIL
+# F2：壓縮重寫改按身分去重（不靠時間單調）。
+#   (a) Codex 短鏈：同一則 user（同 timestamp、同內容）、同一個 reply id，重寫份的 result 灌到 11713 → 重寫份整則跳過，n=1、max_s=2
+#       突變：拿掉 seenUser → 重寫份 user@0 重起一輪、檔尾還在等 → pending_tail=1
+#   (b) 正常晚到列（實際 transcript 有 73s 倒退）：user@200、reply@205、倒退到 130 的 assistant 雜訊（非 reply）、
+#       跑在前面的雜訊@283、再晚到的 result@210（比 283 倒退 73s）→ 照樣結算 10s
+#       突變：加回 maxSeen 60s 跳過 → result@210 < 283−60 被跳過 → n=0（只有倒退的雜訊抓不到這個突變：跳掉雜訊不影響結算）
 R="$TMP/rewrite"; mkdir -p "$R"
-{ user 0; reply 30 t1; result 33 t1; user 20000; reply 20010 t3; result 20012 t3;
-  user 0; reply 30 t2; result 19990 t2; } > "$R/r.jsonl"
+{ user 0; reply 1 t1; result 2 t1;
+  user 0; reply 1 t1; result 11713 t1; } > "$R/a.jsonl"
 j="$(MYTHOS_TRANSCRIPT_DIR="$R" bash "$ROOT/bin/latency-report" --json)"
-[ "$j" = '{"n":2,"p50_s":12,"p90_s":33,"max_s":33,"over60":0,"no_reply":0,"pending_tail":0}' ] || fail "壓縮重寫份被算進延遲：${j}"
+[ "$j" = '{"n":1,"p50_s":2,"p90_s":2,"max_s":2,"over60":0,"no_reply":0,"pending_tail":0}' ] || fail "F2(a) 重寫份被算進延遲：${j}"
+BS="$TMP/backstep"; mkdir -p "$BS"
+{ user 200; reply 205 t1; other_tool 130; other_tool 283; result 210 t1; } > "$BS/b.jsonl"
+j="$(MYTHOS_TRANSCRIPT_DIR="$BS" bash "$ROOT/bin/latency-report" --json)"
+[ "$j" = '{"n":1,"p50_s":10,"p90_s":10,"max_s":10,"over60":0,"no_reply":0,"pending_tail":0}' ] || fail "F2(b) 晚到列讓結算漏了：${j}"
+
+# F5：跨回合（start !== w.start）——A@0 reply 甲@1、B@1000 才回甲的結果 → 甲屬舊輪，不結算：
+#     舊輪算沒回、B 還在等 → n=0 no_reply=1 pending_tail=1
+XW="$TMP/xround"; mkdir -p "$XW"
+{ user 0; reply 1 a; user 1000; result 1005 a; } > "$XW/x.jsonl"
+j="$(MYTHOS_TRANSCRIPT_DIR="$XW" bash "$ROOT/bin/latency-report" --json)"
+[ "$j" = '{"n":0,"p50_s":0,"p90_s":0,"max_s":0,"over60":0,"no_reply":1,"pending_tail":1}' ] || fail "F5 跨回合消帳：${j}"
+
+# F6：併筆邊界——恰好 LATENCY_MERGE_SEC（300s）仍併筆；> 才另起一輪（g 是 200s 併筆，bv 是 301s 不併）
+BV="$TMP/boundary"; mkdir -p "$BV"
+{ user 0; user 300; reply 310 t; result 312 t; } > "$BV/eq.jsonl"
+j="$(MYTHOS_TRANSCRIPT_DIR="$BV" bash "$ROOT/bin/latency-report" --json)"
+[ "$j" = '{"n":1,"p50_s":312,"p90_s":312,"max_s":312,"over60":1,"no_reply":0,"pending_tail":0}' ] || fail "F6 邊界 300s 沒併筆：${j}"
+rm -f "$BV/eq.jsonl"
+{ user 0; user 301; reply 310 t; result 312 t; } > "$BV/gt.jsonl"
+j="$(MYTHOS_TRANSCRIPT_DIR="$BV" bash "$ROOT/bin/latency-report" --json)"
+[ "$j" = '{"n":1,"p50_s":11,"p90_s":11,"max_s":11,"over60":0,"no_reply":1,"pending_tail":0}' ] || fail "F6 邊界 301s 仍併筆：${j}"
+
+# F6：--max-detail 對 g 精確比對整行
+# g 的起點＝fixture 基準 B＋0 秒（g 第一則 user）；latency-scan 用 toISOString 印，帶 .000 毫秒
+g0="$(ts 0 | sed 's/Z$/.000Z/')"
+[ "$(MYTHOS_TRANSCRIPT_DIR="$Q" bash "$ROOT/bin/latency-report" --max-detail)" = "max_s=230 start=$g0 merged=1 file=g.jsonl" ] \
+  || fail "F6 --max-detail 不對：$(MYTHOS_TRANSCRIPT_DIR="$Q" bash "$ROOT/bin/latency-report" --max-detail)"
 
 echo 'LATENCY-REPORT PASS'

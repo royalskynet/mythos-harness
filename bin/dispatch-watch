@@ -120,22 +120,31 @@ todo() { printf '%s\t%s\n' "$1" "$2" >> "$TODOS"; }
 top_of() { git -C "$1" rev-parse --show-toplevel 2>/dev/null 9>&- || printf %s "$1"; }
 
 # 0a) F3 啟動交接失敗：deep 票 pending、沒 rc、沒 handle、距 epoch 超過 DEEP_HANDOFF_SEC
-#     → 只寫 rc=127＋<id>.handoff（原因），不改 ledger、不發事件（F2）。repo 由第 1 步照一般 deep 票出 FAIL 釋放，
-#     寫失敗（例如 events 目錄唯讀、鎖拿不到）只留到下輪重掃，可重試。放在拉 queued 之前。
-fail_handoff() { # id task
-  local id="$1" rcf="$MYTHOS_DIR/state/deep/$1.rc" msg
+#     → 只寫 <id>.handoff（原因）＋rc=127，不改 ledger、不發事件（F2）。repo 由第 1 步照一般 deep 票出 FAIL 釋放。
+#     寫失敗（拿不到鎖、原因寫不了、rc 已存在）只留到下輪重掃，可重試。放在拉 queued 之前。
+#     F1：全程持 ledger 鎖並在鎖內重查 pending／handle／rc——runner 的第一版 handle 也在鎖內寫，
+#     不持鎖的話「掃到沒 handle」與「runner 寫 handle」之間會誤判啟動失敗。
+fail_handoff() { # id
+  local id="$1" rcf="$MYTHOS_DIR/state/deep/$1.rc" hf="$MYTHOS_DIR/state/deep/$1.handoff" msg
+  ledger_lock || return 0
+  if [ "$(awk -F'\t' -v i="$id" '$1 == i { NF=8; print $5; exit }' "$TSV")" != pending ] \
+    || [ -e "$rcf" ] || [ -e "$MYTHOS_DIR/state/deep/$id.handle" ]; then
+    ledger_unlock; return 0
+  fi
   msg="runner 未啟動（${DEEP_HANDOFF_SEC}s 內沒寫 handle）"
-  # 只落結果、不碰 ledger／events：rc 已存在就什麼都不做（F1 不覆寫既有結果），第 1 步照一般 deep 票出 FAIL
-  ( set -o noclobber; printf '127\n' > "$rcf" ) 2>/dev/null || return 0
-  printf '%s\n' "$msg" > "$MYTHOS_DIR/state/deep/$id.handoff"
-  log "handoff 逾時 ${DEEP_HANDOFF_SEC}s：$id 寫 rc=127＋handoff"
+  # 原因先寫：rc 一落地第 1 步就出 FAIL 事件，原因晚寫會被吃掉
+  if ! { printf '%s\n' "$msg" > "$hf"; } 2>/dev/null; then ledger_unlock; return 0; fi
+  if ! ( set -o noclobber; printf '127\n' > "$rcf" ) 2>/dev/null; then ledger_unlock; return 0; fi
+  ledger_unlock
+  log "handoff 逾時 ${DEEP_HANDOFF_SEC}s：$id 寫 handoff＋rc=127"
 }
+# end fail_handoff
 while IFS=$'\t' read -r id _ task epoch status _ _ backend; do
   [ "$status" = pending ] && [ "$backend" = deep ] || continue
   [ -f "$MYTHOS_DIR/state/deep/$id.rc" ] && continue
   [ -f "$MYTHOS_DIR/state/deep/$id.handle" ] && continue
   case "$epoch" in ''|*[!0-9]*) continue ;; esac
-  [ $((now - epoch)) -gt "$DEEP_HANDOFF_SEC" ] && fail_handoff "$id" "$task"
+  [ $((now - epoch)) -gt "$DEEP_HANDOFF_SEC" ] && fail_handoff "$id"
 done < <(ledger_fields < "$TSV")
 
 # F8：升級只改被拉起的列（補成 8 欄、OFS 用 tab），其餘原樣寫回；抽成函式給 tests/test-repo-queue.sh 做突變。
