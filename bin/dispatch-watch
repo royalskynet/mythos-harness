@@ -8,13 +8,13 @@ MYTHOS_DIR="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 DCQ_HOME="${DCQ_HOME:-$HOME/.dcq}"
 TMUX_BIN="${TMUX_BIN:-tmux}"
 TIMEOUT_MIN="${DISPATCH_TIMEOUT_MIN:-90}"
-# 旋鈕（11-04）：bin/watchdog L2 寫 state/watchdog-knobs.env（KEY=整數）。只認這兩條、不 source／不 eval；
-# 環境變數優先，沒設才用檔內值。ponytail: 目前只有兩個旋鈕，新增要同步改這裡的 case 與測試白名單。
+# 旋鈕（11-04）：bin/watchdog L2 寫 state/watchdog-knobs.env（KEY=整數）。只認這三條、不 source／不 eval；
+# 環境變數優先，沒設才用檔內值。ponytail: 目前只有三個旋鈕，新增要同步改這裡的 case 與測試白名單。
 KNOBS_FILE="$MYTHOS_DIR/state/watchdog-knobs.env"
 if [ -f "$KNOBS_FILE" ]; then
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
-      DEEP_STALL_MIN=*|DEEP_REVIEW_MIN=*) ;;
+      DEEP_STALL_MIN=*|DEEP_REVIEW_MIN=*|DEEP_HANDOFF_SEC=*) ;;
       *) continue ;;
     esac
     k="${line%%=*}" v="${line#*=}"
@@ -25,8 +25,10 @@ if [ -f "$KNOBS_FILE" ]; then
 fi
 DEEP_STALL_MIN="${DEEP_STALL_MIN:-15}"
 DEEP_REVIEW_MIN="${DEEP_REVIEW_MIN:-30}"
+# F3：pending 逾時還沒寫 handle／rc 就當啟動失敗，落 failed 終態釋放 repo
+DEEP_HANDOFF_SEC="${DEEP_HANDOFF_SEC:-120}"
 if [ "${DISPATCH_WATCH_PRINT_KNOBS:-}" = 1 ]; then
-  printf 'DEEP_STALL_MIN=%s DEEP_REVIEW_MIN=%s\n' "$DEEP_STALL_MIN" "$DEEP_REVIEW_MIN"
+  printf 'DEEP_STALL_MIN=%s DEEP_REVIEW_MIN=%s DEEP_HANDOFF_SEC=%s\n' "$DEEP_STALL_MIN" "$DEEP_REVIEW_MIN" "$DEEP_HANDOFF_SEC"
   exit 0
 fi
 # 抽查兩段過濾（11-02）：fast path 是這支腳本的 mtime／間隔判斷，slow path 交免費模型，
@@ -104,6 +106,39 @@ todo() { printf '%s\t%s\n' "$1" "$2" >> "$TODOS"; }
 #    queued 卻已有 rc（異常落地）→ 只改回 pending 不啟動，交給下面第 1 步照一般 deep 票出 PASS／FAIL。
 #    ponytail: 每張 queued 都重掃全表算 top，O(n²)；票上百張再改成先算好各列 top。
 top_of() { git -C "$1" rev-parse --show-toplevel 2>/dev/null 9>&- || printf %s "$1"; }
+RUNNER="${DISPATCH_DEEP_RUN_BIN:-${LIB%/*}/dispatch-deep-run}"
+
+# 0a) F3 啟動交接失敗：deep 票 pending、沒 rc、沒 handle、距 epoch 超過 DEEP_HANDOFF_SEC
+#     → 寫 rc=127、該列改 failed、發一則 FAIL 事件「runner 未啟動」，repo 才不會被永遠起不來的票占住。
+#     放在拉 queued 之前：同一輪就能把同 top 的下一張拉起。只改那一列，其餘原樣寫回。
+fail_handoff() { # id task
+  local id="$1" task="$2" rc
+  printf '127\n' > "$MYTHOS_DIR/state/deep/$id.rc" || return 0
+  # 拿不到鎖：rc 已寫，下面第 1 步照一般 deep 票出 FAIL，repo 一樣會釋放
+  ledger_lock || return 0
+  awk -F'\t' -v id="$id" 'BEGIN { OFS="\t" } $1==id && $5=="pending" { NF=8; $5="failed" } { print }' \
+    "$TSV" > "$TSV.handoff.$$" && mv "$TSV.handoff.$$" "$TSV"
+  rc=$?
+  ledger_unlock
+  [ "$rc" = 0 ] || { rm -f "$TSV.handoff.$$"; return 0; }
+  log "handoff 逾時 ${DEEP_HANDOFF_SEC}s：$id 落 failed"
+  add_event "$id" FAIL "$task" "runner 未啟動（${DEEP_HANDOFF_SEC}s 內沒寫 handle）" \
+    "看 state/deep/$id.out；確認後用 bin/dispatch-retry $id \"<補充指示>\" 重派" >/dev/null || true
+}
+while IFS=$'\t' read -r id _ task epoch status _ _ backend; do
+  [ "$status" = pending ] && [ "$backend" = deep ] || continue
+  [ -f "$MYTHOS_DIR/state/deep/$id.rc" ] && continue
+  [ -f "$MYTHOS_DIR/state/deep/$id.handle" ] && continue
+  case "$epoch" in ''|*[!0-9]*) continue ;; esac
+  [ $((now - epoch)) -gt "$DEEP_HANDOFF_SEC" ] && fail_handoff "$id" "$task"
+done < <(ledger_fields < "$TSV")
+
+# F8：升級只改被拉起的列（補成 8 欄、OFS 用 tab），其餘原樣寫回；抽成函式給 tests/test-repo-queue.sh 做突變。
+# F5：同時把第 4 欄 epoch 改成當下，排隊時間不算進執行時間（watchdog 6 小時、REVIEW 30 分鐘、handoff 都看它）。
+promote_rows() { # promote 清單檔 ledger 檔 now → 新 ledger 印到 stdout
+  awk -F'\t' -v now="$3" 'BEGIN { OFS="\t" } NR==FNR { up[$1]=1; next } ($1 in up) { NF=8; $5="pending"; $4=now } { print }' "$1" "$2"
+}
+# end promote_rows
 if awk -F'\t' '$5=="queued"' "$TSV" 2>/dev/null | grep -q .; then
   ledger_lock || exit 0
   QDIR="$(mktemp -d "${TMPDIR:-/tmp}/dispatch-watch-queue.XXXXXX")" || { ledger_unlock; exit 0; }
@@ -127,15 +162,20 @@ if awk -F'\t' '$5=="queued"' "$TSV" 2>/dev/null | grep -q .; then
     printf '%s\t%s\t%s\n' "$qid" "$qtask" "$qcwd" >> "$QDIR/launch"
     printf '%s\n' "$top" >> "$QDIR/tops"
   done < <(ledger_fields < "$TSV" | sort -t$'\t' -k4,4n)
-  # 只改被拉起的列（補成 8 欄、OFS 用 tab），其餘原樣寫回
+  # 測試守門（F1）：要啟動 runner 時 MYTHOS_TEST_SANDBOX 非空且 runner 在它外面 → 什麼都不改、exit 97
+  if [ -s "$QDIR/launch" ] && [ -n "${MYTHOS_TEST_SANDBOX:-}" ]; then
+    case "$RUNNER" in
+      "$MYTHOS_TEST_SANDBOX"/*) ;;
+      *) ledger_unlock; rm -rf "$QDIR"; echo "測試模式拒跑真 runner" >&2; exit 97 ;;
+    esac
+  fi
   if [ -s "$QDIR/promote" ] \
-    && awk -F'\t' 'BEGIN { OFS="\t" } NR==FNR { up[$1]=1; next } ($1 in up) { NF=8; $5="pending" } { print }' \
-         "$QDIR/promote" "$TSV" > "$QDIR/tsv" \
+    && promote_rows "$QDIR/promote" "$TSV" "$now" > "$QDIR/tsv" \
     && mv "$QDIR/tsv" "$TSV"; then
     ledger_unlock
     while IFS=$'\t' read -r qid qtask qcwd; do
       [ -n "$qid" ] || continue
-      nohup "${DISPATCH_DEEP_RUN_BIN:-${LIB%/*}/dispatch-deep-run}" "$qid" "$qtask" "$qcwd" >/dev/null 2>&1 9>&- &
+      nohup "$RUNNER" "$qid" "$qtask" "$qcwd" >/dev/null 2>&1 9>&- &
     done < "$QDIR/launch"
   else
     ledger_unlock

@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# F1 驗收：測試不可能啟動真 runner。
+#   (a) 會呼叫 bin/dispatch* 的測試都 source tests/lib-test-guard.sh（清單動態算）
+#   (b) DISPATCH_DEEP_RUN_BIN 指 repo 的 bin/dispatch-deep-run（sandbox 外）跑 dispatch hard → exit 97、ledger 沒有列
+#   (c) 直接跑 bin/dispatch-deep-run 帶 MYTHOS_TEST_SANDBOX、下一層 DEEP_RUN_BIN 不在 sandbox → exit 97、什麼都不寫
+#   (d) dispatch-watch 要拉起 queued、runner 在 sandbox 外 → exit 97、ledger 原文不變
+#   (e) guard 不覆蓋已設定的值；沒設定的換成 sandbox 內 stub
+# 萬一守門失效：DEEP_RUN_BIN 是 guard stub、PATH 前面放假 deep-run，就算被執行也只是記一行。
+set -eu
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/test-guard.XXXXXX")"
+OUTSIDE="$(mktemp -d "${TMPDIR:-/tmp}/test-guard-outside.XXXXXX")"
+trap 'rm -rf "$TMP" "$OUTSIDE"' EXIT
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# sandbox 外的假 deep-run：被叫到就記下來（斷言它不能被叫到）
+printf '#!/bin/sh\necho "$0 $*" >> "%s/outside-calls.log"\nexit 0\n' "$OUTSIDE" > "$OUTSIDE/deep-run"
+chmod +x "$OUTSIDE/deep-run"
+export PATH="$OUTSIDE:$PATH"
+
+# (e) 先驗 guard 本身：已設定的不動、沒設定的換 stub
+set_val="$OUTSIDE/already-set"
+out="$(env -u DEEP_RUN_BIN -u DISPATCH_DEEP_RUN_BIN TMUX_BIN="$set_val" bash -c '. "$1" "$2"; printf "%s|%s|%s|%s\n" "$MYTHOS_TEST_SANDBOX" "$TMUX_BIN" "$DEEP_RUN_BIN" "$DISPATCH_DEEP_RUN_BIN"' _ "$ROOT/tests/lib-test-guard.sh" "$TMP/e")"
+IFS='|' read -r e_sb e_tmux e_deep e_disp <<< "$out"
+[ "$e_sb" = "$TMP/e" ] || fail "(e) MYTHOS_TEST_SANDBOX 不對：$e_sb"
+[ "$e_tmux" = "$set_val" ] || fail "(e) guard 覆蓋了已設定的 TMUX_BIN：$e_tmux"
+case "$e_deep" in "$TMP/e"/*) ;; *) fail "(e) 沒設的 DEEP_RUN_BIN 沒換成 sandbox stub：$e_deep" ;; esac
+case "$e_disp" in "$TMP/e"/*) ;; *) fail "(e) 沒設的 DISPATCH_DEEP_RUN_BIN 沒換成 sandbox stub：$e_disp" ;; esac
+MYTHOS_TEST_SANDBOX="$TMP/e" "$e_deep" x y; grep -q 'x y' "$TMP/e/stub-calls.log" || fail '(e) stub 沒把 argv 記進 stub-calls.log'
+
+# (a) 每支呼叫 bin/dispatch* 的測試都要 source guard（行首就是 source 指令，不能被註解掉）
+list="$(grep -l 'bin/dispatch' "$ROOT"/tests/*.sh | grep -v -e '/test-test-guard\.sh$' -e '/lib-test-guard\.sh$')"
+[ -n "$list" ] || fail '(a) 清單是空的，grep 算錯了'
+missing=''
+for f in $list; do
+  grep -qE '^\. "\$\(dirname "\$0"\)/lib-test-guard\.sh" "\$TMP"' "$f" || missing="$missing $(basename "$f")"
+done
+[ -z "$missing" ] || fail "(a) 這些測試沒 source lib-test-guard.sh：$missing"
+echo "(a) ok：$(printf '%s\n' "$list" | wc -l | tr -d ' ') 支測試都有 source guard"
+
+# 以下在守門下跑
+export MYTHOS_DIR="$TMP/mythos"
+export DCQ_HOME="$TMP/dcq"
+mkdir -p "$MYTHOS_DIR/state/deep" "$DCQ_HOME"
+unset DEEP_RUN_BIN DISPATCH_DEEP_RUN_BIN TMUX_BIN
+. "$(dirname "$0")/lib-test-guard.sh" "$TMP"
+TSV="$MYTHOS_DIR/state/dispatch-jobs.tsv"
+: > "$TMP/t.md"; mkdir -p "$TMP/cwd"
+
+# (b) runner 指 repo 的 bin/dispatch-deep-run → exit 97、ledger 沒寫任何列
+rc=0
+DISPATCH_DEEP_RUN_BIN="$ROOT/bin/dispatch-deep-run" bash "$ROOT/bin/dispatch" "$TMP/t.md" "$TMP/cwd" hard >/dev/null 2>"$TMP/b.err" || rc=$?
+[ "$rc" = 97 ] || fail "(b) dispatch hard 用 sandbox 外 runner 應 exit 97，得到 $rc"
+grep -q '測試模式拒跑真 runner' "$TMP/b.err" || fail "(b) 沒印拒跑訊息：$(cat "$TMP/b.err")"
+if [ -f "$TSV" ] && grep -q 'pending' "$TSV"; then fail "(b) ledger 寫了 pending：$(cat "$TSV")"; fi
+[ -z "$(ls -A "$MYTHOS_DIR/state/deep")" ] || fail "(b) state/deep 有檔：$(ls "$MYTHOS_DIR/state/deep")"
+echo '(b) ok'
+
+# (c) 直接跑 wrapper：下一層 DEEP_RUN_BIN 在 sandbox 外、或沒設 → exit 97、不寫任何 state
+for mode in outside unset; do
+  rc=0
+  if [ "$mode" = outside ]; then
+    DEEP_RUN_BIN="$OUTSIDE/deep-run" bash "$ROOT/bin/dispatch-deep-run" c-1 "$TMP/t.md" "$TMP/cwd" 2>"$TMP/c.err" || rc=$?
+  else
+    env -u DEEP_RUN_BIN bash "$ROOT/bin/dispatch-deep-run" c-1 "$TMP/t.md" "$TMP/cwd" 2>"$TMP/c.err" || rc=$?
+  fi
+  [ "$rc" = 97 ] || fail "(c/$mode) dispatch-deep-run 應 exit 97，得到 $rc"
+  grep -q '測試模式拒跑真 runner' "$TMP/c.err" || fail "(c/$mode) 沒印拒跑訊息"
+  [ -z "$(ls -A "$MYTHOS_DIR/state/deep")" ] || fail "(c/$mode) state/deep 有檔：$(ls "$MYTHOS_DIR/state/deep")"
+done
+echo '(c) ok'
+
+# (d) dispatch-watch：queued 可拉起、runner 在 sandbox 外 → exit 97、ledger 原文不變
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' d-1 hard "$TMP/t.md" "$(date +%s)" queued "$TMP/cwd" - deep > "$TSV"
+cp "$TSV" "$TMP/d.before"
+rc=0
+DISPATCH_DEEP_RUN_BIN="$ROOT/bin/dispatch-deep-run" MYTHOS_TRANSCRIPT_DIR="$TMP/router" CLAUDE_PROJECTS_DIR="$TMP/projects" \
+  bash "$ROOT/bin/dispatch-watch" 2>"$TMP/d.err" 9>&- || rc=$?
+[ "$rc" = 97 ] || fail "(d) dispatch-watch 用 sandbox 外 runner 拉 queued 應 exit 97，得到 $rc"
+cmp -s "$TSV" "$TMP/d.before" || fail "(d) ledger 被改了：$(cat "$TSV")"
+[ ! -d "$MYTHOS_DIR/state/.dispatch-watch.lock" ] || fail '(d) exit 97 後 watch 鎖沒放'
+echo '(d) ok'
+
+[ ! -s "$OUTSIDE/outside-calls.log" ] || fail "sandbox 外的 deep-run 被叫到了：$(cat "$OUTSIDE/outside-calls.log")"
+echo 'TEST-GUARD PASS'

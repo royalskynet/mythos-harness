@@ -60,7 +60,7 @@ tmux -L mythos attach -t mythos
 | `bin/watchdog` | L0：死鎖、重送用盡、Router 未回（只認成功的 reply 結果）、pending 逾 6 小時、deep transcript 停滯、`claude agents` 背景 worker blocked；L1：log 錯誤行交免費模型判 KNOWN／NEW／NOISE（出機前欄位白名單→scrub 去識別→sensitive-canary 掃去識別後文字，scrub 每日自檢，退路鏈 beam-free→OC Go 次選→local-llm→`state/watchdog-known.tsv`）；L2：只提議白名單旋鈕，兩棒不同體系同值才套用；`bin/watchdog ask "<問題>"` |
 | `bin/dispatch`、`dispatch-retry`、`dispatch-cancel`、`dispatch-deep-run` | 派工（先持鎖登錄再啟動後端）、重派、取消（deep 只照 `state/deep/<id>.handle`）、deep 背景執行 |
 | `bin/dispatch-watch` | 回報＋停滯／抽查，pane 閒置才打進去 |
-| `bin/latency-report` | 唯讀、零 token：Telegram 使用者訊息到第一個 `__reply` 的延遲摘要（`n p50_s p90_s max_s over60 no_reply`，`--days N`、`--json`） |
+| `bin/latency-report` | 唯讀、零 token：Telegram 使用者訊息到第一個 `__reply` 的延遲摘要（`n p50_s p90_s max_s over60 no_reply pending_tail`：終點取 `mcp__telegram__reply` 對到、成功的 tool_result 時間；每檔各自配對、連發併一筆；`pending_tail`＝檔尾還在等、不算沒回；`no_reply` 欄位保留、現口徑恆為 0；`--days N`、`--json`） |
 | `bin/review-judge`、`oc-free-ask`、`local-llm` | 免費模型判 Worker 有沒有跑歪；判不出來或格式不對一律 UNKNOWN＝照舊喚醒 Router |
 | `bin/idle-reset` | 04／05／06 點試，pane 不忙且 30 分沒動才 `/clear`，一天一次 |
 

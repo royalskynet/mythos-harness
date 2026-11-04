@@ -7,6 +7,15 @@
 # 這裡用 deep_pid 對檔名找出 session 名，不靠工單內容或時間猜。
 set -u
 
+# 測試守門（F1）：測試環境帶 MYTHOS_TEST_SANDBOX 時，下一層 deep-run 必須是 sandbox 內的 stub；
+# 沒設（＝會跑真 deep-run）或指到 sandbox 外一律拒跑，什麼檔都不寫
+if [ -n "${MYTHOS_TEST_SANDBOX:-}" ]; then
+  case "${DEEP_RUN_BIN:-}" in
+    "$MYTHOS_TEST_SANDBOX"/*) ;;
+    *) echo "測試模式拒跑真 runner" >&2; exit 97 ;;
+  esac
+fi
+
 MYTHOS_DIR="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 DEEP_TASK_DIR="${DEEP_TASK_DIR:-${DC_HOME:-$HOME/.deepclaude}/work/.deep}"
 

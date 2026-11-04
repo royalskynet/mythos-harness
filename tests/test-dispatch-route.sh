@@ -23,6 +23,8 @@ cat > "$TMP/dcq" <<EOS
 exit 0
 EOS
 chmod +x "$TMP/m/bin/"* "$TMP/dcq"
+export DISPATCH_DEEP_RUN_BIN="$TMP/m/bin/dispatch-deep-run"  # F1：明確指自己的 stub，不靠預設路徑
+. "$(dirname "$0")/lib-test-guard.sh" "$TMP"  # F1：自己的 stub 設好之後才 source；沒設的 runner／tmux 換 guard stub
 echo '# t' > "$TMP/task.md"
 
 run() { : > "$TMP/dcq.log"; : > "$TMP/deep.log"

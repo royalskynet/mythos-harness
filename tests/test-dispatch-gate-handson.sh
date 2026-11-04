@@ -7,6 +7,7 @@ set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/gate-handson-test.XXXXXX")"
+. "$(dirname "$0")/lib-test-guard.sh" "$TMP"  # F1：沒設的 runner／tmux 換 guard stub（本檔只在單一指令前綴設 stub）
 trap 'rm -rf "$TMP"' EXIT
 GATE="$ROOT/bin/dispatch-gate.mjs"
 export MYTHOS_DIR="$TMP/mythos"

@@ -14,6 +14,7 @@ export TMUX_LOG="$TMP/tmux.log"
 # A（11-03）：送進 tmux 不算數，主 session transcript 出現 event_id=… 的 user 紀錄才 ACK。
 # 假 tmux 模擬 Router 收到：send-keys -l 的文字追加一筆 user 紀錄進暫存 transcript。
 export MYTHOS_TRANSCRIPT_DIR="$TMP/router-transcript"
+. "$(dirname "$0")/lib-test-guard.sh" "$TMP"  # F1：自己的 stub 設好之後才 source；沒設的 runner／tmux 換 guard stub
 
 mkdir -p "$MYTHOS_DIR/state" "$DCQ_HOME"/{done,failed,running,pending} "$MYTHOS_TRANSCRIPT_DIR"
 

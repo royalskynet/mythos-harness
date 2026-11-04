@@ -98,6 +98,8 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","nam
 
 old=$(( $(date +%s) - 3600 ))
 printf 'deep-1-task\thard\t%s\t%s\tpending\t%s\n' "$task" "$old" "$cwd" > "$MD/state/dispatch-jobs.tsv"
+# 在跑的 deep 票有 runner 寫的 handle；沒有會被 dispatch-watch 的 handoff 逾時（F3）收成 failed
+printf 'fixture=1\n' > "$MD/state/deep/deep-1-task.handle"
 
 # 假 tmux：pane 看起來閒置，所有呼叫記進 log
 cat > "$TMP/tmux" <<EOF
