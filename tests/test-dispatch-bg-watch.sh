@@ -117,4 +117,35 @@ bash "$ROOT/bin/dispatch-cancel" bg-cccc0003 2>"$TMP/e5" || rc=$?
 [ "$rc" != 0 ] || fail '5：stop 失敗卻 exit 0'
 [ "$(status_of bg-cccc0003)" = pending ] || fail '5：stop 失敗卻改了 ledger'
 grep -q 'claude stop 失敗' "$TMP/e5" || fail "5：沒印失敗原因：$(cat "$TMP/e5")"
+echo '(5) ok'
+
+# 6) F4a：blocked 併入 STALL 分支（逾時才發、有 .last-stall 不重複）
+now="$(date +%s)"
+row bg-eeee0006 bg $((now - 3700))
+agents aaaa0001 done bbbb0002 done cccc0003 done dddd0004 cancelled eeee0006 blocked
+: > "$TMUX_LOG"
+bash "$ROOT/bin/dispatch-watch" 9>&- || fail '6：非零退出'
+grep -q 'event_id=bg-eeee0006-STALL' "$TMUX_LOG" || fail "6：blocked 逾時沒發 STALL：$(cat "$TMUX_LOG")"
+[ -f "$MYTHOS_DIR/state/bg/eeee0006.last-stall" ] || fail '6：blocked 沒寫 .last-stall'
+: > "$TMUX_LOG"
+bash "$ROOT/bin/dispatch-watch" 9>&- || fail '6：第二輪非零退出'
+grep -q 'bg-eeee0006-STALL' "$TMUX_LOG" && fail "6：blocked 同一票重複發 STALL：$(cat "$TMUX_LOG")"
+echo '(6) ok'
+
+# 7) F4b：stopped／failed 等 → FAIL 終態（不是永遠 pending），只發一次
+for pair in ffff0007:stopped abab0008:failed; do
+  row "bg-${pair%%:*}" bg-hard "$(date +%s)"
+done
+agents aaaa0001 done bbbb0002 done cccc0003 done dddd0004 cancelled eeee0006 blocked ffff0007 stopped abab0008 failed
+: > "$TMUX_LOG"
+bash "$ROOT/bin/dispatch-watch" 9>&- || fail '7：非零退出'
+grep -q 'event_id=bg-ffff0007-FAIL' "$TMUX_LOG" || fail "7：stopped 沒發 FAIL：$(cat "$TMUX_LOG")"
+grep -q 'event_id=bg-abab0008-FAIL' "$TMUX_LOG" || fail "7：failed 沒發 FAIL：$(cat "$TMUX_LOG")"
+grep -q 'worker 已停止（stopped）' "$TMUX_LOG" || fail "7：guide 沒寫狀態：$(cat "$TMUX_LOG")"
+grep -q 'log tail for ffff0007' "$TMUX_LOG" || fail "7：沒取 logs 摘要：$(cat "$TMUX_LOG")"
+[ "$(jq -s '[.[] | select(.job_id=="bg-ffff0007" and .status=="FAIL")] | length' "$MYTHOS_DIR/state/events.jsonl")" = 1 ] || fail '7：FAIL 事件不是恰好一筆'
+: > "$TMUX_LOG"
+bash "$ROOT/bin/dispatch-watch" 9>&-
+grep -q 'event_id=bg-ffff0007-FAIL' "$TMUX_LOG" && fail '7：FAIL 重複發'
+echo '(7) ok'
 echo 'DISPATCH-BG-WATCH PASS'

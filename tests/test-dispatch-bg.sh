@@ -8,7 +8,12 @@
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/dispatch-bg-test.XXXXXX")"
-trap 'rm -rf "$TMP"' EXIT
+# F2 用的背景持鎖 pid（trap 開頭就要有定義，set -u 下沒定義會讓 trap 自己爆掉）
+lpid=''
+# bash 3.2 在 set -e／set -u 下，trap 內任何非零或未定義變數都會蓋掉腳本的 exit code → 全部吞掉、結尾 exit 0
+trap '_r=$?; trap "" EXIT; [ -n "$lpid" ] && kill "$lpid" 2>/dev/null; [ -n "$lpid" ] && wait "$lpid" 2>/dev/null; chflags nouchg "$TSV" 2>/dev/null; [ "$(whoami)" = "$(stat -f %Su "$TMP")" ] && chmod -R u+w "$TMP"; rm -rf "$TMP"; exit "$_r"' EXIT
+# kill + wait 背景持鎖；wait 的 exit status 是 perl 的，不接住會變成腳本結尾的 exit code
+unlock() { kill "$lpid" 2>/dev/null; wait "$lpid" 2>/dev/null || true; lpid=''; :; }
 export MYTHOS_DIR="$TMP/mythos"
 export MYTHOS_WORKER_DIR="$TMP/worker"
 export CLAUDE_LOG="$TMP/claude.log"
@@ -150,4 +155,55 @@ node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$W/.cl
 grep -q 'mcp__telegram' "$W/CLAUDE.md" && fail '10：worker CLAUDE.md 提到 telegram 工具'
 rc=0; MYTHOS_WORKER_DIR="$TMP/my/worker" MYTHOS_DIR="$TMP/my" bash "$ROOT/router/worker-sync.sh" 2>/dev/null || rc=$?
 [ "$rc" = 2 ] || fail "10：worker 目錄在 Mythos 底下應 exit 2，得 $rc"
+echo '(10) ok'
+
+# 11) F2a：拿鎖失敗 → 停掉已啟動的 worker（只有這一個 worker、ledger 零列）
+echo f2a00001-0000-0000-0000-000000000000 > "$FAKE_ID"
+: > "$CLAUDE_LOG"
+cp "$TSV" "$TMP/before11"
+perl -MFcntl=:flock -e 'open(my $f,">>",$ARGV[0]) or die; flock($f,LOCK_EX) or die; open(my $r,">",$ARGV[1]); close $r; sleep 60' \
+  "$MYTHOS_DIR/state/.ledger.flock" "$TMP/locked" 2>/dev/null &
+lpid=$!
+n=0
+while [ ! -f "$TMP/locked" ] && [ "$n" -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
+[ -f "$TMP/locked" ] && kill -0 "$lpid" 2>/dev/null || fail '11：背景持鎖沒起來'
+rc=0
+LEDGER_LOCK_TRIES=1 bash "$ROOT/bin/dispatch-bg" t-f2a "$TMP/p.md" >"$TMP/o11" 2>"$TMP/e11" || rc=$?
+unlock
+[ "$rc" != 0 ] || fail '11：拿不到鎖卻 exit 0'
+cmp -s "$TSV" "$TMP/before11" || fail '11：拿不到鎖卻寫了 ledger'
+grep -q 'stop f2a00001' "$CLAUDE_LOG" || fail "11：沒停掉已啟動的 worker：$(cat "$CLAUDE_LOG")"
+grep -q '已停止 worker' "$TMP/e11" || fail "11：stderr 沒有已停止 worker：$(cat "$TMP/e11")"
+echo '(11) ok'
+
+# 12) F2b：append 失敗 → 同樣停掉 worker；ledger 內容不變
+echo f2b00002-0000-0000-0000-000000000000 > "$FAKE_ID"
+: > "$CLAUDE_LOG"
+chflags uchg "$TSV" || fail '12：設不了 uchg'
+rc=0
+bash "$ROOT/bin/dispatch-bg" t-f2b "$TMP/p.md" >"$TMP/o12" 2>"$TMP/e12" || rc=$?
+chflags nouchg "$TSV"
+[ "$rc" != 0 ] || fail '12：寫 ledger 失敗卻 exit 0'
+cmp -s "$TSV" "$TMP/before11" || fail '12：寫入失敗卻改了 ledger'
+grep -q 'stop f2b00002' "$CLAUDE_LOG" || fail "12：沒停掉已啟動的 worker：$(cat "$CLAUDE_LOG")"
+grep -q '已停止 worker' "$TMP/e12" || fail "12：stderr 沒有已停止 worker：$(cat "$TMP/e12")"
+echo '(12) ok'
+
+# 13) F3：--hard 的第 6 欄記 --cwd 的 repo，dispatch-retry 重派時 worktree 指向它；非 hard 一律記 worker 目錄
+REPO_A="$TMP/repoA"; mkdir -p "$REPO_A"
+printf 'retry me\n' > "$TMP/f3-retry.md"
+echo f3000013-0000-0000-0000-000000000000 > "$FAKE_ID"
+: > "$CLAUDE_LOG"
+id13="$(bash "$ROOT/bin/dispatch-bg" --hard --cwd "$REPO_A" t-f3 "$TMP/f3-retry.md")"
+[ "$(field "$id13" 6)" = "$REPO_A" ] || fail "13：bg-hard 第 6 欄不是 --cwd 的 repo：$(grep "$id13" "$TSV")"
+: > "$CLAUDE_LOG"
+DISPATCH_BG_BIN="$ROOT/bin/dispatch-bg" DISPATCH_HARD_BACKEND=bg DISPATCH_THREAD=- bash "$ROOT/bin/dispatch-retry" "$id13" '追加' \
+  2>"$TMP/e13" || { cat "$TMP/e13" >&2; fail '13：dispatch-retry 非零'; }
+grep -qF "git -C '$REPO_A' worktree add" "$CLAUDE_LOG" || fail "13：重派 worktree 沒指向 repoA：$(cat "$CLAUDE_LOG")"
+# CWD= 與 --settings 本來就在 worker 目錄；只驗 worktree 指令沒指向它
+if grep -qF "git -C '$MYTHOS_WORKER_DIR'" "$CLAUDE_LOG"; then fail "13：重派 worktree 指向 worker 目錄：$(cat "$CLAUDE_LOG")"; fi
+echo f4000014-0000-0000-0000-000000000000 > "$FAKE_ID"
+id14="$(bash "$ROOT/bin/dispatch-bg" --cwd "$REPO_A" t-f4 "$TMP/p.md")"
+[ "$(field "$id14" 6)" = "$MYTHOS_WORKER_DIR" ] || fail "13：非 hard 帶 --cwd 竟記成 repoA：$(grep "$id14" "$TSV")"
+echo '(13) ok'
 echo 'DISPATCH-BG PASS'

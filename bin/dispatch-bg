@@ -103,10 +103,20 @@ if [ "$rc" != 0 ] || [ -z "$sid" ]; then
 fi
 
 id="bg-$sid"
-row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$id" "$([ -n "$hard" ] && echo hard || echo mid)" "$prompt" "$(date +%s)" pending "$WORKER_DIR" "$thread" "$backend")"
-if ! ledger_lock; then echo "拿不到 ledger 鎖，未登錄：${id}" >&2; exit 1; fi
+# 第 6 欄：只有 --hard 記目標 repo（dispatch-retry 拿它重派 worktree）；非 hard 留 worker 目錄
+[ -n "$hard" ] || tcwd="$WORKER_DIR"
+row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$id" "$([ -n "$hard" ] && echo hard || echo mid)" "$prompt" "$(date +%s)" pending "${tcwd:-$WORKER_DIR}" "$thread" "$backend")"
+# F2：登錄失敗要收掉已啟動的 worker，不然 Router fallback 再派一次就有兩個 worker
+stop_worker() { # 原因
+  if "$CLAUDE" stop "$sid" </dev/null 9>&- >/dev/null 2>&1; then
+    echo "${1}；已停止 worker ${sid}" >&2
+  else
+    echo "${1}；停止 worker 失敗 ${sid}" >&2
+  fi
+}
+if ! ledger_lock; then stop_worker "拿不到 ledger 鎖，未登錄：${id}"; exit 1; fi
 if ! printf '%s\n' "$row" >> "$MYTHOS_DIR/state/dispatch-jobs.tsv"; then
-  ledger_unlock; echo "寫 ledger 失敗：${id}" >&2; exit 1
+  ledger_unlock; stop_worker "寫 ledger 失敗：${id}"; exit 1
 fi
 ledger_unlock
 echo "$id"
