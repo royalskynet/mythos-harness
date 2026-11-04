@@ -1,0 +1,46 @@
+#!/usr/bin/env node
+// E3：telegram plugin 的 channel 通知 meta 補 reply_to_message_id，tg-commands.mjs 才認得「回覆哪一則直發」。
+//   bin/tg-plugin-patch [server.ts]   預設＝最新版 plugin 的 server.ts（同 tg-commands.mjs 的 pluginDir()）
+// exit 0＝已插入或已有 marker（印 already）；3＝錨點不是恰好一次，檔案不動；1＝讀寫失敗。plugin 升版會蓋掉，run.sh 每次啟動前重跑。
+import fs from 'node:fs'
+import path from 'node:path'
+import os from 'node:os'
+
+const ANCHOR = '...(msgId != null ? { message_id: String(msgId) } : {}),'
+const MARKER = '// mythos-patch:reply_to'
+const LINE =
+  '...(ctx.message?.reply_to_message?.message_id != null ? { reply_to_message_id: String(ctx.message.reply_to_message.message_id) } : {}), ' +
+  MARKER
+
+function pluginDir() {
+  const root = path.join(os.homedir(), '.claude/plugins/cache/claude-plugins-official/telegram')
+  const vs = fs.readdirSync(root).filter(v => /^\d+\.\d+\.\d+$/.test(v))
+  vs.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+  if (!vs.length) throw new Error(`no telegram plugin version under ${root}`)
+  return path.join(root, vs[vs.length - 1])
+}
+
+try {
+  const file = process.argv[2] || path.join(pluginDir(), 'server.ts')
+  const src = fs.readFileSync(file, 'utf8')
+  if (src.includes(MARKER)) {
+    console.log('already')
+    process.exit(0)
+  }
+  const lines = src.split('\n')
+  const hits = lines.flatMap((l, i) => (l.trim() === ANCHOR ? [i] : []))
+  if (hits.length !== 1) {
+    process.stderr.write(`tg-plugin-patch: 錨點出現 ${hits.length} 次（要恰好 1 次），不動 ${file}\n`)
+    process.exit(3)
+  }
+  const indent = lines[hits[0]].match(/^\s*/)[0]
+  lines.splice(hits[0] + 1, 0, indent + LINE)
+  if (!fs.existsSync(file + '.mythos-orig')) fs.copyFileSync(file, file + '.mythos-orig')
+  const tmp = `${file}.mythos-tmp-${process.pid}`
+  fs.writeFileSync(tmp, lines.join('\n'))
+  fs.renameSync(tmp, file)
+  console.log(`patched ${file}`)
+} catch (e) {
+  process.stderr.write(`tg-plugin-patch: ${e?.message || e}\n`)
+  process.exit(1)
+}

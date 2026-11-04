@@ -140,9 +140,9 @@ g0="$(ts 0 | sed 's/Z$/.000Z/')"
 # E1：seenUser 鍵＝channel 標籤的 chat_id＋message_id（兩個都有才用），沒有才退回 timestamp＋內容
 TAG() { printf '<channel source="telegram" chat_id="%s"%s>hi' "$1" "${2:+ message_id=\"$2\"}"; }
 ch() { jq -cn --arg t "$1" --arg c "$2" '{type:"user",timestamp:$t,message:{content:$c}}'; }
-# (1) 同 chat、同 message_id、timestamp 不同 → n=1（舊鍵含 timestamp，會得 2）
+# (1) 同 chat、同 message_id、timestamp 不同的重播（回完之後、超出 300s 合併窗）→ 跳過；舊鍵含 timestamp，會另開一輪 pending_tail=1
 M="$TMP/mid"; mkdir -p "$M"
-{ ch "$(ts 0)" "$(TAG 1 111)"; ch "$(ts 30)" "$(TAG 1 111)"; reply 40 t1; result 40 t1; } > "$M/a.jsonl"
+{ ch "$(ts 0)" "$(TAG 1 111)"; reply 40 t1; result 40 t1; ch "$(ts 400)" "$(TAG 1 111)"; } > "$M/a.jsonl"
 j="$(MYTHOS_TRANSCRIPT_DIR="$M" bash "$ROOT/bin/latency-report" --json)"
 [ "$j" = '{"n":1,"p50_s":40,"p90_s":40,"max_s":40,"over60":0,"no_reply":0,"pending_tail":0}' ] || fail "E1(1) 同 message_id 的重播沒去重：${j}"
 # (2) 不同 message_id、同毫秒同內容 → n=2

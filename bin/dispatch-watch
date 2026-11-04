@@ -29,6 +29,10 @@ DEEP_REVIEW_MIN="${DEEP_REVIEW_MIN:-30}"
 DEEP_HANDOFF_SEC="${DEEP_HANDOFF_SEC:-120}"
 # bg／bg-hard 停在 working 超過它的分鐘數 → STALL 事件（worker 卡在權限提示或卡死）
 BG_STALL_MIN="${BG_STALL_MIN:-60}"
+# E2：bg 單 PASS 直發使用者（至多一次）。tg-send 跟本檔同目錄；告警只寫 brief-lines。
+TG_SEND_BIN="${TG_SEND_BIN:-$(cd "$(dirname "$0")" && pwd)/tg-send}"
+BRIEF_LINES_DIR="${BRIEF_LINES_DIR:-$HOME/.cache/brief-lines}"
+DIRECT_SENDING_SEC="${DIRECT_SENDING_SEC:-600}"
 if [ "${DISPATCH_WATCH_PRINT_KNOBS:-}" = 1 ]; then
   printf 'DEEP_STALL_MIN=%s DEEP_REVIEW_MIN=%s DEEP_HANDOFF_SEC=%s BG_STALL_MIN=%s\n' "$DEEP_STALL_MIN" "$DEEP_REVIEW_MIN" "$DEEP_HANDOFF_SEC" "$BG_STALL_MIN"
   exit 0
@@ -115,6 +119,28 @@ add_event() { # id status task extra guide
 
 todo() { printf '%s\t%s\n' "$1" "$2" >> "$TODOS"; }
 
+# E2 直發：結果不明＝當已處理（acked），寫一行告警，這張票的投遞到此結束（寧漏不重）
+direct_unknown() { # job eid
+  ledger_events set "$EVENTS_FILE" "$2" "{\"direct\":\"unknown\",\"acked_at\":$now}" >/dev/null || return 0
+  mkdir -p "$BRIEF_LINES_DIR" 2>/dev/null &&
+    printf '%s 直發結果不明 %s\n' "$(TZ=Asia/Taipei date '+%F %H:%M')" "$1" >> "$BRIEF_LINES_DIR/mythos-direct.txt"
+  log "direct unknown $2"
+}
+# 只在 add_event 本輪新建 PASS 後呼叫：先標 sending（deliver 會跳過），再送；0 已送、1/97 確定沒送交 Router、其他不明
+direct_send() { # job eid thread result檔
+  local rc
+  mkdir -p "$(dirname "$WATCH_LOG")" 2>/dev/null
+  ledger_events set "$EVENTS_FILE" "$2" '{"direct":"sending"}' >/dev/null || return 0
+  { printf '✅ %s（%s）\n' "$3" "$1"; cat "$4"; printf '\n\n回覆這則訊息，我會判斷是否續派同一個 worker。\n'; } \
+    | MYTHOS_DIR="$MYTHOS_DIR" "${NODE_BIN:-node}" "$TG_SEND_BIN" --thread "$3" --job "$1" 9>&- >/dev/null 2>>"$WATCH_LOG"
+  rc=${PIPESTATUS[1]}
+  case "$rc" in
+    0) ledger_events set "$EVENTS_FILE" "$2" "{\"direct\":\"sent\",\"acked_at\":$now}" >/dev/null; log "direct sent $2" ;;
+    1|97) ledger_events set "$EVENTS_FILE" "$2" '{"direct":"failed"}' >/dev/null; log "direct failed rc=$rc $2" ;;
+    *) direct_unknown "$1" "$2" ;;
+  esac
+}
+
 # 0) 同 repo 佇列（C3）：持鎖把 queued 依 epoch 由舊到新拉起。同一個 top 已有 pending、未寫 rc 的 deep 票就跳過，
 #    每個 top 這輪最多啟一張；啟動跟 bin/dispatch 同一條（DISPATCH_DEEP_RUN_BIN 可換）。
 #    queued 卻已有 rc（異常落地）→ 只改回 pending 不啟動，交給下面第 1 步照一般 deep 票出 PASS／FAIL。
@@ -177,6 +203,13 @@ bg_state() {
   [ -n "$AGENTS_JSON" ] || return 0
   printf '%s' "$AGENTS_JSON" | "$NODE_BIN" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const id=process.argv[1];let a=[];try{a=JSON.parse(s)}catch{return}const hit=a.find(x=>(x.sessionId||"").startsWith(id))||a.find(x=>x.id===id);if(hit)process.stdout.write(String(hit.state||"")||"")})' "${1#bg-}" 9>&- 2>/dev/null
 }
+# 1a0) E2：上輪直發到一半就中斷（sending 卡超過 DIRECT_SENDING_SEC）→ 照結果不明收掉，不重送
+if [ -f "$EVENTS_FILE" ]; then
+  while IFS="$(printf '\t')" read -r sj se; do
+    [ -n "$se" ] && direct_unknown "$sj" "$se"
+  done < <(jq -r --argjson now "$now" --argjson lim "$DIRECT_SENDING_SEC" \
+    'select(.direct == "sending" and .acked_at == null and ($now - .created) >= $lim) | [.job_id, .event_id] | @tsv' "$EVENTS_FILE" 2>/dev/null)
+fi
 # 1a) bg／bg-hard 掃描：done 走事件投遞、working 逾時發 STALL
 while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend; do
   [ "$status" = pending ] || continue
@@ -196,7 +229,9 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
         extra="$(printf '%s' "$extra" | tr '\t\n' '  ' | cut -c1-300)"
       fi
       guide="看結果決定：要續派用 bin/dispatch-bg --thread $thread <prompt檔>，卡死就 bin/dispatch-cancel $id"
-      add_event "$id" PASS "$task" "$extra" "$guide" >/dev/null
+      if add_event "$id" PASS "$task" "$extra" "$guide" >/dev/null && [ "$backend" = bg ] && [ -s "$rf" ]; then
+        direct_send "$id" "$id-PASS" "$thread" "$rf"
+      fi
       ;;
     working|busy|running|active|blocked)
       case "$epoch" in ''|*[!0-9]*) continue ;; esac
@@ -406,7 +441,7 @@ pending_events() {
   # 已取消的票不投遞：ledger 標 cancelled 的 job、cancel 時標 cancelled:true 的事件都排除
   cancelled="$(jq -Rr 'split("\t") | select(.[4]=="cancelled") | .[0]' "$TSV" 2>/dev/null | jq -R . | jq -sc . || echo '[]')"
   jq -rc --argjson now "$now" --argjson resend "$RESEND_SEC" --argjson max "$MAX_TRIES" --argjson cxl "$cancelled" '
-    select(.acked_at == null and .tries < $max and .cancelled != true)
+    select(.acked_at == null and .tries < $max and .cancelled != true and .direct != "sending")
     | select(.job_id as $j | ($cxl | index($j)) == null)
     | select(.delivered_at == null or ($now - .delivered_at) >= $resend)
     | [.event_id, .job_id, .status, .summary, .extra, .guide] | @tsv' "$EVENTS_FILE"
