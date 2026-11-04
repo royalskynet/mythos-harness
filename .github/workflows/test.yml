@@ -30,3 +30,4 @@ jobs:
       - run: bash tests/test-tg-send.sh
       - run: bash tests/test-tg-plugin-patch.sh
       - run: bash tests/test-tg-reply-thread.sh
+      - run: bash tests/test-dispatch-watch-deadline.sh
