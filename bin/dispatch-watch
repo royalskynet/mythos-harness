@@ -6,15 +6,17 @@ set -u
 
 # 每輪總時限（11-04）：前一輪卡住時 launchd 不會起下一輪，00:07 那輪卡在舊版 awk 無窮迴圈，投遞停了 19 小時。
 # perl 把本檔放進新的 process group 跑，逾時整組 TERM、2 秒後 KILL（含 awk 這類孫行程），告警寫 brief-lines，exit 124。
-# 鎖由本檔 EXIT trap 在收到 TERM 時清掉（測試 hang-ignore-term 驗過）。
+# 鎖：TERM 時多半由本檔 EXIT trap 清；來不及清的由 perl 依 pid 收（測試 hang-ignore-term）。
 if [ -z "${DW_DEADLINE_ARMED:-}" ]; then
   export DW_DEADLINE_ARMED=1
   exec perl -e '
-    my ($t, $alert) = (shift, shift);
+    my ($t, $alert, $lock) = (shift, shift, shift);
     my $pid = fork() // exit 1;
     if (!$pid) { setpgrp(0, 0); exec @ARGV; exit 127 }
     $SIG{ALRM} = sub {
       kill "TERM", -$pid; sleep 2; kill "KILL", -$pid; waitpid($pid, 0);
+      # bash 等前景子行程時不一定來得及跑 EXIT trap（CI 41848055485 實測鎖殘留）：鎖還是被殺那輪的 pid 就清掉
+      if (open my $p, "<", "$lock/pid") { chomp(my $o = <$p> // ""); close $p; system("rm", "-rf", $lock) if $o eq "$pid" }
       my @l = localtime; my $ts = sprintf "%04d-%02d-%02d %02d:%02d:%02d", $l[5]+1900, $l[4]+1, @l[3,2,1,0];
       (my $d = $alert) =~ s{/[^/]*$}{}; mkdir $d;
       if (open my $f, ">>", $alert) { print $f "$ts dispatch-watch 一輪超過 ${t}s 被終止\n" } else { print STDERR "alert 寫入失敗: $!\n" }
@@ -22,7 +24,8 @@ if [ -z "${DW_DEADLINE_ARMED:-}" ]; then
     };
     alarm $t; waitpid($pid, 0);
     exit($? & 127 ? 128 + ($? & 127) : $? >> 8);
-  ' "${DW_MAX_SEC:-300}" "${BRIEF_LINES_DIR:-$HOME/.cache/brief-lines}/mythos-watch.txt" /bin/bash "$0" "$@"
+  ' "${DW_MAX_SEC:-300}" "${BRIEF_LINES_DIR:-$HOME/.cache/brief-lines}/mythos-watch.txt" \
+    "${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}/state/.dispatch-watch.lock" /bin/bash "$0" "$@"
 fi
 
 MYTHOS_DIR="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
