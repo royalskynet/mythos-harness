@@ -69,6 +69,22 @@ if [ -n "$thflag" ] && [ -f "$MYTHOS_DIR/state/dispatch-jobs.tsv" ]; then
     ($7 == th && ($8 == "bg" || $8 == "bg-hard")) { sid = substr($1, 4) }
     END { print sid }' "$MYTHOS_DIR/state/dispatch-jobs.tsv" 2>/dev/null)"
 fi
+# --resume 要完整 sessionId（11-04 實測）：只給 8 碼短 id 時 claude 起一個「copy」，停在 working、不寫 transcript，
+# watchlist-watch 兩次續派都這樣卡到 STALL。ledger 只存短 id，這裡向 claude agents 換回完整 id；換不到就新開，不硬續。
+if [ -n "$resume" ]; then
+  if command -v timeout >/dev/null 2>&1; then TO=(timeout -k 5 20)
+  elif command -v gtimeout >/dev/null 2>&1; then TO=(gtimeout -k 5 20)
+  else TO=()
+  fi
+  full="$(${TO[@]+"${TO[@]}"} "$CLAUDE" agents --json --all </dev/null 9>&- 2>/dev/null | jq -r --arg s "$resume" \
+    '[.[]? | .sessionId // empty | select(startswith($s + "-"))][0] // empty' 2>/dev/null)"
+  if [ -n "$full" ]; then
+    resume="$full"
+  else
+    echo "找不到 ${resume} 的完整 sessionId（claude agents 沒列出），改開新 session" >&2
+    resume=''
+  fi
+fi
 
 args=(--bg --model sonnet --allowedTools "$ALLOWED_TOOLS" --name "mythos:$thread")
 backend=bg
@@ -95,7 +111,10 @@ args+=("$body")
 # 9>&-：claude 會活過本行程，不能繼承 ledger 鎖
 out="$(cd "$WORKER_DIR" && "$CLAUDE" "${args[@]}" 2>&1 9>&-)"
 rc=$?
-sid="$(printf '%s\n' "$out" | grep -oE '[0-9a-f]{8}' | head -1)"
+# 先認「backgrounded · <短id> ·」那行：續派時 claude 會先印「note: session <原id> is already running … copy as <新id>」，
+# 抓第一個 hex 會記成原 session（11-04 實測）。沒有那行（舊版輸出）才退回第一個 hex。
+sid="$(printf '%s\n' "$out" | sed -n 's/.*backgrounded · \([0-9a-f]\{8\}\).*/\1/p' | head -1)"
+[ -n "$sid" ] || sid="$(printf '%s\n' "$out" | grep -oE '[0-9a-f]{8}' | head -1)"
 if [ "$rc" != 0 ] || [ -z "$sid" ]; then
   printf '%s\n' "$out" >&2
   echo "claude --bg 沒印出短 id（exit ${rc}），未登錄" >&2

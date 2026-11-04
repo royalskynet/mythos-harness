@@ -53,6 +53,11 @@ DEEP_REVIEW_MIN="${DEEP_REVIEW_MIN:-30}"
 DEEP_HANDOFF_SEC="${DEEP_HANDOFF_SEC:-120}"
 # bg／bg-hard 停在 working 超過它的分鐘數 → STALL 事件（worker 卡在權限提示或卡死）
 BG_STALL_MIN="${BG_STALL_MIN:-60}"
+# 真進度（11-04，借鏡 DeepSeek Super-agent 的 watchdog）：看 worker transcript 有沒有在動，不只看開派多久。
+# 開派超過 BG_NOSTART_MIN 分鐘還沒有 transcript＝沒開工（短 id 續派卡死就是這樣，等了 60 分鐘才發現）；
+# 有 transcript 就以最後寫入時間算停滯，長時間但還在動的 worker 不判 STALL。
+BG_NOSTART_MIN="${BG_NOSTART_MIN:-5}"
+BG_PROJECTS_DIR="${BG_PROJECTS_DIR:-$HOME/.claude/projects}"
 # E2：bg 單 PASS 直發使用者（至多一次）。tg-send 跟本檔同目錄；告警只寫 brief-lines。
 TG_SEND_BIN="${TG_SEND_BIN:-$(cd "$(dirname "$0")" && pwd)/tg-send}"
 BRIEF_LINES_DIR="${BRIEF_LINES_DIR:-$HOME/.cache/brief-lines}"
@@ -236,6 +241,12 @@ bg_state() {
   [ -n "$AGENTS_JSON" ] || return 0
   printf '%s' "$AGENTS_JSON" | "$NODE_BIN" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const id=process.argv[1];let a=[];try{a=JSON.parse(s)}catch{return}const hit=a.find(x=>(x.sessionId||"").startsWith(id))||a.find(x=>x.id===id);if(hit)process.stdout.write(String(hit.state||"")||"")})' "${1#bg-}" 9>&- 2>/dev/null
 }
+# 短 id → 「完整 sessionId<TAB>cwd」（兩個都有才印）
+bg_info() {
+  [ -n "$AGENTS_JSON" ] || return 0
+  printf '%s' "$AGENTS_JSON" | jq -r --arg s "${1#bg-}" \
+    '[.[]? | select((.sessionId // "") | startswith($s + "-")) | select(.cwd) | "\(.sessionId)\t\(.cwd)"][0] // empty' 2>/dev/null
+}
 # 1a0) E2：上輪直發到一半就中斷（sending 卡超過 DIRECT_SENDING_SEC）→ 照結果不明收掉，不重送
 if [ -f "$EVENTS_FILE" ]; then
   while IFS="$(printf '\t')" read -r sj se; do
@@ -273,13 +284,28 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
       ;;
     working|busy|running|active|blocked)
       case "$epoch" in ''|*[!0-9]*) continue ;; esac
-      [ $((now - epoch)) -ge $((BG_STALL_MIN * 60)) ] || continue
+      extra=''
+      info="$(bg_info "$id")"
+      if [ -n "$info" ]; then
+        tf="$BG_PROJECTS_DIR/$(printf '%s' "${info#*	}" | sed 's/[\/.]/-/g')/${info%%	*}.jsonl"
+        if [ -f "$tf" ]; then
+          idle=$(( now - $(stat -f %m "$tf" 2>/dev/null || echo "$epoch") ))
+          [ "$idle" -ge $((BG_STALL_MIN * 60)) ] || continue
+          extra="對話紀錄 $((idle / 60)) 分鐘沒動"
+        else
+          [ $((now - epoch)) -ge $((BG_NOSTART_MIN * 60)) ] || continue
+          extra="沒開工：派出 $(( (now - epoch) / 60 )) 分鐘仍沒有對話紀錄"
+        fi
+      else
+        # claude agents 沒給 sessionId／cwd：退回只看開派多久
+        [ $((now - epoch)) -ge $((BG_STALL_MIN * 60)) ] || continue
+      fi
       last="$MYTHOS_DIR/state/bg/$sid.last-stall"
       if [ -f "$last" ] && [ $((now - $(tr -d '[:space:]' < "$last" 2>/dev/null || echo 0))) -lt $((BG_STALL_MIN * 60)) ]; then
         continue
       fi
       guide="判斷是否卡死；卡死就 bin/dispatch-cancel $id 再用 bin/dispatch-bg --thread $thread <prompt檔> 重派"
-      add_event "$id" STALL "$task" "" "$guide" >/dev/null || late=1
+      add_event "$id" STALL "$task" "$extra" "$guide" >/dev/null || late=1
       todo "$last" "$now"
       ;;
     stopped|failed|error|killed)

@@ -262,10 +262,58 @@ function replyTag(params) {
       const f = l.split('\t')
       if (f[6] === th && (f[7] === 'bg' || f[7] === 'bg-hard')) last = f[0]
     }
-    return last === job ? `[回覆 bg thread=${th} job=${job}] ` : null
+    return last === job ? { th, job } : null
   } catch {
     return null
   }
+}
+
+// 追問直送 worker（11-04，借鏡 DeepSeek Super-agent：已有任務的後續訊息沿 thread 直送 Worker，少繞一次 Router）：
+// 命中時 proxy 自己跑 dispatch-bg --thread 續派，Router 只收「已直送」通知、不再判斷要不要續派。
+// worker 判斷不是同一件事就不寫摘要段 → dispatch-watch 照一般 [派工回報] 交回 Router。
+// 續派失敗 → 退回舊標註，由 Router 判斷。測試模式（TG_COMMANDS_CHILD）沒給 DISPATCH_BG_BIN 時不直送，免得叫到真 claude。
+const DISPATCH_BG_BIN =
+  process.env.DISPATCH_BG_BIN || (process.env.TG_COMMANDS_CHILD ? '' : path.join(MYTHOS_ROOT, 'bin/dispatch-bg'))
+function directFollowup(th, job, text) {
+  return new Promise(resolve => {
+    if (!DISPATCH_BG_BIN || process.env.DIRECT_FOLLOWUP === '0') return resolve(null)
+    let file
+    try {
+      file = path.join(MYTHOS_ROOT, 'state/bg', `${th}-followup-${Date.now()}.md`)
+      fs.mkdirSync(path.dirname(file), { recursive: true })
+      fs.writeFileSync(
+        file,
+        `thread=${th}\n使用者回覆了你上一則結果（${job}），原話在最下面。\n` +
+          '是同一件事的追問、補充或改方向 → 照做，最後照樣寫 result（摘要＋細節）。\n' +
+          '跟這件事無關 → 不做；result 不寫「摘要：」段，只寫「交回 Router：這是新的事」加原話，Router 會另開。\n\n' +
+          `原話：\n${text}\n`,
+      )
+    } catch (e) {
+      log(`followup ${th}: 寫 prompt 失敗 ${e.message}`)
+      return resolve(null)
+    }
+    execFile(DISPATCH_BG_BIN, ['--thread', th, th, file], { timeout: 60_000, env: { ...process.env, MYTHOS_DIR: MYTHOS_ROOT } }, (err, stdout, stderr) => {
+      const id = /^bg-[0-9a-f]{8}$/m.exec(stdout || '')?.[0]
+      if (err || !id) {
+        log(`followup ${th}: dispatch-bg 失敗 ${err?.message ?? ''} ${String(stderr || '').slice(0, 300)}`)
+        return resolve(null)
+      }
+      resolve(id)
+    })
+  })
+}
+
+async function handleChannel(msg, line) {
+  const orig = msg.params?.content
+  if (intercept(msg.params)) return
+  const hit = replyTag(msg.params)
+  // /fix、/wheel 展開會改 content：改過就送改過的（11-04 前送的是原始 line，展開內容被丟掉）；沒改才原樣轉發
+  if (!hit) return process.stdout.write((msg.params?.content === orig ? line : JSON.stringify(msg)) + '\n')
+  const id = await directFollowup(hit.th, hit.job, msg.params.content)
+  log(`reply hit thread=${hit.th} job=${hit.job} → ${id ? `直送 ${id}` : '交 Router 判斷'}`)
+  msg.params.content =
+    (id ? `[已直送 worker thread=${hit.th} job=${id}] ` : `[回覆 bg thread=${hit.th} job=${hit.job}] `) + msg.params.content
+  process.stdout.write(JSON.stringify(msg) + '\n')
 }
 
 // 回傳 true＝這則訊息被我吃掉，不要轉發給 claude。
@@ -378,24 +426,20 @@ child.on('exit', (code, sig) => {
   if (!shuttingDown) process.exit(code ?? 1) // 收尾中：等計時器補 SIGKILL 給孫行程
 })
 
+// 全部經同一條 promise 鏈：直送續派要等 dispatch-bg（數秒），後面的行不能插隊
+let chain = Promise.resolve()
 createInterface({ input: child.stdout }).on('line', line => {
-  let msg
-  try {
-    msg = JSON.parse(line)
-  } catch {
-    process.stdout.write(line + '\n') // 非 JSON（bun 的雜訊）照原樣轉發
-    return
-  }
-  if (msg?.method === 'notifications/claude/channel') {
-    if (intercept(msg.params)) return
-    const tag = replyTag(msg.params)
-    if (tag) {
-      msg.params.content = tag + msg.params.content
-      process.stdout.write(JSON.stringify(msg) + '\n')
+  chain = chain.then(async () => {
+    let msg
+    try {
+      msg = JSON.parse(line)
+    } catch {
+      process.stdout.write(line + '\n') // 非 JSON（bun 的雜訊）照原樣轉發
       return
     }
-  }
-  process.stdout.write(line + '\n')
+    if (msg?.method === 'notifications/claude/channel') return handleChannel(msg, line)
+    process.stdout.write(line + '\n')
+  }).catch(e => log(`line handler: ${e.message}`))
 })
 
 // plugin 在開始輪詢時會自己 setMyCommands（只有 start/help/status）。等它印出那行再覆寫，

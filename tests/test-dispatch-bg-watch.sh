@@ -148,4 +148,31 @@ grep -q 'log tail for ffff0007' "$TMUX_LOG" || fail "7：沒取 logs 摘要：$(
 bash "$ROOT/bin/dispatch-watch" 9>&-
 grep -q 'event_id=bg-ffff0007-FAIL' "$TMUX_LOG" && fail '7：FAIL 重複發'
 echo '(7) ok'
+
+# 8) 真進度（11-04）：agents 給 sessionId＋cwd 時看 transcript，不只看開派多久
+#   a 舊票但 transcript 剛寫過 → 不判；b 舊票 transcript 停很久 → STALL（附幾分鐘沒動）
+#   c 派出 6 分鐘還沒 transcript → STALL（沒開工）；d 派出 2 分鐘沒 transcript → 不判
+export BG_PROJECTS_DIR="$TMP/bgproj"
+W8="/tmp/w8.x"; P8="$BG_PROJECTS_DIR/-tmp-w8-x"; mkdir -p "$P8"
+now="$(date +%s)"
+row bg-a8a80001 bg $((now - 7200)); row bg-b8b80002 bg $((now - 7200))
+row bg-c8c80003 bg $((now - 360));  row bg-d8d80004 bg $((now - 120))
+: > "$P8/a8a80001-1111-2222-3333-444455556666.jsonl"
+: > "$P8/b8b80002-1111-2222-3333-444455556666.jsonl"
+touch -t "$(date -r $((now - 4000)) +%Y%m%d%H%M.%S)" "$P8/b8b80002-1111-2222-3333-444455556666.jsonl"
+o='['; sep=''
+for p in a8a80001 b8b80002 c8c80003 d8d80004; do
+  o="$o$sep{\"sessionId\":\"$p-1111-2222-3333-444455556666\",\"cwd\":\"$W8\",\"kind\":\"background\",\"state\":\"working\"}"; sep=','
+done
+printf '%s]' "$o" > "$FAKE_AGENTS"
+printf 'BG_STALL_MIN=60\n' > "$MYTHOS_DIR/state/watchdog-knobs.env"
+: > "$TMUX_LOG"
+bash "$ROOT/bin/dispatch-watch" 9>&- || fail '8：非零退出'
+grep -q 'bg-a8a80001-STALL' "$TMUX_LOG" && fail "8a：transcript 還在動卻判 STALL：$(cat "$TMUX_LOG")"
+grep -q 'event_id=bg-b8b80002-STALL' "$TMUX_LOG" || fail "8b：transcript 停了沒判 STALL：$(cat "$TMUX_LOG")"
+grep -q '分鐘沒動' "$TMUX_LOG" || fail "8b：STALL 沒附停滯分鐘：$(cat "$TMUX_LOG")"
+grep -q 'event_id=bg-c8c80003-STALL' "$TMUX_LOG" || fail "8c：沒開工沒判 STALL：$(cat "$TMUX_LOG")"
+grep -q '沒開工' "$TMUX_LOG" || fail "8c：STALL 沒寫沒開工：$(cat "$TMUX_LOG")"
+grep -q 'bg-d8d80004-STALL' "$TMUX_LOG" && fail "8d：剛派出就判沒開工：$(cat "$TMUX_LOG")"
+echo '(8) ok'
 echo 'DISPATCH-BG-WATCH PASS'
