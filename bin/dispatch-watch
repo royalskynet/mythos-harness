@@ -58,6 +58,9 @@ BG_STALL_MIN="${BG_STALL_MIN:-60}"
 # 有 transcript 就以最後寫入時間算停滯，長時間但還在動的 worker 不判 STALL。
 BG_NOSTART_MIN="${BG_NOSTART_MIN:-5}"
 BG_PROJECTS_DIR="${BG_PROJECTS_DIR:-$HOME/.claude/projects}"
+# 11-05：worker 狀態先變 done、result 晚幾十秒才寫好（t-dsh 的 bg-6cd59e09 差 20 秒就被判「result 缺檔」）。
+# 缺檔時先寬限這麼多秒（記第一次看到的時間在 state/bg/<id>.done-seen），期間不發 PASS。
+BG_RESULT_GRACE_SEC="${BG_RESULT_GRACE_SEC:-120}"
 # E2：bg 單 PASS 直發使用者（至多一次）。tg-send 跟本檔同目錄；告警只寫 brief-lines。
 TG_SEND_BIN="${TG_SEND_BIN:-$(cd "$(dirname "$0")" && pwd)/tg-send}"
 BRIEF_LINES_DIR="${BRIEF_LINES_DIR:-$HOME/.cache/brief-lines}"
@@ -247,6 +250,22 @@ bg_info() {
   printf '%s' "$AGENTS_JSON" | jq -r --arg s "${1#bg-}" \
     '[.[]? | select((.sessionId // "") | startswith($s + "-")) | select(.cwd) | "\(.sessionId)\t\(.cwd)"][0] // empty' 2>/dev/null
 }
+# result 缺檔時的替代內容：claude logs 是 TUI 畫面（滿是 ESC 控制碼），先去掉控制碼；去完是空的，
+# 就退讀 worker transcript 最後一段 assistant 文字；都沒有才寫「讀不到」。
+bg_missing_extra() { # id sid → 印一行（已含「result 缺檔；」前綴）
+  local raw txt info tf
+  raw="$(${TO[@]+"${TO[@]}"} "${CLAUDE_BIN:-claude}" logs "$2" </dev/null 9>&- 2>/dev/null)" || raw=''
+  txt="$(printf '%s' "$raw" | perl -pe 's/\e\[[0-9;?]*[ -\/]*[@-~]//g; s/\e[()][A-Za-z0-9]//g; s/[\x00-\x08\x0b-\x1f\x7f]//g' 2>/dev/null | tr -s ' ')"
+  [ -n "$(printf '%s' "$txt" | tr -d '[:space:]')" ] || txt=''
+  if [ -z "$txt" ]; then
+    info="$(bg_info "$1")"
+    if [ -n "$info" ]; then
+      tf="$BG_PROJECTS_DIR/$(printf '%s' "${info#*	}" | sed 's/[\/.]/-/g')/${info%%	*}.jsonl"
+      [ -f "$tf" ] && txt="$(jq -rs '[.[] | select(.type=="assistant") | .message.content[]? | select(.type=="text") | .text][-1] // empty' "$tf" 2>/dev/null)"
+    fi
+  fi
+  printf '%s' "result 缺檔；${txt:-讀不到 claude logs}" | tr '\t\n' '  ' | cut -c1-300
+}
 # 1a0) E2：上輪直發到一半就中斷（sending 卡超過 DIRECT_SENDING_SEC）→ 照結果不明收掉，不重送
 if [ -f "$EVENTS_FILE" ]; then
   while IFS="$(printf '\t')" read -r sj se; do
@@ -267,10 +286,11 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
       if [ -s "$rf" ]; then
         extra="$(tr '\t\n' '  ' < "$rf" | cut -c1-300)"
       else
-        extra="$(${TO[@]+"${TO[@]}"} "${CLAUDE_BIN:-claude}" logs "$sid" </dev/null 9>&- 2>/dev/null)" || extra=''
-
-        extra="result 缺檔；${extra:-讀不到 claude logs}"
-        extra="$(printf '%s' "$extra" | tr '\t\n' '  ' | cut -c1-300)"
+        seen="$MYTHOS_DIR/state/bg/$sid.done-seen"
+        [ -f "$seen" ] || printf '%s\n' "$now" > "$seen"
+        s0="$(tr -d '[:space:]' < "$seen" 2>/dev/null)"; case "$s0" in ''|*[!0-9]*) s0="$now" ;; esac
+        [ $((now - s0)) -ge "$BG_RESULT_GRACE_SEC" ] || continue
+        extra="$(bg_missing_extra "$id" "$sid")"
       fi
       guide="看結果決定：要續派用 bin/dispatch-bg --thread $thread <prompt檔>，卡死就 bin/dispatch-cancel $id"
       if add_event "$id" PASS "$task" "$extra" "$guide" >/dev/null && [ "$backend" = bg ] && [ -s "$rf" ]; then
@@ -314,9 +334,7 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
       if [ -s "$rf" ]; then
         extra="$(tr '\t\n' '  ' < "$rf" | cut -c1-300)"
       else
-        extra="$(${TO[@]+"${TO[@]}"} "${CLAUDE_BIN:-claude}" logs "$sid" </dev/null 9>&- 2>/dev/null)" || extra=''
-        extra="result 缺檔；${extra:-讀不到 claude logs}"
-        extra="$(printf '%s' "$extra" | tr '\t\n' '  ' | cut -c1-300)"
+        extra="$(bg_missing_extra "$id" "$sid")"
       fi
       guide="worker 已停止（${st}）；要重來照原派工方式重派（bg-hard 記得 --hard 與原 repo），或 bin/dispatch-cancel $id 收掉"
       add_event "$id" FAIL "$task" "$extra" "$guide" >/dev/null

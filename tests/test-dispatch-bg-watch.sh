@@ -78,7 +78,13 @@ echo '(1) ok'
 # 2) done 但缺 result → 退讀 claude logs 並標「result 缺檔」
 row bg-bbbb0002 bg-hard "$(date +%s)"
 agents aaaa0001 done bbbb0002 done
-bash "$ROOT/bin/dispatch-watch" 9>&- || fail '2：非零退出'
+# 2a) 寬限內不發：result 可能只是晚幾十秒才寫（11-05 bg-6cd59e09 的假 PASS）
+BG_RESULT_GRACE_SEC=600 bash "$ROOT/bin/dispatch-watch" 9>&- || fail '2a：非零退出'
+grep -q 'bg-bbbb0002-PASS' "$TMUX_LOG" && fail '2a：寬限內就發了 PASS'
+[ -f "$MYTHOS_DIR/state/bg/bbbb0002.done-seen" ] || fail '2a：沒記 done-seen'
+# 2b) 寬限過了仍缺檔才發
+printf '%s\n' "$(( $(date +%s) - 700 ))" > "$MYTHOS_DIR/state/bg/bbbb0002.done-seen"
+BG_RESULT_GRACE_SEC=600 bash "$ROOT/bin/dispatch-watch" 9>&- || fail '2b：非零退出'
 grep -q 'event_id=bg-bbbb0002-PASS' "$TMUX_LOG" || fail "2：沒投遞：$(cat "$TMUX_LOG")"
 grep -q 'result 缺檔' "$TMUX_LOG" || fail "2：沒標 result 缺檔：$(cat "$TMUX_LOG")"
 grep -q 'log tail for bbbb0002' "$TMUX_LOG" || fail "2：沒退讀 claude logs：$(cat "$TMUX_LOG")"

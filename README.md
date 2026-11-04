@@ -59,12 +59,15 @@ tmux -L mythos attach -t mythos
 | `bin/lib-ledger.sh`、`lib-events.mjs` | 共同 ledger 鎖（flock，行程死了自動釋放；ledger 與 events 同一把）、8 欄 schema、事件佇列（原子替換寫入）與精確 ACK 比對 |
 | `bin/watchdog` | L0：死鎖、重送用盡、Router 未回（只認成功的 reply 結果）、pending 逾 6 小時、deep transcript 停滯、`claude agents` 背景 worker blocked；L1：log 錯誤行交免費模型判 KNOWN／NEW／NOISE（出機前欄位白名單→scrub 去識別→sensitive-canary 掃去識別後文字，scrub 每日自檢，退路鏈 beam-free→OC Go 次選→local-llm→`state/watchdog-known.tsv`）；L2：只提議白名單旋鈕，兩棒不同體系同值才套用；`bin/watchdog ask "<問題>"` |
 | `bin/dispatch`、`dispatch-retry`、`dispatch-cancel`、`dispatch-deep-run` | 派工（先持鎖登錄再啟動後端）、重派（沿用原後端）、取消（deep 只照 `state/deep/<id>.handle`；bg 用 `claude stop <短id>`，停不掉不標 cancelled）、deep 背景執行 |
-| `bin/dispatch-bg`、`router/worker/`、`router/worker-sync.sh` | 背景 worker：`claude --bg`（工具白名單 `Bash Read Write Edit Glob Grep`、不給 Telegram），ledger 記 `bg-<短id>`；`--thread` 續同一 session、`--hard` 用 `hard.json`（sonnet＋advisor）並要求 worktree；結果寫 `state/bg/<短id>.result`，`dispatch-watch` 以 `claude agents --json --all` 判 done／STALL（`BG_STALL_MIN`，預設 60） |
+| `bin/dispatch-bg`、`router/worker/`、`router/worker-sync.sh` | 背景 worker：`claude --bg`（工具白名單 `Bash Read Write Edit Glob Grep`、不給 Telegram），ledger 記 `bg-<短id>`；`--thread` 續同一 session、`--hard` 用 `hard.json`（sonnet＋advisor）並要求 worktree；結果寫 `state/bg/<短id>.result`，`--thread` 續派前先向 `claude agents` 換回完整 sessionId（只給短 id 會起一個不動的 copy）；`dispatch-watch` 以 `claude agents --json --all` 判 done，STALL 看 transcript 最後寫入（`BG_STALL_MIN` 預設 60；開派 `BG_NOSTART_MIN`＝5 分鐘仍無 transcript 算沒開工）；done 但 result 還沒寫先寬限 `BG_RESULT_GRACE_SEC`（預設 120）秒，仍缺才發 PASS 並標「result 缺檔」，內容退讀 claude logs（去 ANSI）或 transcript 最後一段 |
 | `bin/dispatch-watch` | 回報＋停滯／抽查，pane 閒置才打進去 |
 | `bin/latency-report` | 唯讀、零 token：Telegram 使用者訊息到第一個 `__reply` 的延遲摘要（`n p50_s p90_s max_s over60 no_reply pending_tail`：終點取 `mcp__telegram__reply` 對到、成功的 tool_result 時間；每檔各自配對、連發併一筆；`pending_tail`＝檔尾還在等、不算沒回；`no_reply`＝上一輪沒回、距本輪最後一則使用者訊息超過 `LATENCY_MERGE_SEC`（環境變數，預設 300 秒）又來新訊息，舊輪算沒回並重起一輪，沒超過就併筆；`--days N`、`--json`；`--max-detail` 只印一行 `max_s= start= merged= file=`（最大延遲的秒數、起點、併筆數、檔名），不印訊息內文） |
 | `bin/tg-send`、`tg-plugin-patch`、`tg-commands.mjs` | bg 的 PASS 直發（exit 0 已送／1 確定沒送／2 不明／97 測試守門，15 秒總時限，送出的訊息記在 `state/tg-msg-thread.tsv`）；patch telegram plugin 補 `reply_to_message_id`；斜線指令 proxy，回覆直發訊息時加 `[回覆 bg thread= job=]` 標註 |
 | `bin/review-judge`、`oc-free-ask`、`local-llm` | 免費模型判 Worker 有沒有跑歪；判不出來或格式不對一律 UNKNOWN＝照舊喚醒 Router |
 | `bin/idle-reset` | 04／05／06 點試，pane 不忙且 30 分沒動才 `/clear`，一天一次 |
+| `bin/tg-progress.mjs` | PreToolUse／Stop hook，零 token：每回合第一個工具就靜音發一則「步驟」進度、之後逐步改它，回合結束刪掉 |
+| `bin/daily-log`、`session-context` | PreCompact／SessionEnd 把 Telegram 收發內容過 PII 閘道後摘要成 `memory/daily/YYYY-MM-DD.md`（閘道不通就不送、下次重試）；SessionStart 把今天／昨天日誌尾段注入開場 |
+| `bin/remind` | 提醒：`add "<when>" "<內容>"`／`list`／`rm`；launchd 每分鐘到點直發 Bot API；`--ask` 到點把內容打進 Router、`--digest` 併進晨報 |
 
 ## 測試 / Tests
 
