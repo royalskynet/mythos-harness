@@ -1,0 +1,129 @@
+#!/usr/bin/env python3 -I
+# accept-paths-lint <工單.md>：檢查驗收腳本引用的路徑／glob 是否還存在（驗收過期偵測）。
+# 逐行追蹤 `cd <dir>`，在該目錄展開疑似路徑的 token；glob 無匹配或檔案不存在 → STALE 並 exit 1。
+# exit 0 全存在；exit 2 工單無驗收區塊或讀不到。相對路徑一律以 cwd（worktree）為基準起算。
+# ponytail: 極簡 shell 切詞（空白／&&／||／;／|／&& 前後空白），不處理引號內空白與 $VAR；升級＝上 shlex + 變數展開。
+import glob
+import os
+import re
+import subprocess
+import sys
+import urllib.parse
+
+GLOB = re.compile(r'[*?\[]')
+# 像路徑的 token：含 / 或以 collectors/ 這類 `字/` 起頭（含 glob 的裸檔名另判）
+ASSIGN = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
+
+
+def tokens(line):
+    out = []
+    for t in re.split(r'\s*(?:&&|\|\||[;|])\s*|\s+', line):
+        t = t.strip("'\"")
+        while ASSIGN.match(t):
+            t = t.partition('=')[2]
+        if t:
+            out.append(t)
+    return out
+
+
+def is_path(t):
+    if GLOB.search(t):
+        return True
+    return '/' in t or re.match(r'^[A-Za-z0-9._-]+/', t) is not None
+
+
+def skip(t):
+    return (
+        not t
+        or t.startswith('-')
+        or t == '!'
+        or '://' in t
+        or t.startswith('/dev/')
+        or t.startswith('/tmp/')
+        or '$' in t
+        or t in ('&&', '||', ';', '|')
+    )
+
+
+def check(tok, cwd):
+    t = urllib.parse.unquote(tok)
+    base = t if os.path.isabs(t) else os.path.join(cwd, t)
+    if GLOB.search(t):
+        if not glob.glob(base):
+            return t
+        return None
+    # 非 glob：只有看起來像檔名（有副檔名或有目錄）才要求存在
+    if '/' not in t and not re.search(r'\.[A-Za-z0-9]+$', t):
+        return None
+    return None if os.path.exists(base) else t
+
+
+HEADING = re.compile(r'^#{1,6}[ \t]*(驗收|[Vv]erif)')
+FENCE = re.compile(r'^```(bash|sh|zsh|shell)?[ \t]*$')
+
+
+def extract(wo):
+    # wo-verify 只收「``` 區塊」；`### 驗收` 這種小節標題會被把它當章的 wo-verify 判成 none。
+    # 有區塊 → 原樣用 wo-verify --dump；沒有 → 自己收驗收章節（含未圍欄的行），找不到才 exit 2。
+    r = subprocess.run(['wo-verify', wo, '--dump'], capture_output=True, text=True)
+    if r.returncode == 0:
+        return r.stdout
+    lines, out, ins, fence, lvl = open(wo, encoding='utf-8').read().splitlines(), [], False, False, 0
+    for l in lines:
+        if l.startswith('```'):
+            if not fence and ins and FENCE.match(l):
+                fence = True
+            elif fence:
+                fence = False
+            continue
+        if not fence:
+            m = re.match(r'^(#{1,6})[ \t]', l)
+            if m:
+                nl = len(m.group(1))
+                if ins and nl <= lvl:
+                    ins = False
+                if HEADING.match(l):
+                    ins, lvl = True, nl
+                    continue
+            if ins and l.strip():
+                out.append(re.sub(r'^\$ ', '', l))
+    return '\n'.join(out) if out else None
+
+
+def main():
+    if len(sys.argv) != 2:
+        print('用法：accept-paths-lint <工單.md>', file=sys.stderr)
+        return 2
+    wo = sys.argv[1]
+    if not os.path.isfile(wo):
+        print(f'accept-paths-lint: 工單不存在 {wo}', file=sys.stderr)
+        return 2
+    script = extract(wo)
+    if script is None:
+        print('accept-paths-lint: 沒有可檢查的驗收區塊', file=sys.stderr)
+        return 2
+
+    stale = []
+    cwd = os.getcwd()
+    for line in script.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        toks = tokens(line)
+        if toks and toks[0] == 'cd':
+            target = toks[1] if len(toks) > 1 else os.environ.get('HOME', '/')
+            cwd = target if os.path.isabs(target) else os.path.normpath(os.path.join(cwd, target))
+            toks = toks[2:]
+        for t in toks:
+            if skip(t) or not is_path(t):
+                continue
+            bad = check(t, cwd)
+            if bad:
+                stale.append(bad)
+    for s in stale:
+        print(f'STALE: {s}')
+    return 1 if stale else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

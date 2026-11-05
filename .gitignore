@@ -28,6 +28,7 @@
 !/bin/tg-send
 !/bin/tg-plugin-patch
 !/bin/tg-commands.mjs
+!/bin/accept-paths-lint
 /tests/*
 !/tests/test-tg-send.sh
 !/tests/test-tg-plugin-patch.sh
@@ -56,6 +57,7 @@
 !/tests/test-dispatch-bg-watch.sh
 !/tests/test-dispatch-watch-deadline.sh
 !/tests/test-dispatch-gate-bg.sh
+!/tests/test_accept_paths_lint.sh
 !/tests/test-dispatch-bg-e2e.sh
 # 工單 D：Router 寫給 dispatch-bg 的 prompt 檔與 worker 的 result（runtime，不進 git）
 /state/bg/
