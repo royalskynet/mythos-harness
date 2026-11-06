@@ -70,7 +70,7 @@ tmux -L mythos attach -t mythos
 | 功能 | 需要 | 沒裝會怎樣 |
 |---|---|---|
 | Telegram 對話 | telegram plugin | `CHANNELS= router/start.sh`，在 tmux 裡直接打字 |
-| 快查 `bin/quick` | [opencode](https://opencode.ai)；`dcq`（給免費模型清單） | 沒 opencode exit 6、沒 `dcq` 或列不出免費層 exit 5，都改派 worker；不寫死模型名，`FREE_MODELS=a,b` 可手動指定 |
+| 快查 `bin/quick` | [opencode](https://opencode.ai)；`dcq`（給免費模型清單） | 沒 opencode exit 6、沒 `dcq` 或列不出免費層 exit 5，都改派 worker；不寫死模型名，`FREE_MODELS='a b'`（空白分隔）可手動指定 |
 | 記憶快查 `bin/recall` | 三選任意：claude-mem worker（HTTP `:37701`）、`fixindex`、Claude Code auto-memory 目錄 | 有哪個查哪個；一個都沒有 exit 6，改派 worker。`RECALL_SOURCES=md` 只用部分 |
 | mid 走訂閱層 | OpenCode Go 訂閱（月費＝花錢） | 設 `DISPATCH_MID_ORDER=free`，mid 只用免費層 |
 | hard 走 Claude | `claude --bg`；`deep-run` 選用 | 預設 hard 走 O（`dcq`）；`DISPATCH_HARD_BACKEND=bg` 才起 sonnet bg-hard、`=deep` 才要 `deep-run` |
