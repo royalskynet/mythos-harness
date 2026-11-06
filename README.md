@@ -51,6 +51,18 @@ router/start.sh                      # 不要 Telegram：CHANNELS= router/start.
 tmux -L mythos attach -t mythos
 ```
 
+### 選用元件 / Optional components
+
+核心只要上面的需求＋`dcq`。下面每一項都可以不裝：沒裝的功能會自己跳過或回 exit 6，Router 照常派 worker，不會壞。
+
+| 功能 | 需要 | 沒裝會怎樣 |
+|---|---|---|
+| Telegram 對話 | telegram plugin | `CHANNELS= router/start.sh`，在 tmux 裡直接打字 |
+| 快查 `bin/quick` | [opencode](https://opencode.ai)；`dcq` 選用（給模型順序） | exit 6，改派 worker；沒 `dcq` 用內建免費模型清單 |
+| 記憶快查 `bin/recall` | 三選任意：claude-mem worker（HTTP `:37701`）、`fixindex`、Claude Code auto-memory 目錄 | 有哪個查哪個；一個都沒有 exit 6，改派 worker。`RECALL_SOURCES=md` 只用部分 |
+| mid 走訂閱層 | OpenCode Go 訂閱（月費＝花錢） | 設 `DISPATCH_MID_ORDER=free`，mid 只用免費層 |
+| hard 背景 | `claude --bg`；`deep-run` 選用 | 預設 bg-hard；`DISPATCH_HARD_BACKEND=deep` 才要 `deep-run` |
+
 背景監看用 launchd：`bash launchd/install.sh` 把 `launchd/*.plist` 範本的 `__REPO__`／`__HOME__` 換成 clone 位置與家目錄，寫進 `~/Library/LaunchAgents/`（`NO_LOAD=1` 只產檔）。現有三份：`ai.mythos.dispatch-watch`（回報與抽查）、`ai.mythos.watchdog`（卡住偵測）、`ai.mythos.idle-reset`（閒置 `/clear`）。`ONLY=<label>` 只處理那一份。載入要帶完整 service target：`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist`。
 
 ## 元件 / Components
@@ -153,6 +165,8 @@ Items left open by the convergence rule (medium or lower, or a fix that would wi
 - `bin/watchdog` (every 5 min): **L0** zero-token checks — stale locks, exhausted resends, Router not replying, jobs pending > 6 h, stalled deep transcripts, background agents blocked on permission prompts. **L1** only for what L0 cannot classify (new error lines in logs): a free model labels them KNOWN / NEW / NOISE. Payloads leaving the machine are field-whitelisted, then PII-scrubbed, then the scrubbed text is scanned with sensitive-canary rules (scrub down = nothing is sent); the scrubber is self-tested daily with fake PII. Fallback chain: beam-free → second OC Go free model → local LLM gateway → rule table → plain alert. **L2** may only propose whitelisted knobs, applied when two different model families agree and the value is within bounds. `bin/watchdog ask "<question>"` answers questions about recent watchdog activity.
 
 **State.** One ledger (`state/dispatch-jobs.tsv`, 8 columns) and the event queue share a single `flock` lock that is released automatically if the holder dies. Deep jobs are cancelled only through their recorded handle, never by guessing.
+
+**Optional pieces.** Only Claude Code, Node, jq, tmux and `dcq` are required. Everything else degrades on its own: `bin/quick` needs opencode (exit 6 without it, so the Router dispatches a worker instead); `bin/recall` uses whichever of claude-mem's local worker, `fixindex` and the Claude Code auto-memory folder exist (pick with `RECALL_SOURCES=mem,fix,md`; exit 6 if none); mid tickets use the OpenCode Go subscription by default (a monthly cost), set `DISPATCH_MID_ORDER=free` to stay free-only; Telegram is optional (`CHANNELS=`). See the table under *Quick start*.
 
 **Install.** See *Quick start* above; `launchd/install.sh` renders the plist templates (`ONLY=<label>` for one job, `NO_LOAD=1` to only render). Tests use fake tmux / models / dcq, need no network or keys, and run on macOS CI.
 

@@ -15,7 +15,7 @@ Mythos 一律直接做（YOLO）：盤點／診斷找出的修補，任務允許
 ## 判難度（先做，一次定）
 
 - 把任務寫進 `/tmp/dispatcher-<epoch>.md`，跑 `${DISPATCH_GATE_TRIAGE:-~/dev/dispatch-router/bin/triage} /tmp/dispatcher-<epoch>.md`（找不到 triage 就自己判） 取 easy／mid／hard；你看完現狀覺得明顯判錯可以改判，在結果裡寫一句理由。
-- **easy**（唯讀查詢、跑一次測試、單檔小修、驗收重跑）：你自己做完；唯讀查詢先跑 `/Users/51mini/bots/mythos/bin/quick <cwd 絕對路徑> '<問題>'`（opencode 免費模型、唯讀、秒級）：挑答案裡一條指令自己重跑對照，對得上才用；exit 非 0 或對不上就自己查。
+- **easy**（唯讀查詢、跑一次測試、單檔小修、驗收重跑）：你自己做完；唯讀查詢先跑 `bin/quick <cwd 絕對路徑> '<問題>'`（opencode 免費模型、唯讀、秒級）：挑答案裡一條指令自己重跑對照，對得上才用；exit 非 0 或對不上就自己查。
 - **mid**：寫工單（自含上下文、絕對路徑、`## 驗收` 一條會失敗的指令）存 `state/workorders/<名>.md` → `DISPATCH_THREAD=<代號> bin/dispatch <task.md> <cwd> mid`（派 O 訂閱層，flash 首棒；訂閱＝花錢，只給要改東西的）。
   - 工單契約（11-06，28 張 rc=2 單次失敗共通原因）：冪等／可能已完成的工單加獨立一行 `NEG-CONTROL: n/a`（否則 dcq do-nothing 對照中止記失敗）；驗收直譯器用絕對路徑（`/opt/homebrew/bin/python3.12`，不寫裸 `python3`）、腳本用 `bash <script>` 不靠執行權限；工單別寫 cwd 以外 checkout 的絕對路徑（越界 FATAL）。
 - **hard**：工單寫成完整計畫 → `DISPATCH_THREAD=<代號> bin/dispatch <task.md> <cwd> hard`（預設 bg-hard：轉 `bin/dispatch-bg --hard`，獨立 `claude --bg` session、sonnet＋Opus advisor，prompt 第一行要求在 `<cwd>` 開 `git worktree add`；`DISPATCH_HARD_BACKEND=deep` 才派 deep）。

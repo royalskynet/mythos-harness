@@ -7,9 +7,10 @@
 - 機械稽核 JSON 事件：用了 write／edit／patch 或改狀態的 bash → 整個答案作廢（exit 3）。
 - 問題含 PII（錢包／交易雜湊／email／台灣手機／卡號）→ 不出機，exit 4，呼叫端自己查。
 - 答案要求每個結論附上跑的指令與原始輸出；呼叫端挑關鍵一條重跑對照，對不上就當沒查到。
-exit：0 有答案（stdout）｜2 用法｜3 越界｜4 PII｜5 全部模型失敗
+依賴：opencode（必要，沒裝 exit 6）；dcq（選用，沒裝就用內建免費模型清單）。
+exit：0 有答案（stdout）｜2 用法｜3 越界｜4 PII｜5 全部模型失敗｜6 沒裝 opencode（呼叫端改派 dispatcher）
 """
-import json, os, re, subprocess, sys
+import json, os, re, shutil, subprocess, sys
 
 OC = os.environ.get("QUICK_OC") or "opencode"
 DCQ = os.environ.get("DCQ_BIN") or os.path.expanduser("~/.local/bin/dcq")
@@ -105,6 +106,9 @@ def main(argv):
     if PII.search(q):
         print("問題含 PII，不送外部模型；呼叫端自己查", file=sys.stderr)
         return 4
+    if not shutil.which(OC):
+        print(f"quick: 找不到 {OC}（opencode 沒裝），改派 dispatcher", file=sys.stderr)
+        return 6
     for m in models():
         ev, why = run(m, cwd, q)
         if ev is None:
