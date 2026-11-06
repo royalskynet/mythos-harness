@@ -13,6 +13,9 @@ const GATE = path.join(ROOT, 'bin/dispatch-gate.mjs')
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-gate-test-'))
 const MYTHOS = path.join(TMP, 'mythos')
 fs.mkdirSync(path.join(MYTHOS, 'state'), { recursive: true })
+const WORKER_T = path.join(os.tmpdir(), `dispatch-gate-worker-${process.pid}`)
+fs.mkdirSync(WORKER_T, { recursive: true })
+process.on('exit', () => fs.rmSync(WORKER_T, { recursive: true, force: true }))
 process.on('exit', () => fs.rmSync(TMP, { recursive: true, force: true }))
 
 let seq = 0
@@ -25,7 +28,7 @@ function transcript(text) {
 function run(mode, payload) {
   return execFileSync(process.execPath, [GATE, mode], {
     input: JSON.stringify(payload),
-    env: { ...process.env, MYTHOS_DIR: MYTHOS, MYTHOS_TRANSCRIPT_DIR: TMP },
+    env: { ...process.env, MYTHOS_DIR: MYTHOS, MYTHOS_TRANSCRIPT_DIR: TMP, MYTHOS_WORKER_TRANSCRIPT_DIR: WORKER_T, MYTHOS_SELF_CAP: '' },
   }).toString()
 }
 
@@ -138,4 +141,126 @@ test('11-04：Router reply 不准請示「回好我就派」，問資訊與一�
     assert.equal(decision(pre('mcp__telegram__reply', { text: t })), 'deny', t)
   for (const t of ['已派 dispatcher：載入 watchdog、開新票', '你要幾點提醒？', '好，已處理', '完成：測試 32/32 pass'])
     assert.equal(decision(pre('mcp__telegram__reply', { text: t })), null, t)
+})
+
+// 11-06 自做上限：子代理／worker 連做 ≥20 次沒派工就擋，逼寫工單交 O
+function selfLog(prompt, n, { dispatchAt = -1 } = {}) {
+  const lines = [{ type: 'user', message: { role: 'user', content: prompt } }]
+  for (let i = 0; i < n; i++) {
+    const command = i === dispatchAt ? 'DISPATCH_THREAD=t1 bin/dispatch state/workorders/a.md /tmp mid' : `ls ${i}`
+    lines.push({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command } }] } })
+  }
+  return lines.map(l => JSON.stringify(l)).join('\n') + '\n'
+}
+function subagent(prompt, n, opt) {
+  const main = transcript('幫我看一下')
+  const dir = path.join(path.dirname(main), path.basename(main, '.jsonl'), 'subagents')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, 'agent-a9.jsonl'), selfLog(prompt, n, opt))
+  return main
+}
+const SUB = { agent_id: 'a9', agent_type: 'dispatcher' }
+
+test('自做上限：子代理 19 次放行、20 次擋', () => {
+  assert.equal(decision(pre('Bash', { command: 'ls' }, subagent('thread=x 查 log', 19), SUB)), null)
+  assert.equal(decision(pre('Bash', { command: 'ls' }, subagent('thread=x 查 log', 20), SUB)), 'deny')
+  assert.equal(decision(pre('Read', { file_path: '/tmp/a' }, subagent('thread=x 查 log', 30), SUB)), 'deny')
+})
+
+test('自做上限：超過後寫工單與派工照放；派工後重算（不是派一次就無限）', () => {
+  const tp = subagent('thread=x 查 log', 25)
+  assert.equal(decision(pre('Write', { file_path: path.join(MYTHOS, 'state/workorders/a.md') }, tp, SUB)), null)
+  assert.equal(decision(pre('Bash', { command: 'DISPATCH_THREAD=x bin/dispatch state/workorders/a.md /tmp mid' }, tp, SUB)), null)
+  assert.equal(decision(pre('Write', { file_path: '/tmp/other.md' }, tp, SUB)), 'deny')
+  assert.equal(decision(pre('Bash', { command: 'ls' }, subagent('thread=x 查 log', 23, { dispatchAt: 3 }), SUB)), null)
+  assert.equal(decision(pre('Bash', { command: 'ls' }, subagent('thread=x 查 log', 40, { dispatchAt: 3 }), SUB)), 'deny')
+})
+
+test('自做上限豁免：bg-hard、Bess 夜班；#手動 不豁免（Router 也打得出來）', () => {
+  for (const p of ['第一步：git -C /r worktree add -b bg-hard/x /tmp/x', '[Bess 夜班顧問請求 2026-11-06] DIR=/x'])
+    assert.equal(decision(pre('Bash', { command: 'ls' }, subagent(p, 50), SUB)), null, p)
+  assert.equal(decision(pre('Bash', { command: 'ls' }, subagent('#手動 自己查完', 50), SUB)), 'deny')
+})
+
+test('自做上限：bg worker transcript 也計；範圍外（deep）不計', () => {
+  const w = path.join(WORKER_T, 'w1.jsonl')
+  fs.writeFileSync(w, selfLog('查 log', 20))
+  assert.equal(decision(pre('Bash', { command: 'ls' }, w)), 'deny')
+  const other = path.join(os.tmpdir(), `deep-cap-${process.pid}.jsonl`)
+  fs.writeFileSync(other, selfLog('查 log', 50))
+  try { assert.equal(decision(pre('Bash', { command: 'ls' }, other)), null) } finally { fs.rmSync(other, { force: true }) }
+})
+
+test('自做上限：子代理自己的 transcript 找不到就不計', () => {
+  assert.equal(decision(pre('Bash', { command: 'ls' }, undefined, { agent_id: 'nope' })), null)
+})
+
+// 11-06 反向把關：累計不因續派歸零；真缺輪數走 [加輪請求] → 使用者回「加輪」→ Router 送 #加輪 +N
+function segLog(segs) {
+  const lines = []
+  for (const x of segs) {
+    if (x === 'D') lines.push({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'bin/dispatch state/workorders/a.md /tmp mid' } }] } })
+    else if (typeof x === 'string') lines.push({ type: 'user', message: { role: 'user', content: x } })
+    else for (let i = 0; i < x; i++) lines.push({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: `/tmp/${i}` } }] } })
+  }
+  return lines.map(l => JSON.stringify(l)).join('\n') + '\n'
+}
+function subSegs(segs) {
+  const main = transcript('幫我看一下')
+  const dir = path.join(path.dirname(main), path.basename(main, '.jsonl'), 'subagents')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, 'agent-a9.jsonl'), segLog(segs))
+  return main
+}
+const ls = tp => decision(pre('Bash', { command: 'ls' }, tp, SUB))
+
+test('加輪：續派訊息不歸零（舊漏洞：回「請續派」就繞過）', () => {
+  assert.equal(ls(subSegs(['查 log', 15, '繼續', 10])), 'deny')
+})
+
+test('加輪：#加輪 +N 加額度，預設 20，單次最多 40', () => {
+  assert.equal(ls(subSegs(['查 log', 20, '#加輪 +10', 9])), null)
+  assert.equal(ls(subSegs(['查 log', 20, '#加輪 +10', 10])), 'deny')
+  assert.equal(ls(subSegs(['查 log', 20, '#加輪', 19])), null)
+  assert.equal(ls(subSegs(['查 log', 20, '#加輪 +999', 39])), null)
+  assert.equal(ls(subSegs(['查 log', 20, '#加輪 +999', 40])), 'deny')
+})
+
+test('加輪：派工後重算；Bess 豁免只認第一則任務', () => {
+  assert.equal(ls(subSegs(['查 log', 18, 'D', 19])), null)
+  assert.equal(ls(subSegs(['查 log', 18, 'D', 20])), 'deny')
+  assert.equal(ls(subSegs(['查 log', 20, '[Bess 夜班顧問請求 x]', 5])), 'deny')
+})
+
+test('加輪：deny 訊息教子代理寫 [加輪請求]', () => {
+  const out = pre('Bash', { command: 'ls' }, subSegs(['查 log', 20]), SUB)
+  assert.match(JSON.parse(out).hookSpecificOutput.permissionDecisionReason, /\[加輪請求\]/)
+})
+
+function routerTx(...msgs) {
+  const p = path.join(TMP, `r${++seq}.jsonl`)
+  fs.writeFileSync(p, msgs.map(([kind, text]) => JSON.stringify(kind === 'channel'
+    ? { type: 'user', isMeta: true, origin: { kind: 'channel' }, message: { content: text } }
+    : { type: 'user', message: { content: text } })).join('\n') + '\n')
+  return p
+}
+
+test('加輪：Router 送 #加輪 要使用者 Telegram 回過「加輪」，自己批不了', () => {
+  const send = { to: 'a9', message: '#加輪 +20 繼續' }
+  assert.equal(decision(pre('SendMessage', send, routerTx(['channel', '幫我查 log']))), 'deny')
+  assert.equal(decision(pre('SendMessage', send, routerTx(['channel', '加輪']))), null)
+  // [派工回報]／子代理結果不是使用者授權
+  assert.equal(decision(pre('SendMessage', send, routerTx(['channel', '查 log'], ['tmux', '[派工回報] 加輪']))), 'deny')
+  assert.equal(decision(pre('Write', { file_path: path.join(MYTHOS, 'state/bg/t1.md'), content: '#加輪 +20' }, routerTx(['channel', '好']))), 'deny')
+  assert.equal(decision(pre('SendMessage', { to: 'a9', message: '繼續' }, routerTx(['channel', '好']))), null)
+})
+
+test('快查線：Router 可跑 bin/quick <絕對路徑> \'<問題>\'，夾帶指令或雙引號都擋', () => {
+  const tp = routerTx(['channel', '查一下'])
+  const bash = (command) => decision(pre('Bash', { command }, tp))
+  assert.equal(bash("bin/quick /Users/51mini/bots/mythos 'bin 底下有幾個 gate 檔；含 $HOME 也只是字'"), null)
+  assert.equal(bash("bin/quick /Users/51mini/bots/mythos 'q'; rm -rf /tmp/x"), 'deny')
+  assert.equal(bash('bin/quick /Users/51mini/bots/mythos "$(id)"'), 'deny')
+  assert.equal(bash("bin/quick relative/path 'q'"), 'deny')
+  assert.equal(bash("bin/quick /x 'a' 'b'"), 'deny')
 })

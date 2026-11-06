@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""快查線（11-06 使用者定）：唯讀問題丟 opencode run 的免費模型，不派 O、不開 Sonnet 迴圈。
+用法：bin/quick <cwd 絕對路徑> <問題…>   （問題也可從 stdin）
+- 模型＝dcq 免費 opencode 層（DCQ_ORDER=free dcq plan 的第 1 層，跟每日 probe／go-sync 同步），依序試，失敗換下一個。
+  免費層全敗才用 QUICK_PAID（預設 opencode-go/deepseek-v4.1-flash，訂閱＝花錢，所以墊底）；QUICK_PAID= 設空＝不用。
+- opencode plan agent、--dir <cwd>：讀不到 cwd 以外的檔（external_directory 是 ask，run 模式自動拒）。
+- 機械稽核 JSON 事件：用了 write／edit／patch 或改狀態的 bash → 整個答案作廢（exit 3）。
+- 問題含 PII（錢包／交易雜湊／email／台灣手機／卡號）→ 不出機，exit 4，呼叫端自己查。
+- 答案要求每個結論附上跑的指令與原始輸出；呼叫端挑關鍵一條重跑對照，對不上就當沒查到。
+exit：0 有答案（stdout）｜2 用法｜3 越界｜4 PII｜5 全部模型失敗
+"""
+import json, os, re, subprocess, sys
+
+OC = os.environ.get("QUICK_OC") or "opencode"
+DCQ = os.environ.get("DCQ_BIN") or os.path.expanduser("~/.local/bin/dcq")
+TIMEOUT = int(os.environ.get("QUICK_TIMEOUT") or 180)
+PAID = os.environ.get("QUICK_PAID", "opencode-go/deepseek-v4.1-flash")
+PII = re.compile(r"\b0x[0-9a-fA-F]{40}\b|\b0x[0-9a-fA-F]{64}\b|\bbc1[0-9a-z]{25,60}\b|\bT[1-9A-HJ-NP-Za-km-z]{33}\b"
+                 r"|[\w.+-]+@[\w-]+\.[\w.]+|(?<![\d.])(?:\+?886|0)9\d{2}-?\d{3}-?\d{3}(?!\d)|\b(?:\d[ -]?){15,16}\b")
+# 同 bess-maint MUTATE（只看殼層動作；ponytail: heredoc 內腳本寫檔看不到）
+MUTATE = re.compile(r"(^|[;&|(]\s*)(rm|mv|cp|tee|chmod|chown|ln|truncate|kill|pkill|touch|mkdir|dcq(?!\s+(?:rank|plan|status|ls|list|logs?|show|help)\b)|sqlite3(?!\s+-readonly))\s|sed\s+-i|launchctl\s+(bootout|bootstrap|kickstart|load|unload|kill|enable|disable)|git(\s+-C\s+\S+)?\s+(commit|push|reset|checkout|rebase|stash|add|pull|merge)\b|brew\s+(install|upgrade|uninstall)|curl\s+.*-X\s*(POST|PUT|DELETE|PATCH)|(?<![<>=\d-])>{1,2}\s*[~/$\w]")
+WRITE_TOOLS = {"write", "edit", "patch", "multiedit", "apply_patch"}
+ASK = """你是唯讀快查員。只准讀檔、跑唯讀指令（ls、cat、grep、git log/status/diff、ps、launchctl list、sqlite3 -readonly…），
+禁止寫檔、改設定、重啟服務、刪東西、送網路寫入請求。
+回答格式：第一行結論；之後每個結論各附「指令」與「原始輸出」（原樣貼，最多 15 行）。查不到就寫「查不到」與你試過的指令，不要猜。
+
+問題：
+{q}"""
+
+
+def models():
+    try:
+        out = subprocess.run([DCQ, "plan", "/dev/null"], capture_output=True, text=True, timeout=30,
+                             env=dict(os.environ, DCQ_ORDER="free")).stdout
+    except Exception:
+        out = ""
+    m = re.search(r"^\s*1 免費 opencode：(.+)$", out, re.M)
+    ms = m.group(1).split() if m else ["opencode-go/iceman-contributor-free", "opencode-go/beam-free"]
+    return ms + ([PAID] if PAID else [])
+
+
+def audit(events):
+    """回傳越界動作清單；空＝乾淨。"""
+    bad = []
+    for e in events:
+        p = e.get("part") or {}
+        if e.get("type") != "tool_use":
+            continue
+        tool = (p.get("tool") or "").lower()
+        inp = (p.get("state") or {}).get("input") or {}
+        if tool in WRITE_TOOLS:
+            bad.append(f"{tool} {inp.get('filePath', '')}".strip())
+        elif tool == "bash":
+            cmd = inp.get("command") or ""
+            rest = re.sub(r"'[^']*'|\"[^\"]*\"", "''", re.split(r"<<-?\s*['\"]?\w+", cmd)[0])
+            rest = re.sub(r"\d?>\s*/dev/null|\d>&\d", "", rest)
+            if MUTATE.search(rest):
+                bad.append(f"bash {cmd[:120]}")
+    return bad
+
+
+def answer(events):
+    return "".join((e.get("part") or {}).get("text") or "" for e in events if e.get("type") == "text").strip()
+
+
+def run(model, cwd, q):
+    try:
+        p = subprocess.run([OC, "run", "-m", model, "--agent", "plan", "--dir", cwd, "--format", "json", ASK.format(q=q)],
+                           capture_output=True, text=True, timeout=TIMEOUT, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return None, "timeout"
+    ev = []
+    for ln in p.stdout.splitlines():
+        try:
+            ev.append(json.loads(ln))
+        except ValueError:
+            pass
+    return ev, f"rc={p.returncode}"
+
+
+def selftest():
+    ev = lambda tool, **inp: {"type": "tool_use", "part": {"tool": tool, "state": {"input": inp}}}
+    assert audit([ev("read", filePath="/x"), ev("bash", command="grep -n foo a.txt 2>/dev/null | head")]) == []
+    assert audit([ev("bash", command="git -C /r log --oneline -3")]) == []
+    assert audit([ev("bash", command="echo 'a > b'")]) == []
+    assert audit([ev("write", filePath="/x")]) == ["write /x"]
+    assert audit([ev("bash", command="ls; rm -f a")]) and audit([ev("bash", command="echo hi > out.txt")])
+    assert audit([ev("bash", command="git -C /r commit -m x")]) and audit([ev("bash", command="sed -i '' s/a/b/ f")])
+    assert PII.search("寄給 a.b@" + "c.com") and PII.search("0912-345-678") and not PII.search("PID 12345 port 8799")
+    assert answer([{"type": "text", "part": {"text": "結論"}}, ev("read")]) == "結論"
+    print("quick selftest ok")
+
+
+def main(argv):
+    if argv == ["--selftest"]:
+        selftest()
+        return 0
+    if len(argv) < 1 or not argv[0].startswith("/") or not os.path.isdir(argv[0]):
+        print(__doc__.split("\n")[1], file=sys.stderr)
+        return 2
+    cwd, q = argv[0], " ".join(argv[1:]).strip() or sys.stdin.read().strip()
+    if not q:
+        print("沒有問題內容", file=sys.stderr)
+        return 2
+    if PII.search(q):
+        print("問題含 PII，不送外部模型；呼叫端自己查", file=sys.stderr)
+        return 4
+    for m in models():
+        ev, why = run(m, cwd, q)
+        if ev is None:
+            print(f"quick: {m} {why}，換下一個", file=sys.stderr)
+            continue
+        bad = audit(ev)
+        if bad:
+            print(f"quick: {m} 越界，答案作廢：{'；'.join(bad[:5])}", file=sys.stderr)
+            return 3
+        a = answer(ev)
+        if a:
+            print(f"[quick {m}]\n{a}")
+            return 0
+        print(f"quick: {m} 沒有答案（{why}），換下一個", file=sys.stderr)
+    print("quick: 全部模型失敗", file=sys.stderr)
+    return 5
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

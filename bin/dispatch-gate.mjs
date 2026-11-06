@@ -65,7 +65,7 @@ function textOf(content) {
   return content.filter(x => x && x.type === 'text').map(x => x.text || '').join('')
 }
 
-function lastUserText(transcriptPath) {
+function readEntries(transcriptPath) {
   if (!transcriptPath) return null
   let buf
   try {
@@ -82,15 +82,104 @@ function lastUserText(transcriptPath) {
   for (const line of buf.toString('utf8').split('\n')) {
     try { entries.push(JSON.parse(line)) } catch {}
   }
-  for (let i = entries.length - 1; i >= 0; i--) {
+  return entries
+}
+
+// 回傳最後一則使用者文字的 { i, text }；找不到回 null
+function lastUserEntry(entries) {
+  for (let i = (entries || []).length - 1; i >= 0; i--) {
     const e = entries[i]
     // Telegram channel 訊息被 harness 記成 isMeta:true＋origin.kind=channel（11-03 實測 36/36），
     // 舊版一律跳過 isMeta → #手動 從沒讀到、tier 也拿 [派工回報] 之類的舊文字判
     if (!e || e.type !== 'user' || (e.isMeta && e.origin?.kind !== 'channel')) continue
     const text = textOf(e.message?.content ?? e.content)
-    if (typeof text === 'string' && text.trim()) return text
+    if (typeof text === 'string' && text.trim()) return { i, text }
   }
   return null
+}
+
+function lastUserText(transcriptPath) {
+  return lastUserEntry(readEntries(transcriptPath))?.text ?? null
+}
+
+// 自做上限（11-06）：Mythos 的子代理／bg worker 收到任務後連做超過 SELF_CAP 次工具呼叫還沒派工 → 擋，逼它寫工單交 O。
+// 實測 11-06：53 個子代理有 11 個 >20 次沒派，最多 113 次，全是 Sonnet 自己做 mid 活。
+// 豁免：bg-hard（dispatch-bg 固定插入 worktree add -b bg-hard/，本來就該自己做）、Bess 夜班顧問。
+// 範圍外（deep-run 等 transcript 不在 Mythos／worker 專案目錄）不計，DeepSeek 本來就是便宜執行人。
+// 整個子代理累計、派過工才重算：舊版每則 SendMessage 歸零，子代理回「請續派」就繞過（11-06）。
+// 反向把關（11-06）：真的派不出去、輪數不夠的，子代理寫 [加輪請求] → Router 問使用者 → 使用者 Telegram 回「加輪」
+// → Router 送 `#加輪 +N`（N≤40，預設 20）→ 額度加 N。Router 送 #加輪 前閘會核對使用者最後一則 Telegram 訊息，Router 自己批不了。
+const WORKER_TRANSCRIPTS = path.resolve(process.env.MYTHOS_WORKER_TRANSCRIPT_DIR || path.join(os.homedir(), '.claude', 'projects',
+  (process.env.MYTHOS_WORKER_DIR || path.join(os.homedir(), 'bots', 'mythos-worker')).replace(/[/.]/g, '-')))
+const SELF_CAP = Number(process.env.MYTHOS_SELF_CAP) || 20
+export const DISPATCH_CMD = /\bbin\/dispatch(-bg|-retry|-cancel|-close)?\s/
+const CAP_EXEMPT = /Bess 夜班顧問請求|worktree add -b bg-hard\//
+const WO_FILE = /\/state\/(workorders|bg)\/[^/]+\.md$/
+const GRANT = /#加輪(?:\s*\+?(\d+))?/g
+const GRANT_MAX = 40
+
+export function grantOf(text) {
+  let n = 0
+  for (const m of String(text || '').matchAll(GRANT)) n += Math.min(GRANT_MAX, Math.max(1, Number(m[1]) || SELF_CAP))
+  return n
+}
+
+// 使用者最後一則 Telegram 訊息（origin.kind=channel）；[派工回報]、子代理結果不算
+function lastChannelText(transcriptPath) {
+  const es = readEntries(transcriptPath) || []
+  for (let i = es.length - 1; i >= 0; i--) {
+    const e = es[i]
+    if (e?.type !== 'user' || e.origin?.kind !== 'channel') continue
+    const text = textOf(e.message?.content ?? e.content)
+    if (typeof text === 'string' && text.trim()) return text
+  }
+  return ''
+}
+
+// 子代理的 payload.transcript_path 是主 session 的檔，自己的在 <session>/subagents/agent-<id>.jsonl
+function selfTranscript(payload) {
+  const tp = payload.transcript_path
+  if (!payload.agent_id) return tp
+  if (path.basename(tp).startsWith('agent-')) return tp
+  const p = path.join(path.dirname(tp), path.basename(tp, '.jsonl'), 'subagents', `agent-${payload.agent_id}.jsonl`)
+  return fs.existsSync(p) ? p : null  // 找不到自己的檔就不計（上限是省錢閘，不是安全閘）
+}
+
+function selfCap(payload, tool, input) {
+  const tp = payload.transcript_path
+  if (!tp) return
+  const abs = path.resolve(tp)
+  if (!abs.startsWith(ROUTER_TRANSCRIPTS + path.sep) && !abs.startsWith(WORKER_TRANSCRIPTS + path.sep)) return
+  if (tool === 'Bash' && DISPATCH_CMD.test(String(input.command || ''))) return
+  if ((tool === 'Write' || tool === 'Edit') && WO_FILE.test(String(input.file_path || ''))) return
+  const entries = readEntries(selfTranscript(payload)) || []
+  if (!lastUserEntry(entries)) return
+  let n = 0
+  let budget = SELF_CAP
+  let first = true
+  for (const e of entries) {
+    if (e?.type === 'user' && !(e.isMeta && e.origin?.kind !== 'channel')) {
+      const text = textOf(e.message?.content ?? e.content)
+      if (typeof text !== 'string') continue
+      if (first && CAP_EXEMPT.test(text)) return
+      first = false
+      budget += grantOf(text)
+      continue
+    }
+    if (e?.type !== 'assistant' || !Array.isArray(e.message?.content)) continue
+    for (const c of e.message.content) {
+      if (c?.type !== 'tool_use') continue
+      if (c.name === 'Bash' && DISPATCH_CMD.test(String(c.input?.command || ''))) { n = 0; budget = SELF_CAP; continue }
+      n++
+    }
+  }
+  if (n < budget) return
+  deny(`self-cap ${n}/${budget} tool=${tool}`, `你已自己做了 ${n} 次工具呼叫還沒派工（額度 ${budget}）。剩下的活交 O：把目前查到的脈絡寫成工單存 state/workorders/<名>.md（自含上下文、絕對路徑、## 驗收 一條會失敗的指令），再 \`DISPATCH_THREAD=<代號> bin/dispatch <task.md> <cwd> mid\`（真的難才用 hard）。這兩步不受上限限制。真的派不出去（要本段即時上下文、只差幾步就完成）才結束本回合，最後一則訊息第一行寫 \`[加輪請求] 已做 ${n} 次｜還要約 M 次｜為何不能派 O：<一句>\`，主 session 會問使用者，核准後續派你 \`#加輪 +M\`。`)
+}
+
+// Router 送出 #加輪（SendMessage／Agent／state/bg prompt）前，使用者最後一則 Telegram 訊息要含「加輪」
+function sendsGrant(tool, input) {
+  return ['SendMessage', 'Agent', 'Task', 'Write'].includes(tool) && grantOf(JSON.stringify(input)) > 0
 }
 
 // 派工憑證保護（11-02）：delegate-guard 的 p-*.sh／p-*.md／ledger-*.json 是派工當下的驗收 pin，
@@ -115,6 +204,8 @@ function pinGuard(tool, input) {
 // 字元集已排除 ;&|$` 與換行（JS 的 $ 不帶 m 旗標只認字串尾），另外再明擋一次，正規式被改寬也不會漏。
 export const ROUTER_BG_BASH = /^bin\/dispatch-bg( --thread [A-Za-z0-9-]+)? [A-Za-z0-9-]+ state\/bg\/[A-Za-z0-9._-]+\.md$/
 const BG_META = /[;&|$`\n\r]/
+// 快查線（11-06）：Router 可直接跑 bin/quick <絕對路徑> '<問題>'；問題只准包在單引號裡（裡面不展開），整行不可再接別的指令
+export const ROUTER_QUICK = /^bin\/quick \/[A-Za-z0-9._\/-]+ '[^'\n\r]+'$/
 const BG_DIR = path.join(MYTHOS, 'state', 'bg')
 function routerBgBash(cmd) {
   const c = String(cmd ?? '')
@@ -142,11 +233,15 @@ function pre(payload) {
     if (WORKER_DENY.test(tool)) deny(`worker ${tool}`, '子代理不直接對使用者發訊息：結論寫在你最後一則訊息，主 session 會轉述。')
     // pinGuard 只剩子代理會碰到；使用者訊息帶 #手動 才解（只解這一層）
     if (!(lastUserText(payload.transcript_path) || '').includes('#手動')) pinGuard(tool, input)
+    selfCap(payload, tool, input)
     allow()
   }
 
   if (tool === 'mcp__telegram__reply' && ASK_PERMISSION.test(String(input.text || ''))) {
     deny('reply 含請示句型', 'Mythos 一律直接做，不問使用者要不要做：把建議項派背景 dispatcher 執行，reply 改成「已派 dispatcher：<要做的事>」。真的缺使用者才知道的資訊，就直接問那個資訊，不用「回好」句型。')
+  }
+  if (sendsGrant(tool, input) && !/加輪/.test(lastChannelText(tp))) {
+    deny('#加輪 無使用者授權', '#加輪 只能在使用者用 Telegram 回「加輪」之後送出：先 reply 使用者「dispatcher <thread> 卡自做上限：<子代理寫的理由>。回「加輪」放行 +M 次」，等他回覆再續派。')
   }
   if (TELEGRAM_ALLOW.has(tool) || MAIN_ALLOW.has(tool)) allow()
   if (tool === 'Agent' || tool === 'Task') {
@@ -155,6 +250,7 @@ function pre(payload) {
     allow()
   }
   if (tool === 'Bash' && routerBgBash(input.command)) allow()
+  if (tool === 'Bash' && ROUTER_QUICK.test(String(input.command ?? ''))) allow()
   if (tool === 'Write' && routerBgWrite(input.file_path)) allow()
   deny(`主 session 不用 ${tool || '(空)'}`)
 }

@@ -29,8 +29,8 @@ thread=<代號>
 ## 判難度（先做，一次定）
 
 - 把任務寫進 `/tmp/dispatcher-<epoch>.md`，跑 `${DISPATCH_GATE_TRIAGE:-~/dev/dispatch-router/bin/triage} /tmp/dispatcher-<epoch>.md`（找不到 triage 就自己判）取 easy／mid／hard；你看完現狀覺得明顯判錯可以改判，在結果裡寫一句理由。
-- **easy**（唯讀查詢、跑一次測試、單檔小修、驗收重跑）：你自己做完。
-- **mid**：寫工單（自含上下文、絕對路徑、`## 驗收` 一條會失敗的指令）存 `__MYTHOS_DIR__/state/workorders/<名>.md` → `DISPATCH_THREAD=<代號> __MYTHOS_DIR__/bin/dispatch <task.md> <cwd> mid`（派 O，只走免費）。
+- **easy**（唯讀查詢、跑一次測試、單檔小修、驗收重跑）：你自己做完；唯讀查詢先跑 `__MYTHOS_DIR__/bin/quick <cwd 絕對路徑> '<問題>'`（opencode 免費模型、唯讀、秒級）：挑答案裡一條指令自己重跑對照，對得上才用；exit 非 0 或對不上就自己查。
+- **mid**：寫工單（自含上下文、絕對路徑、`## 驗收` 一條會失敗的指令）存 `__MYTHOS_DIR__/state/workorders/<名>.md` → `DISPATCH_THREAD=<代號> __MYTHOS_DIR__/bin/dispatch <task.md> <cwd> mid`（派 O 訂閱層，flash 首棒；訂閱＝花錢，只給要改東西的）。
 - **hard**：工單寫成完整計畫 → `DISPATCH_THREAD=<代號> __MYTHOS_DIR__/bin/dispatch <task.md> <cwd> hard`（預設改走 bg-hard，worktree 裡跑；`DISPATCH_HARD_BACKEND=deep` 才回舊的 deep-run）。
 - 派完就結束，不等、不輪詢；`__MYTHOS_DIR__/bin/dispatch-watch` 會把 `[派工回報]` 打回 Router，Router 再派你或新 worker 處理。結果寫「派 O／hard，id <id>」。
 
