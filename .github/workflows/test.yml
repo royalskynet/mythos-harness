@@ -55,3 +55,11 @@ jobs:
         timeout-minutes: 4
       - run: bash tests/test-dispatch-watch-deadline.sh
         timeout-minutes: 4
+      - run: bash tests/test-bg-autoheal.sh
+        timeout-minutes: 4
+      - run: bash tests/test-tg-snappy.sh
+        timeout-minutes: 4
+      - run: node --test tests/test_tg_progress.mjs
+        timeout-minutes: 4
+      - run: bash tests/test-ctx-guard.sh
+        timeout-minutes: 4

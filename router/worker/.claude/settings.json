@@ -10,6 +10,28 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"__MYTHOS_DIR__/bin/tg-progress.mjs\" pre --worker",
+            "async": true,
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"__MYTHOS_DIR__/bin/tg-progress.mjs\" stop --worker",
+            "async": true,
+            "timeout": 15
+          }
+        ]
       }
     ]
   },

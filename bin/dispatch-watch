@@ -63,6 +63,11 @@ BG_PROJECTS_DIR="${BG_PROJECTS_DIR:-$HOME/.claude/projects}"
 BG_RESULT_GRACE_SEC="${BG_RESULT_GRACE_SEC:-120}"
 # E2：bg 單 PASS 直發使用者（至多一次）。tg-send 跟本檔同目錄；告警只寫 brief-lines。
 TG_SEND_BIN="${TG_SEND_BIN:-$(cd "$(dirname "$0")" && pwd)/tg-send}"
+BRIEF_BIN="${BRIEF_BIN:-$(cd "$(dirname "$0")" && pwd)/brief-answer}"
+# 11-07 自癒：bg 單 FAIL／STALL 先機械重派一次（STALL 先 cancel），重派的再失敗才用秘書口吻直接告訴使用者；都不交 Router。BG_AUTOHEAL=0 關閉
+BG_AUTOHEAL="${BG_AUTOHEAL:-1}"
+DISPATCH_BG_BIN="${DISPATCH_BG_BIN:-$(cd "$(dirname "$0")" && pwd)/dispatch-bg}"
+DISPATCH_CANCEL_BIN="${DISPATCH_CANCEL_BIN:-$(cd "$(dirname "$0")" && pwd)/dispatch-cancel}"
 BRIEF_LINES_DIR="${BRIEF_LINES_DIR:-$HOME/.cache/brief-lines}"
 DIRECT_SENDING_SEC="${DIRECT_SENDING_SEC:-600}"
 # 11-06 未收尾檢查：FAIL／STALL／TIMEOUT 單超過 UNRESOLVED_HOURS 小時沒有收尾記錄就升級（至多 UNRESOLVED_MAX 次，之後寫 brief-lines 一次）。
@@ -181,11 +186,26 @@ summary_of() { # result檔
        END { if (ok) printf "%s", buf }' "$1" 2>/dev/null | sed '/./,$!d'
 }
 
-direct_send() { # job eid thread 摘要檔
-  local rc
+# 交辦原話：chat-prompt 寫的 prompt 用「> 」引用原話；舊式 prompt 取前 600 字
+task_ask() { # task檔
+  if [ -f "$1" ]; then
+    grep '^> ' "$1" 2>/dev/null | sed 's/^> //' | grep . || head -c 600 "$1"
+  else printf '%s\n' "$1"; fi
+}
+# 11-07：推給使用者的內容一律交 brief-answer 改寫成秘書口吻（不帶 thread 代號、路徑、commit），改寫失敗推原文
+brief_text() { # kind task < 資料
+  local out
+  mkdir -p "$(dirname "$WATCH_LOG")" 2>/dev/null
+  out="$(BRIEF_TIMEOUT="${BRIEF_TIMEOUT:-45}" "$BRIEF_BIN" --stdout --kind "$1" --q "$(task_ask "$2" | head -c 1200)" 9>&- 2>>"$WATCH_LOG")" || out=''
+  printf '%s\n' "$out"
+}
+direct_send() { # job eid thread 摘要檔 task
+  local rc text
   mkdir -p "$(dirname "$WATCH_LOG")" 2>/dev/null
   ledger_events set "$EVENTS_FILE" "$2" '{"direct":"sending"}' >/dev/null || return 0
-  { printf '✅ %s 做完了\n\n' "$3"; cat "$4"; printf '\n\n有問題直接回覆這則，我接著處理同一件事。\n'; } \
+  text="$(brief_text done "${5:-$1}" < "$4")"
+  [ -n "$(printf '%s' "$text" | tr -d '[:space:]')" ] || text="$(cat "$4")"
+  printf '%s\n' "$text" \
     | MYTHOS_DIR="$MYTHOS_DIR" "${NODE_BIN:-node}" "$TG_SEND_BIN" --thread "$3" --job "$1" 9>&- >/dev/null 2>>"$WATCH_LOG"
   rc=${PIPESTATUS[1]}
   case "$rc" in
@@ -193,6 +213,36 @@ direct_send() { # job eid thread 摘要檔
     1|97) ledger_events set "$EVENTS_FILE" "$2" '{"direct":"failed"}' >/dev/null; log "direct failed rc=$rc $2" ;;
     *) direct_unknown "$1" "$2" ;;
   esac
+}
+
+# 自癒（11-07）：0＝已處理（重派成功或已直接告訴使用者，事件已 ACK）；1＝沒處理，事件照舊交 Router
+bg_autoheal() { # id eid thread task extra kind(FAIL|STALL)
+  local id="$1" eid="$2" th="$3" task="$4" extra="$5" kind="$6" p rc text
+  [ "$BG_AUTOHEAL" = 1 ] || return 1
+  mkdir -p "$(dirname "$WATCH_LOG")" 2>/dev/null
+  case "$th" in ''|-|*[!A-Za-z0-9-]*) return 1 ;; esac
+  if [ "$kind" = STALL ]; then
+    MYTHOS_DIR="$MYTHOS_DIR" bash "$DISPATCH_CANCEL_BIN" "$id" 9>&- >/dev/null 2>>"$WATCH_LOG" || return 1
+  fi
+  case "${task##*/}" in
+    *-autoretry-*)
+      text="$(printf '這件事做到一半%s，自動重試一次也沒成功。狀況：%s\n' "$([ "$kind" = STALL ] && echo 卡住了 || echo 停了)" "$extra" | brief_text fail "$task")"
+      [ -n "$(printf '%s' "$text" | tr -d '[:space:]')" ] || text="這件事自動重試一次還是沒做完：${extra}。要再試或換做法，回這則跟我說。"
+      printf '%s\n' "$text" | MYTHOS_DIR="$MYTHOS_DIR" "${NODE_BIN:-node}" "$TG_SEND_BIN" --thread "$th" --job "$id" 9>&- >/dev/null 2>>"$WATCH_LOG"
+      rc=${PIPESTATUS[1]}
+      [ "$rc" = 0 ] || { log "autoheal 告知失敗 rc=$rc $eid"; return 1; }
+      ledger_events set "$EVENTS_FILE" "$eid" "{\"direct\":\"sent\",\"acked_at\":$now}" >/dev/null
+      log "autoheal 第二次失敗已告知使用者 $eid"
+      return 0 ;;
+  esac
+  p="$MYTHOS_DIR/state/bg/$th-autoretry-$now.md"
+  { printf '上一位 worker 中途%s（%s）。接續原任務做完：先檢查已完成的部分再沿用，不要整個重做。\n\n' \
+      "$([ "$kind" = STALL ] && echo 卡住被停掉 || echo 停止)" "$extra"
+    if [ -f "$task" ]; then cat "$task"; else printf '%s\n' "$task"; fi; } > "$p" 2>/dev/null || return 1
+  MYTHOS_DIR="$MYTHOS_DIR" bash "$DISPATCH_BG_BIN" "$th" "$p" 9>&- >/dev/null 2>>"$WATCH_LOG" || { log "autoheal 重派失敗 $eid"; return 1; }
+  ledger_events set "$EVENTS_FILE" "$eid" "{\"direct\":\"retried\",\"acked_at\":$now}" >/dev/null
+  log "autoheal 已重派 $eid → ${p##*/}"
+  return 0
 }
 
 # 0) 同 repo 佇列（C3）：持鎖把 queued 依 epoch 由舊到新拉起。同一個 top 已有 pending、未寫 rc 的 deep 票就跳過，
@@ -316,7 +366,7 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
             # 11-06：例行排程（daily-backlog）沒事時不推 TG；摘要第一行寫 [靜默] 就只 ack、不直發不交 Router
             ledger_events set "$EVENTS_FILE" "$id-PASS" "{\"direct\":\"quiet\",\"acked_at\":$now}" >/dev/null && log "quiet ack $id-PASS"
           else
-            direct_send "$id" "$id-PASS" "$thread" "$sf"
+            direct_send "$id" "$id-PASS" "$thread" "$sf" "$task"
           fi
         else
           log "no summary, Router 轉述 $id-PASS"
@@ -346,7 +396,9 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
         continue
       fi
       guide="判斷是否卡死；卡死就 bin/dispatch-cancel $id 再用 bin/dispatch-bg --thread $thread <prompt檔> 重派"
-      add_event "$id" STALL "$task" "$extra" "$guide" >/dev/null || late=1
+      if add_event "$id" STALL "$task" "$extra" "$guide" >/dev/null; then
+        [ "$backend" = bg ] && bg_autoheal "$id" "$id-STALL-$now" "$thread" "$task" "$extra" STALL || true
+      else late=1; fi
       todo "$last" "$now"
       ;;
     '')
@@ -355,7 +407,8 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
       case "$epoch" in ''|*[!0-9]*) continue ;; esac
       [ $((now - epoch)) -ge $((GONE_MIN * 60)) ] || continue
       guide="worker 已不在 claude agents 清單；要重來照原派工方式重派，或 bin/dispatch-close $id superseded \"<理由>\" 收掉"
-      add_event "$id" FAIL "$task" "worker 已不在 claude agents 清單（對帳）" "$guide" >/dev/null
+      add_event "$id" FAIL "$task" "worker 已不在 claude agents 清單（對帳）" "$guide" >/dev/null &&
+        { [ "$backend" = bg ] && bg_autoheal "$id" "$id-FAIL" "$thread" "$task" "worker 不見了" FAIL || true; }
       ;;
     stopped|failed|error|killed)
       # F4：worker 沒寫 result 就停了 → 終態 FAIL，不再永遠 pending
@@ -366,7 +419,8 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
         extra="$(bg_missing_extra "$id" "$sid")"
       fi
       guide="worker 已停止（${st}）；要重來照原派工方式重派（bg-hard 記得 --hard 與原 repo），或 bin/dispatch-cancel $id 收掉"
-      add_event "$id" FAIL "$task" "$extra" "$guide" >/dev/null
+      add_event "$id" FAIL "$task" "$extra" "$guide" >/dev/null &&
+        { [ "$backend" = bg ] && bg_autoheal "$id" "$id-FAIL" "$thread" "$task" "$extra" FAIL || true; }
       ;;
   esac
 done < <(ledger_fields < "$TSV")

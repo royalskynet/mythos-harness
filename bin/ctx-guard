@@ -1,0 +1,309 @@
+#!/opt/homebrew/bin/python3.12
+"""零 token context 守衛（11-06，t-ctx-guard）。由 bin/dispatch-watch 每輪呼叫，不新增輪詢、不用 LLM。
+
+量法：session transcript 最後一筆 assistant 的 usage：input + cache_creation + cache_read（實際值，不是字數）。
+閾值：>= CTX_WARN(180K) 記錄＋標「接近上限」；> CTX_LIMIT(200K)＝壓縮沒生效：
+  Router            -> 對 tmux pane 送 /compact（pane 忙就不送，15 分鐘冷卻）
+  bg worker（pending）-> claude stop（之後 dispatch-watch 出 FAIL，用新 session 重派）
+  其他（備援 dispatcher／deep）-> 只記錄＋標出
+輸出：stdout 無；狀態 state/ctx-guard.json；事件 logs/ctx-guard.log；待標出訊息 state/ctx-guard.notices.jsonl。
+子指令：
+  scan            掃描並執行上述動作
+  list            列出目前各 session 的 token（唯讀，不動作）
+  note <jobid>    印該 job 的警示一行（沒有就空）
+  notices         印未標出的全域訊息（每行一則）
+  ack-notices     把未標出的標為已標出
+閒置提早壓縮（11-07）：Router 最新 session >= CTX_ROUTER_IDLE(140K)、pane 閒、transcript CTX_ROUTER_QUIET_SEC(180) 秒沒動 -> 先送 /compact。
+env 覆寫（測試用）：CTX_WARN CTX_LIMIT CTX_WINDOW_MIN CTX_DIRS(:分隔) CTX_ROUTER_DIR CTX_STATE_DIR CTX_LOG
+  CTX_DRY=1（不執行 compact／stop）CTX_TSV CTX_CLAUDE_BIN CTX_TMUX_BIN
+"""
+import json, os, re, subprocess, sys, time, glob
+
+HOME = os.path.expanduser("~")
+MYTHOS = os.environ.get("MYTHOS_DIR") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+STATE = os.environ.get("CTX_STATE_DIR", os.path.join(MYTHOS, "state"))
+LOG = os.environ.get("CTX_LOG", os.path.join(MYTHOS, "logs", "ctx-guard.log"))
+WARN = int(os.environ.get("CTX_WARN", "180000"))
+LIMIT = int(os.environ.get("CTX_LIMIT", "200000"))
+WINDOW = int(os.environ.get("CTX_WINDOW_MIN", "360")) * 60
+ACTIVE = int(os.environ.get("CTX_ACTIVE_MIN", "10")) * 60  # mtime 在這之內才算「執行中」
+TSV = os.environ.get("CTX_TSV", os.path.join(STATE, "dispatch-jobs.tsv"))
+CLAUDE = os.environ.get("CTX_CLAUDE_BIN", "claude")
+TMUX = os.environ.get("CTX_TMUX_BIN", "tmux")
+DRY = os.environ.get("CTX_DRY") == "1"
+COOLDOWN = 15 * 60
+# 11-07 秒回 ⑥：Router 自動壓縮在約 167K 觸發、會卡住當下那則對話；改成 >= IDLE_COMPACT 且 pane 閒、
+# transcript QUIET 秒沒動（老闆沒在聊）就先送 /compact，壓縮落在空檔。CTX_ROUTER_IDLE=0 關閉。
+IDLE_COMPACT = int(os.environ.get("CTX_ROUTER_IDLE", "140000"))
+QUIET = int(os.environ.get("CTX_ROUTER_QUIET_SEC", "180"))
+
+slug = lambda p: re.sub(r"[^A-Za-z0-9]", "-", p)
+ROUTER_DIR = os.environ.get("CTX_ROUTER_DIR", os.path.join(HOME, ".claude/projects", slug(MYTHOS)))
+if os.environ.get("CTX_DIRS"):
+    DIRS = [d for d in os.environ["CTX_DIRS"].split(":") if d]
+else:
+    wdir = os.environ.get("MYTHOS_WORKER_DIR", os.path.join(HOME, "bots/mythos-worker"))
+    DIRS = [ROUTER_DIR, os.path.join(HOME, ".claude/projects", slug(wdir)),
+            os.path.join(HOME, ".deepclaude/config/projects")]
+STATE_F = os.path.join(STATE, "ctx-guard.json")
+NOTICE_F = os.path.join(STATE, "ctx-guard.notices.jsonl")
+
+
+def log(msg):
+    os.makedirs(os.path.dirname(LOG), exist_ok=True)
+    with open(LOG, "a") as f:
+        f.write("%s %s\n" % (time.strftime("%F %T"), msg))
+
+
+def last_usage(path, tail=600_000):
+    """回傳最後一筆 assistant usage 的 context token 數（沒有就 None）。"""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            f.seek(max(0, size - tail))
+            data = f.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    for line in reversed(data.splitlines()):
+        if '"usage"' not in line:
+            continue
+        try:
+            o = json.loads(line)
+        except ValueError:
+            continue
+        m = o.get("message") if isinstance(o, dict) else None
+        if not isinstance(m, dict) or o.get("type") != "assistant" or o.get("isApiErrorMessage"):
+            continue
+        if m.get("model") == "<synthetic>":
+            continue
+        u = m.get("usage")
+        if not isinstance(u, dict):
+            continue
+        keys = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+        # 11-06 實查：一個回合若呼叫 advisor，頂層 usage 是 iterations 加總（主模型讀兩次各 16.5 萬 = 33 萬），
+        # 不是 context 大小。context 以「最後一次主模型 message」的 usage 為準，advisor_message 不算。
+        its = u.get("iterations")
+        if isinstance(its, list):
+            msgs = [i for i in its if isinstance(i, dict) and i.get("type", "message") == "message"]
+            if msgs:
+                u = msgs[-1]
+        t = sum(int(u.get(k) or 0) for k in keys)
+        if t > 0:
+            return t
+    return None
+
+
+def kind_of(path):
+    if "/subagents/" in path:
+        return "subagent"
+    d = os.path.dirname(path)
+    if os.path.realpath(d) == os.path.realpath(ROUTER_DIR):
+        return "router"
+    if "/.deepclaude/" in path:
+        return "deep"
+    return "worker"
+
+
+def scan_sessions(now):
+    out = []
+    for d in DIRS:
+        for p in glob.glob(os.path.join(d, "**", "*.jsonl"), recursive=True):
+            try:
+                mt = os.path.getmtime(p)
+            except OSError:
+                continue
+            if now - mt > WINDOW:
+                continue
+            tok = last_usage(p)
+            if tok is None:
+                continue
+            sid = os.path.basename(p)[:-6]
+            out.append({"path": p, "sid": sid, "tokens": tok, "mtime": mt, "kind": kind_of(p)})
+    return sorted(out, key=lambda x: -x["tokens"])
+
+
+def pending_bg():
+    """短 id -> (job id, thread) 只含 pending 的 bg／bg-hard 票。"""
+    m = {}
+    try:
+        for ln in open(TSV):
+            f = ln.rstrip("\n").split("\t")
+            if len(f) >= 8 and f[4] == "pending" and f[7] in ("bg", "bg-hard"):
+                m[f[0][3:]] = f[0]
+    except OSError:
+        pass
+    return m
+
+
+def load_state():
+    try:
+        return json.load(open(STATE_F))
+    except (OSError, ValueError):
+        return {"sessions": {}, "notes": {}, "router_compact_at": 0}
+
+
+def save_state(st):
+    os.makedirs(STATE, exist_ok=True)
+    tmp = STATE_F + ".tmp"
+    json.dump(st, open(tmp, "w"), ensure_ascii=False, indent=1)
+    os.replace(tmp, STATE_F)
+
+
+def add_notice(text):
+    os.makedirs(STATE, exist_ok=True)
+    with open(NOTICE_F, "a") as f:
+        f.write(json.dumps({"ts": int(time.time()), "text": text, "shown": False}, ensure_ascii=False) + "\n")
+
+
+def router_idle():
+    try:
+        r = subprocess.run([TMUX, "-L", "mythos", "capture-pane", "-p", "-t", "mythos"],
+                           capture_output=True, text=True, timeout=10)
+    except Exception:
+        return False
+    return r.returncode == 0 and "esc to interrupt" not in "\n".join(r.stdout.splitlines()[-15:])
+
+
+def router_compact():
+    try:
+        subprocess.run([TMUX, "-L", "mythos", "send-keys", "-t", "mythos", "-l", "/compact"], timeout=10, check=True)
+        time.sleep(0.6)
+        subprocess.run([TMUX, "-L", "mythos", "send-keys", "-t", "mythos", "Enter"], timeout=10, check=True)
+        return True
+    except Exception:
+        return False
+
+
+def stop_worker(short):
+    try:
+        r = subprocess.run([CLAUDE, "stop", short], capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def k(n):
+    return "%dK" % round(n / 1000)
+
+
+def cmd_scan():
+    now = time.time()
+    st = load_state()
+    bg = pending_bg()
+    seen = {}
+    sessions = scan_sessions(now)
+    routers = [x for x in sessions if x["kind"] == "router"]
+    newest_router = max(routers, key=lambda x: x["mtime"])["sid"] if routers else None
+    for s in sessions:
+        sid, tok, kind = s["sid"], s["tokens"], s["kind"]
+        level = "over" if tok > LIMIT else "warn" if tok >= WARN else "ok"
+        prev = st["sessions"].get(sid, {})
+        seen[sid] = {"kind": kind, "tokens": tok, "level": level, "mtime": int(s["mtime"]),
+                     "peak": max(tok, prev.get("peak", 0)), "actioned": prev.get("actioned", 0)}
+        job = bg.get(sid[:8]) if kind == "worker" else None
+        if job:
+            seen[sid]["job"] = job
+        if (kind == "router" and sid == newest_router and IDLE_COMPACT and IDLE_COMPACT <= tok <= LIMIT
+                and now - s["mtime"] >= QUIET and now - seen[sid]["actioned"] >= COOLDOWN):
+            if DRY:
+                log("DRY router idle compact")
+            elif router_idle() and router_compact():
+                seen[sid]["actioned"] = int(now)
+                log("ACTION router idle /compact sent (tokens=%d)" % tok)
+        if level == "ok":
+            continue
+        label = job or kind
+        active = now - s["mtime"] <= ACTIVE
+        # 記錄：級別升高才記一次，避免每輪洗版
+        if prev.get("level") != level:
+            log("%s %s sid=%s tokens=%d (%s)" % ("OVER" if level == "over" else "WARN", label, sid[:8], tok, k(tok)))
+            if level == "over":
+                add_notice("context 超過 %s：%s 目前 %s（壓縮沒生效）" % (k(LIMIT), label, k(tok)))
+        if job:
+            st["notes"][job] = "context %s，%s" % (k(tok), "超過上限已停止 worker，請用新 session 重派" if level == "over" and active else "接近上限")
+        if level != "over" or not active:
+            continue
+        # 超限動作；同一 session 15 分鐘內不重複
+        if now - seen[sid]["actioned"] < COOLDOWN:
+            continue
+        if kind == "router":
+            if DRY:
+                log("DRY router compact")
+            elif router_idle() and router_compact():
+                seen[sid]["actioned"] = int(now)
+                log("ACTION router /compact sent (tokens=%d)" % tok)
+                add_notice("Router context %s 已自動送 /compact" % k(tok))
+            else:
+                log("ACTION router /compact skipped (pane busy or tmux fail), retry next round")
+        elif job:
+            if DRY:
+                log("DRY stop %s" % job)
+            else:
+                ok = stop_worker(sid[:8])
+                seen[sid]["actioned"] = int(now)
+                log("ACTION stop %s ok=%s tokens=%d" % (job, ok, tok))
+                add_notice("worker %s context %s 超限，已%s；請用新 session 重派（bin/dispatch-bg <thread> <檔>，檔內帶前情）" %
+                           (job, k(tok), "停止" if ok else "嘗試停止但失敗"))
+        else:
+            log("OVER-ONLY %s sid=%s tokens=%d（僅記錄，無自動動作）" % (kind, sid[:8], tok))
+    # 保留看過的；本輪沒掃到的舊紀錄 7 天後丟
+    for sid, v in st["sessions"].items():
+        if sid not in seen and now - v.get("mtime", 0) < 7 * 86400:
+            seen[sid] = v
+    st["sessions"] = seen
+    save_state(st)
+
+
+def cmd_list():
+    now = time.time()
+    bg = pending_bg()
+    rows = scan_sessions(now)
+    for s in rows:
+        lv = "OVER" if s["tokens"] > LIMIT else "WARN" if s["tokens"] >= WARN else "ok"
+        print("%-9s %-5s %7d  %s  %s  %s" % (s["kind"], lv, s["tokens"],
+              time.strftime("%m-%d %H:%M", time.localtime(s["mtime"])), s["sid"][:8], s["path"].replace(HOME, "~")))
+    if not rows:
+        print("（視窗內沒有 session）")
+
+
+def cmd_note(job):
+    print(load_state().get("notes", {}).get(job, ""))
+
+
+def read_notices():
+    try:
+        return [json.loads(l) for l in open(NOTICE_F) if l.strip()]
+    except (OSError, ValueError):
+        return []
+
+
+def cmd_notices():
+    for n in read_notices():
+        if not n.get("shown"):
+            print(n["text"].replace("\n", " "))
+
+
+def cmd_ack():
+    ns = read_notices()
+    cut = time.time() - 3 * 86400
+    ns = [dict(n, shown=True) if not n.get("shown") else n for n in ns]
+    ns = [n for n in ns if n["ts"] > cut]
+    if os.path.exists(NOTICE_F) or ns:
+        with open(NOTICE_F, "w") as f:
+            for n in ns:
+                f.write(json.dumps(n, ensure_ascii=False) + "\n")
+
+
+if __name__ == "__main__":
+    c = sys.argv[1] if len(sys.argv) > 1 else "scan"
+    try:
+        if c == "scan": cmd_scan()
+        elif c == "list": cmd_list()
+        elif c == "note": cmd_note(sys.argv[2] if len(sys.argv) > 2 else "")
+        elif c == "notices": cmd_notices()
+        elif c == "ack-notices": cmd_ack()
+        else:
+            print(__doc__); sys.exit(2)
+    except Exception as e:  # 守衛自己壞了不能拖垮 dispatch-watch
+        log("ERROR %s: %r" % (c, e))
+        sys.exit(0 if c != "list" else 1)

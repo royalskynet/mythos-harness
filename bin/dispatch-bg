@@ -4,6 +4,9 @@
 # 用法：
 #   bin/dispatch-bg <thread> <prompt檔>          新開一張
 #   bin/dispatch-bg --thread <thread> <prompt檔> ledger 找同 thread 最新 bg 列的 sessionId 續派，找不到就新開
+#   bin/dispatch-bg --from-chat <thread> [--note '<補充>'] --transcript <Router transcript>
+#                                                prompt 由 bin/chat-prompt.mjs 從 transcript 抓老闆原話自動寫（11-07 秒回；
+#                                                Router 只寫 --from-chat <thread>，--transcript 由 dispatch-gate 補）
 #   bin/dispatch-bg --hard [--cwd <repo>] …      同上，worker 用 hard.json（sonnet＋Opus advisor），backend=bg-hard；
 #                                                prompt 第一行要求在 <repo> 開 git worktree（bin/dispatch hard 會帶 --cwd）
 # 成功：stdout 印 ledger id（bg-<短id>）；取不到 claude 印的短 id → stderr 原文、ledger 不寫、exit 1。
@@ -27,12 +30,17 @@ hard=''
 thread=''
 thflag=''
 tcwd=''
+fromchat=''
+chat_tp=''
+chat_note=''
 while [ $# -gt 0 ]; do
   case "$1" in
     --hard) hard=1 ;;
     --thread) thread="${2:-}"; thflag=1; shift ;;
     --thread=*) thread="${1#--thread=}"; thflag=1 ;;
     --cwd) tcwd="${2:-}"; shift ;;
+    --from-chat) fromchat=1 ;;
+    --transcript) chat_tp="${2:-}"; shift ;;
     --) shift; break ;;
     -) break ;;  # thread=-（bin/dispatch 沒帶 DISPATCH_THREAD）
     -*) echo "不認得的選項：$1" >&2; exit 2 ;;
@@ -40,6 +48,21 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+if [ -n "$fromchat" ]; then
+  [ -n "$thread" ] || { thread="${1:-}"; shift || true; }
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --note) chat_note="${2:-}"; shift ;;
+      --transcript) chat_tp="${2:-}"; shift ;;
+      *) echo "--from-chat 不認得的參數：$1" >&2; exit 2 ;;
+    esac
+    shift
+  done
+  case "$thread" in ''|-|*[!A-Za-z0-9-]*) echo "用法：bin/dispatch-bg --from-chat <thread> [--note '<補充>'] --transcript <檔>" >&2; exit 2 ;; esac
+  [ -n "$chat_tp" ] || { echo "--from-chat 缺 --transcript（Router 走 dispatch-gate 會自動補）" >&2; exit 2; }
+  gen="$(MYTHOS_DIR="$MYTHOS_DIR" node "$ROOT_DIR/bin/chat-prompt.mjs" "$chat_tp" "$thread" "$chat_note")" || exit 2
+  set -- "$thread" "$gen"
+fi
 # 用法 2 是 [--hard] --thread <thread> <prompt檔>；用法 1 是 [--hard] <thread> <prompt檔>
 [ -n "$thread" ] || thread="${1:-}"
 prompt="${2:-}"

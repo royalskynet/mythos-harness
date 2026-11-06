@@ -8,6 +8,7 @@
 - 問題含 PII（錢包／交易雜湊／email／台灣手機／卡號）→ 不出機，exit 4，呼叫端自己查。
 - 答案要求每個結論附上跑的指令與原始輸出；呼叫端挑關鍵一條重跑對照，對不上就當沒查到。
 依賴：opencode（必要，沒裝 exit 6）；dcq（選用，沒裝就用內建免費模型清單）。
+用法加 --push（bin/quick --push <cwd> '<問題>'）：答案交 bin/brief-answer 直送，stdout 只回「已直送」。
 exit：0 有答案（stdout）｜2 用法｜3 越界｜4 PII｜5 全部模型失敗｜6 沒裝 opencode（呼叫端改派 dispatcher）
 """
 import json, os, re, shutil, subprocess, sys
@@ -15,6 +16,7 @@ import json, os, re, shutil, subprocess, sys
 OC = os.environ.get("QUICK_OC") or "opencode"
 DCQ = os.environ.get("DCQ_BIN") or os.path.expanduser("~/.local/bin/dcq")
 TIMEOUT = int(os.environ.get("QUICK_TIMEOUT") or 180)
+BRIEF = os.environ.get("QUICK_BRIEF") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "brief-answer")
 PAID = os.environ.get("QUICK_PAID", "opencode-go/deepseek-v4.1-flash")
 PII = re.compile(r"\b0x[0-9a-fA-F]{40}\b|\b0x[0-9a-fA-F]{64}\b|\bbc1[0-9a-z]{25,60}\b|\bT[1-9A-HJ-NP-Za-km-z]{33}\b"
                  r"|[\w.+-]+@[\w-]+\.[\w.]+|(?<![\d.])(?:\+?886|0)9\d{2}-?\d{3}-?\d{3}(?!\d)|\b(?:\d[ -]?){15,16}\b")
@@ -96,6 +98,8 @@ def main(argv):
     if argv == ["--selftest"]:
         selftest()
         return 0
+    push = bool(argv) and argv[0] == "--push"  # 11-07：答案交 brief-answer 寫成秘書口吻直送 Telegram
+    argv = argv[1:] if push else argv
     if len(argv) < 1 or not argv[0].startswith("/") or not os.path.isdir(argv[0]):
         print(__doc__.split("\n")[1], file=sys.stderr)
         return 2
@@ -120,6 +124,9 @@ def main(argv):
             return 3
         a = answer(ev)
         if a:
+            if push and subprocess.run([BRIEF, "--kind", "quick", "--q", q], input=a, text=True).returncode == 0:
+                print("已直送使用者（秘書口吻），不用再 reply。")
+                return 0
             print(f"[quick {m}]\n{a}")
             return 0
         print(f"quick: {m} 沒有答案（{why}），換下一個", file=sys.stderr)

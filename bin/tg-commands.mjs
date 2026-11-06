@@ -55,13 +55,21 @@ function botToken() {
 }
 
 async function api(method, body) {
-  const res = await fetch(`https://api.telegram.org/bot${botToken()}/${method}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  if (!res.ok) log(`${method} failed: HTTP ${res.status}`) // 不印 body：可能回放 token
-  return res.ok
+  // 測試用：不連網，只記呼叫
+  if (process.env.TG_API_STUB) return fs.appendFileSync(process.env.TG_API_STUB, `${method} ${JSON.stringify(body)}\n`), true
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${botToken()}/${method}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (!res.ok) log(`${method} failed: HTTP ${res.status}`) // 不印 body：可能回放 token
+    return res.ok
+  } catch (e) {
+    // 斷網／讀不到 token：typing 每 4 秒打一次，丟出去會變 unhandled rejection 把 proxy 整個帶走
+    log(`${method} failed: ${e.message.replace(/bot[0-9]+:[\w-]+/g, 'bot***')}`)
+    return false
+  }
 }
 
 const send = (chat_id, text) => api('sendMessage', { chat_id, text })
@@ -103,7 +111,46 @@ async function type(line) {
 // claude 正在跑工具時，狀態列會有「esc to interrupt」。這時打斜線指令只會被當成插話排隊，
 // 輸出還沒出來就抓 pane，後面的 Escape 更會把正在跑的工具打斷（10-07 /ctx 打斷 fixindex find）。
 const BUSY = '⏳ Mythos 正在跑工具，現在送指令會打斷它。等它做完再試，要停先用 /stop。'
-const isBusy = async () => /esc to interrupt/.test(await tmux('capture-pane', '-p', '-t', PANE))
+const isBusy = async () =>
+  process.env.TG_BUSY_FILE ? fs.existsSync(process.env.TG_BUSY_FILE) : /esc to interrupt/.test(await tmux('capture-pane', '-p', '-t', PANE))
+
+// 秒回（11-07，借鏡 Hermes gateway _keep_typing 與 LangGraph double-texting 的 enqueue＋先回）：
+// 訊息一進來就每 4 秒補送 typing（Telegram 的 typing 5 秒就消失），直到 Router 對這個 chat 送出 reply、
+// pane 閒下來或 10 分鐘；Router 正在忙（這則只能排隊）就先回「收到，等等處理」。零 token。
+const TYPING_MS = Number(process.env.TG_TYPING_MS) || 4000
+const TYPING_MAX = 10 * 60_000
+const ACK_BUSY = '收到，等等處理'
+const typing = new Map()
+function stopTyping(chat) {
+  clearInterval(typing.get(chat))
+  typing.delete(chat)
+}
+function startTyping(chat) {
+  stopTyping(chat)
+  const t0 = Date.now()
+  const timer = setInterval(async () => {
+    const age = Date.now() - t0
+    if (age > TYPING_MAX || (age > 2 * TYPING_MS && !(await isBusy()))) return stopTyping(chat)
+    if (typing.get(chat) === timer) void api('sendChatAction', { chat_id: chat, action: 'typing' })
+  }, TYPING_MS)
+  typing.set(chat, timer)
+  void api('sendChatAction', { chat_id: chat, action: 'typing' })
+}
+async function onUserMessage(chat) {
+  if (!chat) return
+  if (await isBusy()) void send(chat, ACK_BUSY)
+  startTyping(chat)
+}
+// claude → plugin 的 tools/call：Router 對某 chat 送出 reply 就停那個 chat 的 typing
+export function replyChat(line) {
+  if (!line.includes('tools/call')) return null
+  try {
+    const m = JSON.parse(line)
+    return m?.method === 'tools/call' && m.params?.name === 'reply' ? String(m.params.arguments?.chat_id ?? '') || null : null
+  } catch {
+    return null
+  }
+}
 
 // 跑一個只在 TUI 裡顯示結果的指令（/status、/usage…），把 pane 文字抓回來。忙碌中回 BUSY，不送鍵。
 async function run(line, { wait = 2500, dismiss = true, scrollback = false } = {}) {
@@ -307,6 +354,7 @@ function directFollowup(th, job, text) {
 async function handleChannel(msg, line) {
   const orig = msg.params?.content
   if (intercept(msg.params)) return
+  await onUserMessage(msg.params?.meta?.chat_id)
   const hit = replyTag(msg.params)
   // /fix、/wheel 展開會改 content：改過就送改過的（11-04 前送的是原始 line，展開內容被丟掉）；沒改才原樣轉發
   if (!hit) return process.stdout.write((msg.params?.content === orig ? line : JSON.stringify(msg)) + '\n')
@@ -400,7 +448,12 @@ const child = spawn(argv[0], argv.slice(1), {
   env: process.env,
   detached: true, // 自成程序群組：bun run 底下的 server.ts 是孫行程，要整群一起收
 })
-process.stdin.pipe(child.stdin)
+// 逐行轉給 plugin（JSON-RPC 一行一則），順便看 Router 何時 reply 好停 typing
+createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line', line => {
+  const chat = replyChat(line)
+  if (chat) stopTyping(chat)
+  child.stdin.write(line + '\n')
+})
 // claude 死掉 → stdin 關 → 收掉子行程再退，否則 server.ts 變孤兒繼續搶 getUpdates。
 // 10-06 實測：孤兒 server.ts 不理 SIGTERM，所以 2 秒後補 SIGKILL。
 const killGroup = sig => {

@@ -222,4 +222,17 @@ echo f4000014-0000-0000-0000-000000000000 > "$FAKE_ID"
 id14="$(bash "$ROOT/bin/dispatch-bg" --cwd "$REPO_A" t-f4 "$TMP/p.md")"
 [ "$(field "$id14" 6)" = "$MYTHOS_WORKER_DIR" ] || fail "13：非 hard 帶 --cwd 竟記成 repoA：$(grep "$id14" "$TSV")"
 echo '(13) ok'
+# 14) --from-chat：prompt 由 chat-prompt.mjs 從 transcript 抓老闆原話自動寫，claude 拿到的內容含原話與補充
+RT="$TMP/router.jsonl"
+printf '%s\n' '{"type":"user","origin":{"kind":"channel"},"message":{"content":"<channel source=\"telegram\" chat_id=\"1\">\n幫我把 log 輪替修好\n</channel>"}}' \
+  '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"mcp__telegram__reply","input":{"text":"收到"}}]}}' > "$RT"
+echo f5000015-0000-0000-0000-000000000000 > "$FAKE_ID"
+: > "$CLAUDE_LOG"
+id15="$(bash "$ROOT/bin/dispatch-bg" --from-chat t-fc --note '先看 launchd' --transcript "$RT")"
+[ "$id15" = bg-f5000015 ] || fail "14：from-chat id 不對：$id15"
+grep -q '幫我把 log 輪替修好' "$CLAUDE_LOG" || fail "14：worker prompt 沒帶原話：$(cat "$CLAUDE_LOG")"
+grep -q '先看 launchd' "$CLAUDE_LOG" || fail "14：worker prompt 沒帶補充"
+case "$(field "$id15" 3)" in */mythos/state/bg/t-fc-*.md) ;; *) fail "14：ledger task 欄應是自動 prompt 檔：$(field "$id15" 3)" ;; esac
+bash "$ROOT/bin/dispatch-bg" --from-chat t-fc 2>/dev/null && fail '14：缺 --transcript 應拒跑'
+echo '(14) ok'
 echo 'DISPATCH-BG PASS'
