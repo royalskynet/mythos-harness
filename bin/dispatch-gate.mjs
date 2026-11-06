@@ -104,7 +104,8 @@ function lastUserText(transcriptPath) {
 
 // 自做上限（11-06）：Mythos 的子代理／bg worker 收到任務後連做超過 SELF_CAP 次工具呼叫還沒派工 → 擋，逼它寫工單交 O。
 // 實測 11-06：53 個子代理有 11 個 >20 次沒派，最多 113 次，全是 Sonnet 自己做 mid 活。
-// 豁免：bg-hard（dispatch-bg 固定插入 worktree add -b bg-hard/，本來就該自己做）、Bess 夜班顧問。
+// 豁免：bg-hard（dispatch-bg 固定插入 worktree add -b bg-hard/，本來就該自己做）；另可在 state/cap-exempt.txt（不進版控）
+// 一行一個字串，任務第一則含其中任一就豁免（本機用來放夜班顧問這類自家排程的固定開頭）。
 // 範圍外（deep-run 等 transcript 不在 Mythos／worker 專案目錄）不計，DeepSeek 本來就是便宜執行人。
 // 整個子代理累計、派過工才重算：舊版每則 SendMessage 歸零，子代理回「請續派」就繞過（11-06）。
 // 反向把關（11-06）：真的派不出去、輪數不夠的，子代理寫 [加輪請求] → Router 問使用者 → 使用者 Telegram 回「加輪」
@@ -113,7 +114,9 @@ const WORKER_TRANSCRIPTS = path.resolve(process.env.MYTHOS_WORKER_TRANSCRIPT_DIR
   (process.env.MYTHOS_WORKER_DIR || path.join(os.homedir(), 'bots', 'mythos-worker')).replace(/[/.]/g, '-')))
 const SELF_CAP = Number(process.env.MYTHOS_SELF_CAP) || 20
 export const DISPATCH_CMD = /\bbin\/dispatch(-bg|-retry|-cancel|-close)?\s/
-const CAP_EXEMPT = /Bess 夜班顧問請求|worktree add -b bg-hard\//
+const CAP_EXEMPT_FILE = process.env.MYTHOS_CAP_EXEMPT_FILE || path.join(MYTHOS, 'state', 'cap-exempt.txt')
+const CAP_EXEMPT_EXTRA = (() => { try { return fs.readFileSync(CAP_EXEMPT_FILE, 'utf8').split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#')) } catch { return [] } })()
+const capExempt = (text) => /worktree add -b bg-hard\//.test(text) || CAP_EXEMPT_EXTRA.some(p => text.includes(p))
 const WO_FILE = /\/state\/(workorders|bg)\/[^/]+\.md$/
 const GRANT = /#加輪(?:\s*\+?(\d+))?/g
 const GRANT_MAX = 40
@@ -161,7 +164,7 @@ function selfCap(payload, tool, input) {
     if (e?.type === 'user' && !(e.isMeta && e.origin?.kind !== 'channel')) {
       const text = textOf(e.message?.content ?? e.content)
       if (typeof text !== 'string') continue
-      if (first && CAP_EXEMPT.test(text)) return
+      if (first && capExempt(text)) return
       first = false
       budget += grantOf(text)
       continue

@@ -36,7 +36,7 @@ case "$merge_sec" in ''|*[!0-9]*) echo "LATENCY_MERGE_SEC 要是非負整數：$
 
 # 目錄不寫死使用者名：~/bots/mythos 的 transcript 目錄＝路徑把非英數字換成 -
 user="$(basename "$HOME")"
-dir="${MYTHOS_TRANSCRIPT_DIR:-$HOME/.claude/projects/$(printf '%s' "$HOME/bots/mythos" | sed 's/[^A-Za-z0-9]/-/g')}"
+dir="${MYTHOS_TRANSCRIPT_DIR:-$HOME/.claude/projects/$(printf '%s' "$(cd "$(dirname "$0")/.." && pwd)" | sed 's/[^A-Za-z0-9]/-/g')}"
 [ -d "$dir" ] || { echo "找不到 transcript 目錄：$dir" >&2; exit 1; }
 
 # ponytail: node 一次載入所有近 N 天的 jsonl；單機 transcript 量級沒問題，再多就改成逐檔流式（已被 node 的 readline 逐行處理）

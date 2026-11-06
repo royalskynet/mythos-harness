@@ -23,7 +23,8 @@ import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 const HOME = os.homedir()
-const TMUX = '/opt/homebrew/bin/tmux'
+// launchd 起的行程 PATH 常沒有 Homebrew：先試常見位置，都沒有才靠 PATH
+const TMUX = process.env.TMUX_BIN || ['/opt/homebrew/bin/tmux', '/usr/local/bin/tmux', '/usr/bin/tmux'].find(p => fs.existsSync(p)) || 'tmux'
 const SOCKET = 'mythos'
 const PANE = 'mythos'
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR || path.join(HOME, '.mythos/telegram')

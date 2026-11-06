@@ -65,9 +65,13 @@ FENCE = re.compile(r'^```(bash|sh|zsh|shell)?[ \t]*$')
 def extract(wo):
     # wo-verify 只收「``` 區塊」；`### 驗收` 這種小節標題會被把它當章的 wo-verify 判成 none。
     # 有區塊 → 原樣用 wo-verify --dump；沒有 → 自己收驗收章節（含未圍欄的行），找不到才 exit 2。
-    r = subprocess.run(['wo-verify', wo, '--dump'], capture_output=True, text=True)
-    if r.returncode == 0:
-        return r.stdout
+    # wo-verify 選用（orchestrator 的工具）：沒裝就直接走下面的自收（11-07：沒裝時丟例外 rc=1 被 dispatch 當 STALE 拒派）
+    try:
+        r = subprocess.run(['wo-verify', wo, '--dump'], capture_output=True, text=True)
+        if r.returncode == 0:
+            return r.stdout
+    except FileNotFoundError:
+        pass
     lines, out, ins, fence, lvl = open(wo, encoding='utf-8').read().splitlines(), [], False, False, 0
     for l in lines:
         if l.startswith('```'):

@@ -14,6 +14,8 @@ const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-gate-test-'))
 const MYTHOS = path.join(TMP, 'mythos')
 fs.mkdirSync(path.join(MYTHOS, 'state'), { recursive: true })
 const WORKER_T = path.join(os.tmpdir(), `dispatch-gate-worker-${process.pid}`)
+const EXEMPT_F = path.join(TMP, 'cap-exempt.txt')
+fs.writeFileSync(EXEMPT_F, '# 測試用\n夜班顧問請求\n')
 fs.mkdirSync(WORKER_T, { recursive: true })
 process.on('exit', () => fs.rmSync(WORKER_T, { recursive: true, force: true }))
 process.on('exit', () => fs.rmSync(TMP, { recursive: true, force: true }))
@@ -28,7 +30,7 @@ function transcript(text) {
 function run(mode, payload) {
   return execFileSync(process.execPath, [GATE, mode], {
     input: JSON.stringify(payload),
-    env: { ...process.env, MYTHOS_DIR: MYTHOS, MYTHOS_TRANSCRIPT_DIR: TMP, MYTHOS_WORKER_TRANSCRIPT_DIR: WORKER_T, MYTHOS_SELF_CAP: '' },
+    env: { ...process.env, MYTHOS_DIR: MYTHOS, MYTHOS_TRANSCRIPT_DIR: TMP, MYTHOS_WORKER_TRANSCRIPT_DIR: WORKER_T, MYTHOS_SELF_CAP: '', MYTHOS_CAP_EXEMPT_FILE: EXEMPT_F },
   }).toString()
 }
 
@@ -176,8 +178,8 @@ test('自做上限：超過後寫工單與派工照放；派工後重算（不�
   assert.equal(decision(pre('Bash', { command: 'ls' }, subagent('thread=x 查 log', 40, { dispatchAt: 3 }), SUB)), 'deny')
 })
 
-test('自做上限豁免：bg-hard、Bess 夜班；#手動 不豁免（Router 也打得出來）', () => {
-  for (const p of ['第一步：git -C /r worktree add -b bg-hard/x /tmp/x', '[Bess 夜班顧問請求 2026-11-06] DIR=/x'])
+test('自做上限豁免：bg-hard、cap-exempt.txt 字串；#手動 不豁免（Router 也打得出來）', () => {
+  for (const p of ['第一步：git -C /r worktree add -b bg-hard/x /tmp/x', '[夜班顧問請求 2026-11-06] DIR=/x'])
     assert.equal(decision(pre('Bash', { command: 'ls' }, subagent(p, 50), SUB)), null, p)
   assert.equal(decision(pre('Bash', { command: 'ls' }, subagent('#手動 自己查完', 50), SUB)), 'deny')
 })
@@ -226,10 +228,10 @@ test('加輪：#加輪 +N 加額度，預設 20，單次最多 40', () => {
   assert.equal(ls(subSegs(['查 log', 20, '#加輪 +999', 40])), 'deny')
 })
 
-test('加輪：派工後重算；Bess 豁免只認第一則任務', () => {
+test('加輪：派工後重算；cap-exempt 豁免只認第一則任務', () => {
   assert.equal(ls(subSegs(['查 log', 18, 'D', 19])), null)
   assert.equal(ls(subSegs(['查 log', 18, 'D', 20])), 'deny')
-  assert.equal(ls(subSegs(['查 log', 20, '[Bess 夜班顧問請求 x]', 5])), 'deny')
+  assert.equal(ls(subSegs(['查 log', 20, '[夜班顧問請求 x]', 5])), 'deny')
 })
 
 test('加輪：deny 訊息教子代理寫 [加輪請求]', () => {
@@ -258,9 +260,9 @@ test('加輪：Router 送 #加輪 要使用者 Telegram 回過「加輪」，自
 test('快查線：Router 可跑 bin/quick <絕對路徑> \'<問題>\'，夾帶指令或雙引號都擋', () => {
   const tp = routerTx(['channel', '查一下'])
   const bash = (command) => decision(pre('Bash', { command }, tp))
-  assert.equal(bash("bin/quick /Users/51mini/bots/mythos 'bin 底下有幾個 gate 檔；含 $HOME 也只是字'"), null)
-  assert.equal(bash("bin/quick /Users/51mini/bots/mythos 'q'; rm -rf /tmp/x"), 'deny')
-  assert.equal(bash('bin/quick /Users/51mini/bots/mythos "$(id)"'), 'deny')
+  assert.equal(bash("bin/quick /home/u/repo 'bin 底下有幾個 gate 檔；含 $HOME 也只是字'"), null)
+  assert.equal(bash("bin/quick /home/u/repo 'q'; rm -rf /tmp/x"), 'deny')
+  assert.equal(bash('bin/quick /home/u/repo "$(id)"'), 'deny')
   assert.equal(bash("bin/quick relative/path 'q'"), 'deny')
   assert.equal(bash("bin/quick /x 'a' 'b'"), 'deny')
 })
