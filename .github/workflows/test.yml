@@ -3,31 +3,54 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: macos-latest
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - run: command -v timeout || command -v gtimeout || brew install coreutils
       - run: bash tests/test_router_template.sh
+        timeout-minutes: 4
       - run: bash tests/test_p1_harness.sh
+        timeout-minutes: 4
       - run: node --test tests/test_dispatch_gate.mjs
       - run: bash tests/test-review-judge.sh
+        timeout-minutes: 4
       - run: bash tests/test-watchdog.sh
+        timeout-minutes: 4
       - run: bash tests/test-dispatch-route.sh
+        timeout-minutes: 4
       - run: bash tests/test_idle_reset.sh
+        timeout-minutes: 4
       - run: bash tests/test_dispatch_deep.sh
+        timeout-minutes: 4
       - run: bash tests/test_dispatch_watch.sh
+        timeout-minutes: 4
       - run: bash tests/test_launchd_install.sh
+        timeout-minutes: 4
       - run: bash tests/test-dispatch-gate-handson.sh
+        timeout-minutes: 4
       - run: bash tests/test-test-guard.sh
+        timeout-minutes: 4
       - run: bash tests/test-no-orphan-sleep.sh
+        timeout-minutes: 4
       - run: bash tests/test-knob-timing.sh
+        timeout-minutes: 4
       - run: bash tests/test-latency-report.sh
+        timeout-minutes: 4
       - run: bash tests/test-repo-queue.sh
+        timeout-minutes: 4
       - run: bash tests/test-dispatch-bg.sh
+        timeout-minutes: 4
       - run: bash tests/test-dispatch-bg-watch.sh
+        timeout-minutes: 4
       - run: bash tests/test-dispatch-gate-bg.sh
+        timeout-minutes: 4
       - run: bash tests/test-tg-send.sh
+        timeout-minutes: 4
       - run: bash tests/test-tg-plugin-patch.sh
+        timeout-minutes: 4
       - run: bash tests/test-tg-reply-thread.sh
+        timeout-minutes: 4
       - run: bash tests/test-dispatch-watch-deadline.sh
+        timeout-minutes: 4

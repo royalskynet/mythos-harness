@@ -17,6 +17,7 @@ Mythos 一律直接做（YOLO）：盤點／診斷找出的修補，任務允許
 - 把任務寫進 `/tmp/dispatcher-<epoch>.md`，跑 `${DISPATCH_GATE_TRIAGE:-~/dev/dispatch-router/bin/triage} /tmp/dispatcher-<epoch>.md`（找不到 triage 就自己判） 取 easy／mid／hard；你看完現狀覺得明顯判錯可以改判，在結果裡寫一句理由。
 - **easy**（唯讀查詢、跑一次測試、單檔小修、驗收重跑）：你自己做完。
 - **mid**：寫工單（自含上下文、絕對路徑、`## 驗收` 一條會失敗的指令）存 `state/workorders/<名>.md` → `DISPATCH_THREAD=<代號> bin/dispatch <task.md> <cwd> mid`（派 O，只走免費）。
+  - 工單契約（11-06，28 張 rc=2 單次失敗共通原因）：冪等／可能已完成的工單加獨立一行 `NEG-CONTROL: n/a`（否則 dcq do-nothing 對照中止記失敗）；驗收直譯器用絕對路徑（`/opt/homebrew/bin/python3.12`，不寫裸 `python3`）、腳本用 `bash <script>` 不靠執行權限；工單別寫 cwd 以外 checkout 的絕對路徑（越界 FATAL）。
 - **hard**：工單寫成完整計畫 → `DISPATCH_THREAD=<代號> bin/dispatch <task.md> <cwd> hard`（預設 bg-hard：轉 `bin/dispatch-bg --hard`，獨立 `claude --bg` session、sonnet＋Opus advisor，prompt 第一行要求在 `<cwd>` 開 `git worktree add`；`DISPATCH_HARD_BACKEND=deep` 才派 deep）。
 - 派完就結束，不等、不輪詢；`bin/dispatch-watch` 會把 `[派工回報]` 打回主 session，主 session 再派你處理。結果寫「派 O／bg-hard，id <id>」。
 
@@ -24,6 +25,7 @@ Mythos 一律直接做（YOLO）：盤點／診斷找出的修補，任務允許
 
 - PASS：自己重跑該工單 `## 驗收`（不接 `| tail` 吃退出碼，用 `> /tmp/x.log 2>&1; echo rc=$?` 再看尾段），看 `git diff --stat` 改動範圍是否超出工單；都對才回「完成」。
 - FAIL／STALL／REVIEW：先唯讀診斷哪條斷言沒過，再決定 `bin/dispatch-retry <id> "<補充>"`／`bin/dispatch-cancel <id>`；同一張重派 3 次仍失敗就停，回報使用者。
+- 失敗單一定要收尾（11-06）：FAIL／STALL／TIMEOUT 單處理完（重派、作廢、問題已解）都要留收尾記錄，否則 dispatch-watch 超過 6 小時會打 UNRESOLVED 回報。重派用 `bin/dispatch-retry`（自動記）；其餘用 `bin/dispatch-close [--quiet] <id> <superseded|done|informed|resolved> "<白話備註>"`。重複殘留單加 `--quiet`（只記帳不推）；有結果或要使用者決定的不加（會推一行給使用者）。收到 UNRESOLVED 就補收尾，不要只回「收到」。
 - 驗收不准自我評分：不改工單的 `## 驗收`、不改 delegate-guard 的 p-*／ledger-*（hook 會擋）；驗收過期另開新票，舊票標 superseded。
 
 ## 不能派出去的

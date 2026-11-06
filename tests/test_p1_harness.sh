@@ -11,7 +11,8 @@ BG_PIDS=()
 # 每次執行唯一的 sleep 秒數（600.<本行程 PID>）：並行跑的另一個 harness 留下的孤兒不會被 test-no-orphan-sleep 算進來（D0）
 P1_SLEEP_TAG="${P1_SLEEP_TAG:-600.$$}"
 export P1_SLEEP_TAG
-trap 'kill ${BG_PIDS[@]+"${BG_PIDS[@]}"} 2>/dev/null || true; [ -n "${KEEP:-}" ] || rm -rf "$TMP"' EXIT
+# 用 -9：強制失敗時 fail 緊接在背景 sleep 後，TERM 可能在 exec 前被 bash 擋住而變 pending（實測約 6 成存活成孤兒）
+trap 'kill -9 ${BG_PIDS[@]+"${BG_PIDS[@]}"} 2>/dev/null || true; [ -n "${KEEP:-}" ] || rm -rf "$TMP"' EXIT
 
 export MYTHOS_DIR="$TMP/mythos"
 export DCQ_HOME="$TMP/dcq"

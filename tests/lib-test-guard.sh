@@ -7,6 +7,11 @@
 # 用法：TMP="$(mktemp -d)" ; <設好自己的 stub> ; . "$(dirname "$0")/lib-test-guard.sh" "$TMP"
 # stub 只把 argv（前面記 stub 名）追加到 $MYTHOS_TEST_SANDBOX/stub-calls.log 後 exit 0。
 
+# 這是被 source 的函式庫，不是測試；`for t in tests/*.sh` 會直接執行它，沒有 sandbox 參數不是失敗。
+if [ "${BASH_SOURCE[0]}" = "$0" ] && [ $# -eq 0 ]; then
+  echo "lib-test-guard: 函式庫（source 用），單獨執行略過"
+  exit 0
+fi
 case "${1:-}" in
   /*) ;;
   *) echo "lib-test-guard: 要傳絕對路徑的 sandbox（現在是 '${1:-}'）" >&2; return 2 2>/dev/null || exit 2 ;;

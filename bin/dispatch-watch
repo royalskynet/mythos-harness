@@ -65,6 +65,13 @@ BG_RESULT_GRACE_SEC="${BG_RESULT_GRACE_SEC:-120}"
 TG_SEND_BIN="${TG_SEND_BIN:-$(cd "$(dirname "$0")" && pwd)/tg-send}"
 BRIEF_LINES_DIR="${BRIEF_LINES_DIR:-$HOME/.cache/brief-lines}"
 DIRECT_SENDING_SEC="${DIRECT_SENDING_SEC:-600}"
+# 11-06 未收尾檢查：FAIL／STALL／TIMEOUT 單超過 UNRESOLVED_HOURS 小時沒有收尾記錄就升級（至多 UNRESOLVED_MAX 次，之後寫 brief-lines 一次）。
+# 帳本 pending 但單已死（dcq 單不在任何佇列、bg worker 不在 claude agents、deep runner pid 已不在）超過 GONE_MIN 分鐘 → 自動對帳成終態。
+# 復原：cp bin/dispatch-watch.bak-20261106-closeout bin/dispatch-watch
+UNRESOLVED_HOURS="${UNRESOLVED_HOURS:-6}"
+UNRESOLVED_MAX="${UNRESOLVED_MAX:-3}"
+GONE_MIN="${GONE_MIN:-30}"
+CLOSEOUTS="$MYTHOS_DIR/state/closeouts.tsv"
 if [ "${DISPATCH_WATCH_PRINT_KNOBS:-}" = 1 ]; then
   printf 'DEEP_STALL_MIN=%s DEEP_REVIEW_MIN=%s DEEP_HANDOFF_SEC=%s BG_STALL_MIN=%s\n' "$DEEP_STALL_MIN" "$DEEP_REVIEW_MIN" "$DEEP_HANDOFF_SEC" "$BG_STALL_MIN"
   exit 0
@@ -88,6 +95,8 @@ JUDGE_BUDGET="${JUDGE_BUDGET:-90}"
 NODE_BIN="${NODE_BIN:-node}"
 LIB="$(cd "$(dirname "$0")" && pwd)/lib-events.mjs"
 WATCH_LOG="$MYTHOS_DIR/logs/dispatch-watch.log"
+CTX_GUARD="${CTX_GUARD_BIN:-$(cd "$(dirname "$0")" && pwd)/ctx-guard}"
+if [ -n "${CTX_GUARD_OFF:-}" ] || [ ! -x "$CTX_GUARD" ]; then CTX_GUARD=/usr/bin/true; fi
 
 # 測試守門（F1／F3）：放在第一次讀寫 $TSV 或 events 之前，任何改動都不會落地
 RUNNER="${DISPATCH_DEEP_RUN_BIN:-$(cd "$(dirname "$0")" && pwd)/dispatch-deep-run}"
@@ -132,12 +141,16 @@ slug_of() { printf '%s' "$1" | sed 's/[\/.]/-/g'; }
 add_event() { # id status task extra guide
   local id="$1" eid="$1-$2" st="$2" task="$3" extra="$4" guide="$5" payload base
   # 終態冪等（<job>-<狀態>）；STALL／REVIEW 是週期性的，帶時間才不會一張票只抽查一次
-  case "$st" in STALL|REVIEW) eid="$1-$2-$now" ;; esac
+  case "$st" in STALL|REVIEW|UNRESOLVED) eid="$1-$2-$now" ;; esac
   # 同一票同一類型已有未 ACK 的事件就不再建（pane 一直忙時不會每輪多一筆）
   if jq -e --arg id "$id" --arg st "$st" 'select(.job_id==$id and .status==$st and .acked_at == null)' "$EVENTS_FILE" >/dev/null 2>&1; then
     return 1
   fi
   base="${task##*/}"
+  # 11-06 ctx-guard：該 job 的 session 接近／超過 context 上限就標在 extra（備份 bin/dispatch-watch.bak-20261106-ctxguard）
+  local cn
+  cn="$("$CTX_GUARD" note "$id" 2>/dev/null </dev/null 9>&-)" || cn=''
+  [ -n "$cn" ] && extra="${extra:+$extra；}⚠ $cn"
   local th
   th="$(awk -F'\t' -v j="$1" '$1 == j { NF=8; print $7; exit }' "$TSV")"
   case "$th" in ''|-|*[!A-Za-z0-9-]*) th=- ;; esac
@@ -266,6 +279,9 @@ bg_missing_extra() { # id sid → 印一行（已含「result 缺檔；」前綴
   fi
   printf '%s' "result 缺檔；${txt:-讀不到 claude logs}" | tr '\t\n' '  ' | cut -c1-300
 }
+# 1-ctx) 零 token context 守衛：掃 Router／worker／deep transcript 的實際 usage，超限動作與告警見 bin/ctx-guard。
+#    掛掉不影響派工回報；CTX_GUARD_OFF=1 關閉。
+${TO[@]+"${TO[@]}"} "$CTX_GUARD" scan </dev/null 9>&- >/dev/null 2>&1 || log "ctx-guard scan 失敗 rc=$?"
 # 1a0) E2：上輪直發到一半就中斷（sending 卡超過 DIRECT_SENDING_SEC）→ 照結果不明收掉，不重送
 if [ -f "$EVENTS_FILE" ]; then
   while IFS="$(printf '\t')" read -r sj se; do
@@ -296,7 +312,12 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
       if add_event "$id" PASS "$task" "$extra" "$guide" >/dev/null && [ "$backend" = bg ] && [ -s "$rf" ]; then
         sf="$MYTHOS_DIR/state/bg/$sid.summary"
         if summary_of "$rf" > "$sf" && [ -n "$(tr -d '[:space:]' < "$sf")" ]; then
-          direct_send "$id" "$id-PASS" "$thread" "$sf"
+          if [ "$(head -1 "$sf" | tr -d '[:space:]')" = "[靜默]" ]; then
+            # 11-06：例行排程（daily-backlog）沒事時不推 TG；摘要第一行寫 [靜默] 就只 ack、不直發不交 Router
+            ledger_events set "$EVENTS_FILE" "$id-PASS" "{\"direct\":\"quiet\",\"acked_at\":$now}" >/dev/null && log "quiet ack $id-PASS"
+          else
+            direct_send "$id" "$id-PASS" "$thread" "$sf"
+          fi
         else
           log "no summary, Router 轉述 $id-PASS"
         fi
@@ -327,6 +348,14 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
       guide="判斷是否卡死；卡死就 bin/dispatch-cancel $id 再用 bin/dispatch-bg --thread $thread <prompt檔> 重派"
       add_event "$id" STALL "$task" "$extra" "$guide" >/dev/null || late=1
       todo "$last" "$now"
+      ;;
+    '')
+      # 11-06 對帳：claude agents 有清單（AGENTS_JSON 非空）卻找不到這個 worker，超過 GONE_MIN 分鐘 → 當 FAIL，不再永遠 pending
+      [ -n "$AGENTS_JSON" ] || continue
+      case "$epoch" in ''|*[!0-9]*) continue ;; esac
+      [ $((now - epoch)) -ge $((GONE_MIN * 60)) ] || continue
+      guide="worker 已不在 claude agents 清單；要重來照原派工方式重派，或 bin/dispatch-close $id superseded \"<理由>\" 收掉"
+      add_event "$id" FAIL "$task" "worker 已不在 claude agents 清單（對帳）" "$guide" >/dev/null
       ;;
     stopped|failed|error|killed)
       # F4：worker 沒寫 result 就停了 → 終態 FAIL，不再永遠 pending
@@ -385,6 +414,35 @@ if awk -F'\t' '$5=="queued"' "$TSV" 2>/dev/null | grep -q .; then
   rm -rf "$QDIR"
 fi
 
+# 0c) 認養直投 dcq 的失敗單（11-06）：沒經 bin/dispatch 的單（直接 dcq add）失敗後帳本沒有列，
+#     派工回報與未收尾檢查都看不到。failed 匣有 .job 而帳本沒有那個 id → 補一列 pending，之後走同一套 FAIL／未收尾流程。
+#     使用者取消的（CANCELLED=1）不認養。時間用 failed 檔 mtime，所以 6 小時是從失敗時算。
+# 復原：cp bin/dispatch-watch.bak-20261106-closeout2 bin/dispatch-watch
+adopt_orphan_failures() {
+  local f id t c e miss=''
+  [ -d "$DCQ_HOME/failed" ] || return 0
+  for f in "$DCQ_HOME"/failed/*.job; do
+    [ -f "$f" ] || continue
+    id="$(basename "$f" .job)"
+    grep -q '^CANCELLED=1' "$f" 2>/dev/null && continue
+    cut -f1 "$TSV" 2>/dev/null | grep -qxF -- "$id" && continue
+    miss="$miss $f"
+  done
+  [ -n "$miss" ] || return 0
+  ledger_lock || return 0
+  for f in $miss; do
+    id="$(basename "$f" .job)"
+    cut -f1 "$TSV" 2>/dev/null | grep -qxF -- "$id" && continue
+    t="$(sed -n 's/^TASK0=//p' "$f" | head -1)"; [ -n "$t" ] || t="$(sed -n 's/^TASK=//p' "$f" | head -1)"
+    c="$(sed -n 's/^CWD0=//p' "$f" | head -1)"; [ -n "$c" ] || c="$(sed -n 's/^CWD=//p' "$f" | head -1)"
+    e="$(stat -f %m "$f" 2>/dev/null || date +%s)"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" mid "${t:--}" "$e" pending "${c:-/tmp}" - dcq >> "$TSV"
+    log "adopt orphan failed dcq job $id"
+  done
+  ledger_unlock
+}
+adopt_orphan_failures
+
 # 1) 掃描 ledger：終態只寫事件、不動 ledger
 while IFS=$'\t' read -r id tier task epoch status cwd thread backend; do
   [ -n "$id" ] || continue
@@ -415,6 +473,19 @@ while IFS=$'\t' read -r id tier task epoch status cwd thread backend; do
       esac
       add_event "$id" "$st" "$task" "$extra" "$guide" >/dev/null
       continue
+    fi
+
+    # 11-06 對帳：runner pid 已不在、沒寫 rc（被 kill -9／當機）→ 補 rc=137＋原因，下面照一般 FAIL 出事件
+    pidf="$MYTHOS_DIR/state/deep/$id.pid"
+    if [ -f "$pidf" ] && [ -f "$MYTHOS_DIR/state/deep/$id.handle" ]; then
+      rp="$(tr -d '[:space:]' < "$pidf" 2>/dev/null)"
+      case "$rp" in ''|*[!0-9]*) ;; *)
+        if ! kill -0 "$rp" 2>/dev/null && [ $((now - $(mtime_of "$pidf"))) -ge $((GONE_MIN * 60)) ] && [ ! -e "$rcfile" ]; then
+          printf 'runner 行程已不在（pid %s），沒寫 rc（對帳）\n' "$rp" > "$MYTHOS_DIR/state/deep/$id.handoff" 2>/dev/null
+          if ( set -o noclobber; printf '137\n' > "$rcfile" ) 2>/dev/null; then log "對帳：$id runner pid $rp 已不在，補 rc=137"; fi
+          continue
+        fi ;;
+      esac
     fi
 
     # no rc yet
@@ -487,6 +558,8 @@ while IFS=$'\t' read -r id tier task epoch status cwd thread backend; do
     continue
   fi
 
+  # 11-06：bg／bg-hard 不是 dcq 單，已由上面 1a 段處理；不得落到下面「dcq 單不在任何佇列」對帳（bg-2157532a 誤判）
+  case "$backend" in bg|bg-hard) continue ;; esac
   # dcq row：這張票已有終態事件（不論 ACK 沒）就不重新推導
   # （ACK 後 ledger 是 notified-PASS 會跳過；但事件被測試／手動重設回未 ACK 時，舊版每輪多建一筆）
   if [ "$status" = pending ] && jq -e --arg id "$id" 'select(.job_id==$id and (.status=="PASS" or .status=="FAIL" or .status=="TIMEOUT"))' "$EVENTS_FILE" >/dev/null 2>&1; then
@@ -503,6 +576,10 @@ while IFS=$'\t' read -r id tier task epoch status cwd thread backend; do
     else
       continue
     fi
+  elif [ ! -f "$DCQ_HOME/pending/$id.job" ] && case "$epoch" in ''|*[!0-9]*) false ;; *) [ $((now - epoch)) -ge $((GONE_MIN * 60)) ] ;; esac; then
+    # 11-06 對帳：done／failed／running／pending 都沒有這張單，超過 GONE_MIN 分鐘 → 當 FAIL
+    add_event "$id" FAIL "$task" "dcq 單不在任何佇列（對帳）" "確認是否被手動清掉；要重來 bin/dispatch-retry，不用做 bin/dispatch-close $id superseded \"<理由>\"" >/dev/null
+    continue
   else
     continue
   fi
@@ -516,6 +593,53 @@ while IFS=$'\t' read -r eid at; do
   [ -n "$eid" ] || continue
   ledger_events set "$EVENTS_FILE" "$eid" "{\"acked_at\":$at}" >/dev/null
 done <<< "$("$NODE_BIN" "$LIB" scan "$EVENTS_FILE" "$newest" 2>/dev/null)"
+
+# 2b) 未收尾檢查（11-06）：FAIL／TIMEOUT 單要有收尾記錄＝帳本 superseded／cancelled／resolved／notified-PASS、
+#     closeouts.tsv 有那張（bin/dispatch-close／dispatch-retry 寫）、或同 thread 後面已有別張單（重派）；
+#     STALL 單的收尾＝那張單已離開 pending 或 closeouts 有記。事件超過 UNRESOLVED_HOURS 小時還沒收尾 → 升級一筆 UNRESOLVED 事件
+#     （走一般投遞，Router 會派 dispatcher 收尾）；同一張至多 UNRESOLVED_MAX 次，用完寫 brief-lines 一次就停。
+unresolved_scan() {
+  [ -f "$EVENTS_FILE" ] || return 0
+  local lim=$((now - UNRESOLVED_HOURS * 3600)) rows jid kind created row st th ep task closed later cnt last
+  rows="$(ledger_fields < "$TSV")"
+  while IFS=$'\t' read -r jid kind created; do
+    [ -n "$jid" ] || continue
+    row="$(printf '%s\n' "$rows" | awk -F'\t' -v i="$jid" '$1==i{print;exit}')"
+    [ -n "$row" ] || continue
+    st="$(printf '%s' "$row" | cut -f5)"; ep="$(printf '%s' "$row" | cut -f4)"
+    th="$(printf '%s' "$row" | cut -f7)"; task="$(printf '%s' "$row" | cut -f3)"
+    closed=0
+    if [ -f "$CLOSEOUTS" ] && cut -f1 "$CLOSEOUTS" | grep -qxF -- "$jid"; then closed=1; fi
+    if [ "$closed" = 0 ]; then
+      case "$kind" in
+        STALL) [ "$st" = pending ] || closed=1 ;;
+        *)
+          case "$st" in superseded|cancelled|resolved|notified-PASS|retried) closed=1 ;; esac
+          if [ "$closed" = 0 ] && [ -n "$th" ] && [ "$th" != - ]; then
+            later="$(printf '%s\n' "$rows" | awk -F'\t' -v t="$th" -v i="$jid" -v e="$ep" '$7==t && $1!=i && $4+0>e+0 {c++} END{print c+0}')"
+            [ "$later" -gt 0 ] && closed=1
+          fi ;;
+      esac
+    fi
+    [ "$closed" = 1 ] && continue
+    cnt="$(jq -r --arg j "$jid" 'select(.job_id==$j and .status=="UNRESOLVED") | .created' "$EVENTS_FILE" | wc -l | tr -d ' ')"
+    last="$(jq -r --arg j "$jid" 'select(.job_id==$j and .status=="UNRESOLVED") | .created' "$EVENTS_FILE" | sort -n | tail -1)"
+    if [ "$cnt" -ge "$UNRESOLVED_MAX" ]; then
+      if [ ! -f "$MYTHOS_DIR/state/.unresolved-capped.$jid" ]; then
+        mkdir -p "$BRIEF_LINES_DIR" 2>/dev/null &&
+          printf '%s 失敗單升級 %s 次仍未收尾 %s\n' "$(TZ=Asia/Taipei date '+%F %H:%M')" "$cnt" "$jid" >> "$BRIEF_LINES_DIR/mythos-unresolved.txt"
+        : > "$MYTHOS_DIR/state/.unresolved-capped.$jid"
+        log "unresolved capped $jid"
+      fi
+      continue
+    fi
+    [ -n "$last" ] && [ $((now - last)) -lt $((UNRESOLVED_HOURS * 3600)) ] && continue
+    add_event "$jid" UNRESOLVED "$task" "$kind 單超過 ${UNRESOLVED_HOURS} 小時沒有收尾記錄（第 $((cnt + 1)) 次提醒）" \
+      "確認有人處理：要重做 bin/dispatch-retry $jid \"<補充>\"；不用做 bin/dispatch-close [--quiet] $jid superseded \"<理由>\"；已解決或已告知 bin/dispatch-close $jid done|informed \"<結果>\"（預設推一行給使用者，重複殘留單加 --quiet）" >/dev/null && log "unresolved escalate $jid ($kind)"
+  done < <(jq -rs --argjson lim "$lim" '[.[] | select((.status=="FAIL" or .status=="TIMEOUT" or .status=="STALL") and .cancelled != true and .created <= $lim)]
+      | group_by(.job_id)[] | (map(select(.status != "STALL"))[0] // .[0]) | [.job_id, .status, .created] | @tsv' "$EVENTS_FILE" 2>/dev/null)
+}
+unresolved_scan
 
 # 3) 待送：未 ACK 且（沒送過 or 送過超過 10 分鐘），tries 未滿上限
 pending_events() {
@@ -546,9 +670,13 @@ deliver() {
         if [ -z "$parts" ]; then parts="$item"; else parts="${parts}；${item}"; fi
         sent_ids="${sent_ids}${eid}"$'\n'
       done < "$TODOS.pend"
+      # 11-06 ctx-guard：未標出的超限事件附在這則回報後面（不單推 TG）
+      cnotes="$("$CTX_GUARD" notices 2>/dev/null </dev/null 9>&- | tr '\n' '；')"
+      if [ -n "$parts" ] && [ -n "$cnotes" ]; then parts="${parts}；[context 守衛] ${cnotes}"; fi
       if [ -n "$parts" ] && "$TMUX_BIN" -L mythos send-keys -t mythos -l -- "$parts" \
          && "$TMUX_BIN" -L mythos send-keys -t mythos Enter; then
         ledger_events bump "$EVENTS_FILE" "$sent_ids" >/dev/null
+        [ -n "$cnotes" ] && "$CTX_GUARD" ack-notices >/dev/null 2>&1 </dev/null 9>&-
         sent=1
       fi
     fi
