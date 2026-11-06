@@ -14,6 +14,7 @@ jobs:
       - run: bash tests/test_p1_harness.sh
         timeout-minutes: 4
       - run: node --test tests/test_dispatch_gate.mjs
+      - run: python3 bin/quick --selftest && python3 bin/recall --selftest
       - run: bash tests/test-review-judge.sh
         timeout-minutes: 4
       - run: bash tests/test-watchdog.sh

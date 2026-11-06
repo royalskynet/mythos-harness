@@ -62,6 +62,13 @@ tmux -L mythos attach -t mythos
 | 記憶快查 `bin/recall` | 三選任意：claude-mem worker（HTTP `:37701`）、`fixindex`、Claude Code auto-memory 目錄 | 有哪個查哪個；一個都沒有 exit 6，改派 worker。`RECALL_SOURCES=md` 只用部分 |
 | mid 走訂閱層 | OpenCode Go 訂閱（月費＝花錢） | 設 `DISPATCH_MID_ORDER=free`，mid 只用免費層 |
 | hard 背景 | `claude --bg`；`deep-run` 選用 | 預設 bg-hard；`DISPATCH_HARD_BACKEND=deep` 才要 `deep-run` |
+| 判難度 | orchestrator 的 `triage`（`DISPATCH_GATE_TRIAGE` 可改路徑） | dispatcher 自己判 |
+| 驗收路徑檢查 | orchestrator 的 `wo-verify` | 改用內建解析器收驗收段 |
+| 抽查／watchdog 的免費模型判斷 | opencode＋本機 PII 去識別 `:4102/scrub`；`local-llm` 要 `:4000` OpenAI 相容閘道 | 去識別不通就不送（fail closed）：抽查一律回 UNKNOWN 照常喚醒 Router，watchdog 改走規則表 |
+| watchdog 出機前掃描 | sensitive-canary plugin | 用內建 regex 掃 |
+| 告警與直發結果 | 寫進 `BRIEF_LINES_DIR`（預設 `~/.cache/brief-lines`）的文字檔，給自家彙整程式讀 | 檔案照寫；沒有彙整程式就只能自己看，或把 `BRIEF_LINES_DIR` 指到你會看的地方 |
+| Telegram `/fix`、`/wheel` | `~/.claude/commands/fix.md`、`wheel.md` | 不用這兩個指令就不影響 |
+| 自做上限豁免 | `state/cap-exempt.txt`（一行一個字串，不進版控） | 只豁免 bg-hard |
 
 背景監看用 launchd：`bash launchd/install.sh` 把 `launchd/*.plist` 範本的 `__REPO__`／`__HOME__` 換成 clone 位置與家目錄，寫進 `~/Library/LaunchAgents/`（`NO_LOAD=1` 只產檔）。現有三份：`ai.mythos.dispatch-watch`（回報與抽查）、`ai.mythos.watchdog`（卡住偵測）、`ai.mythos.idle-reset`（閒置 `/clear`）。`ONLY=<label>` 只處理那一份。載入要帶完整 service target：`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist`。
 
@@ -166,7 +173,7 @@ Items left open by the convergence rule (medium or lower, or a fix that would wi
 
 **State.** One ledger (`state/dispatch-jobs.tsv`, 8 columns) and the event queue share a single `flock` lock that is released automatically if the holder dies. Deep jobs are cancelled only through their recorded handle, never by guessing.
 
-**Optional pieces.** Only Claude Code, Node, jq, tmux and `dcq` are required. Everything else degrades on its own: `bin/quick` needs opencode (exit 6 without it, so the Router dispatches a worker instead); `bin/recall` uses whichever of claude-mem's local worker, `fixindex` and the Claude Code auto-memory folder exist (pick with `RECALL_SOURCES=mem,fix,md`; exit 6 if none); mid tickets use the OpenCode Go subscription by default (a monthly cost), set `DISPATCH_MID_ORDER=free` to stay free-only; Telegram is optional (`CHANNELS=`). See the table under *Quick start*.
+**Optional pieces.** Only Claude Code, Node, jq, tmux and `dcq` are required. Everything else degrades on its own: `bin/quick` needs opencode (exit 6 without it, so the Router dispatches a worker instead); `bin/recall` uses whichever of claude-mem's local worker, `fixindex` and the Claude Code auto-memory folder exist (pick with `RECALL_SOURCES=mem,fix,md`; exit 6 if none); mid tickets use the OpenCode Go subscription by default (a monthly cost), set `DISPATCH_MID_ORDER=free` to stay free-only; Telegram is optional (`CHANNELS=`). Also optional: `triage` and `wo-verify` from orchestrator (built-in fallbacks), the local PII scrubber `:4102` and `:4000` gateway for the free-model review/watchdog legs (fail closed: review returns UNKNOWN and the Router is woken as before), the sensitive-canary plugin (built-in regex), and `state/cap-exempt.txt` for extra self-cap exemptions. See the table under *Quick start*.
 
 **Install.** See *Quick start* above; `launchd/install.sh` renders the plist templates (`ONLY=<label>` for one job, `NO_LOAD=1` to only render). Tests use fake tmux / models / dcq, need no network or keys, and run on macOS CI.
 
