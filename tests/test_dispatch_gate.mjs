@@ -264,3 +264,15 @@ test('快查線：Router 可跑 bin/quick <絕對路徑> \'<問題>\'，夾帶�
   assert.equal(bash("bin/quick relative/path 'q'"), 'deny')
   assert.equal(bash("bin/quick /x 'a' 'b'"), 'deny')
 })
+
+test('記憶快查：Router 可跑 bin/recall \'<關鍵字>\' 與 --obs/--fix <數字>，其餘擋', () => {
+  const tp = routerTx(['channel', '之前怎麼定的'])
+  const bash = (command) => decision(pre('Bash', { command }, tp))
+  assert.equal(bash("bin/recall '訂閱 花錢'"), null)
+  assert.equal(bash('bin/recall --obs 9457'), null)
+  assert.equal(bash('bin/recall --fix 11774'), null)
+  assert.equal(bash("bin/recall 'q'; rm -rf /tmp/x"), 'deny')
+  assert.equal(bash('bin/recall "$(id)"'), 'deny')
+  assert.equal(bash('bin/recall --obs 1; id'), 'deny')
+  assert.equal(bash('bin/recall --selftest'), 'deny')
+})

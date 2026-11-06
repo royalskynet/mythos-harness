@@ -15,6 +15,7 @@
 !/bin/dispatch-deep-run
 !/bin/dispatch-gate.mjs
 !/bin/quick
+!/bin/recall
 !/bin/dispatch-retry
 !/bin/dispatch-watch
 !/bin/lib-ledger.sh
