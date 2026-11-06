@@ -24,7 +24,7 @@ echo "cancel $*" >> "$CALLS"
 f="$MYTHOS_DIR/state/dispatch-jobs.tsv"; awk -F'\t' -v i="$1" 'BEGIN{OFS="\t"} $1==i{$5="cancelled"} {print}' "$f" > "$f.t" && mv "$f.t" "$f"
 S
 printf '#!/bin/sh\nprintf "brief %%s\\n" "$*" >> "$CALLS"; sed "s/^/秘書：/"\n' > "$BRIEF_BIN"
-printf 'import fs from "node:fs"\nfs.appendFileSync(process.env.CALLS, "tg " + process.argv.slice(2).join(" ") + " :: " + fs.readFileSync(0, "utf8").replace(/\\n/g, " ") + "\\n")\n' > "$TG_SEND_BIN"
+printf 'import fs from "node:fs"\nfs.appendFileSync(process.env.CALLS, "tg " + process.argv.slice(2).join(" ") + " :: " + fs.readFileSync(0, "utf8").replace(/\\n/g, " ") + "\\n"); process.exit(Number(process.env.TG_RC || 0))\n' > "$TG_SEND_BIN"
 printf '#!/bin/sh\ncase " $* " in *" capture-pane "*) echo idle ;; esac\nprintf "%%s\\n" "$*" >> "$TMUX_LOG"\n' > "$TMUX_BIN"
 chmod +x "$CLAUDE_BIN" "$DISPATCH_BG_BIN" "$DISPATCH_CANCEL_BIN" "$BRIEF_BIN" "$TMUX_BIN"
 . "$(dirname "$0")/lib-test-guard.sh" "$TMP"
@@ -81,4 +81,13 @@ watch
 grep -q '^brief --stdout --kind done --q 幫我把 log 輪替修好' "$CALLS" || fail "5：PASS 沒走 brief done：$(cat "$CALLS")"
 grep -q '^tg --thread t-ok --job bg-eeee0005 :: 秘書：輪替修好了' "$CALLS" || fail "5：直送內容不對：$(cat "$CALLS")"
 echo '(5) ok'
+
+# 6) 重派的那張又 FAIL，告知時 tg-send 回 2（不明，可能已送）→ 當已處理，不交 Router（不重複告知）
+printf '> 幫我查 dns\n' > "$MYTHOS_DIR/state/bg/t-dns-autoretry-1.md"
+row bg-ffff0006 "$MYTHOS_DIR/state/bg/t-dns-autoretry-1.md" t-dns; agents ffff0006 failed
+TG_RC=2 watch
+grep -q '^tg --thread t-dns --job bg-ffff0006' "$CALLS" || fail "6：沒試告知：$(cat "$CALLS")"
+[ "$(ev bg-ffff0006-FAIL .direct)" = unknown ] || fail "6：direct 應 unknown：$(ev bg-ffff0006-FAIL .direct)"
+grep -q 'event_id=bg-ffff0006-FAIL' "$TMUX_LOG" && fail '6：狀態不明還交 Router（會重複告知）'
+echo '(6) ok'
 echo 'BG-AUTOHEAL PASS'

@@ -7,7 +7,7 @@ set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # 免費鏈（11-02）：一棒一個讀 stdin 印答案的執行檔，前一棒失敗／逾時／答非所問就換下一棒。
-# 預設兩棒刻意不同體系：opencode-go/beam-free（CLI，11-02 實測 7s 判對）先，
+# 預設兩棒刻意不同體系：opencode 免費池第一名（oc-free-ask 預設，CLI；11-02 beam-free 實測 7s 判對）先，
 # 掛了換 :4000→OmniRoute nim-first（nim-pool→or-free；同日 trivial prompt 90s 逾時，所以排第二）。
 LEGS="${REVIEW_JUDGE_LLM:-$HERE/oc-free-ask $HERE/local-llm}"
 MAX_TASK_CHARS="${REVIEW_JUDGE_TASK_CHARS:-3000}"

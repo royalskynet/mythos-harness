@@ -1,48 +1,105 @@
 #!/usr/bin/env python3
-"""brief-answer [--stdout] --kind <quick|recall|done|fail> --q '<老闆原問題或交辦原話>' < 原始資料
+"""brief-answer [--stdout] [--not-found] --kind <quick|recall|done|fail> --q '<老闆原問題或交辦原話>' < 原始資料
 把快查／記憶查到的原始資料寫成「秘書對老闆」的口語回報，直送 Telegram（bin/tg-send），不經 Router（11-07）。
-改寫用 haiku（claude -p，--setting-sources local＋空目錄：不載使用者層 plugin／hook、不寫 claude-mem；
-不用 --bare，它只認按量計費的 API key）。claude CLI 沒裝或改寫失敗 → 推原文（選用依賴，降級不擋）。
+改寫順序（11-07 Codex 審計後）：資料先過本機 :4102/scrub 去識別，scrub 不通就不送任何 LLM、推原文；
+再試 opencode 免費模型（bin/free-models 前 BRIEF_FREE_MAX 名，經 bin/oc-free-ask，CLI 不打 API）；
+免費全敗才用 haiku（claude -p，--setting-sources local＋空目錄：不載使用者層 plugin／hook、不寫 claude-mem）；
+都失敗推原文（選用依賴，降級不擋）。
+--not-found：查不到，用固定句子回，不叫任何模型。
 --stdout：只改寫印到 stdout、不送（dispatch-watch 直送 worker 結果時用，它自己帶 --thread／--job 送）。
-exit：0 已送｜2 用法｜7 送不出去（tg-send 失敗，呼叫端交回 Router 轉述）
-env：BRIEF_MODEL（預設 claude-haiku-5-5）BRIEF_CLAUDE（claude 路徑）BRIEF_DRY=1（只印不送，測試用）
+exit：0 已送｜2 用法｜7 送不出去（確定沒送，呼叫端交回 Router 轉述）｜8 送出結果不明（可能已送，呼叫端不要再轉述）
+env：BRIEF_MODEL（預設 claude-haiku-5-5）BRIEF_CLAUDE（claude 路徑）BRIEF_FREE_MAX（預設 2，0＝不試免費）
+     BRIEF_SCRUB（scrub 網址）BRIEF_TIMEOUT（總秒數，預設 90）BRIEF_DRY=1（只印不送，測試用）
 """
-import os, shutil, subprocess, sys, tempfile, time
+import json, os, shutil, signal, subprocess, sys, tempfile, time, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL = os.environ.get("BRIEF_MODEL", "claude-haiku-5-5")
 CLAUDE = os.environ.get("BRIEF_CLAUDE") or os.environ.get("CLAUDE_BIN") or shutil.which("claude")
-# 測試沙箱（lib-test-guard）：claude 不在沙箱裡就不改寫，免得測試打到真模型
-if os.environ.get("MYTHOS_TEST_SANDBOX") and CLAUDE and not os.path.abspath(CLAUDE).startswith(os.environ["MYTHOS_TEST_SANDBOX"]):
+FREE_ASK = os.environ.get("BRIEF_FREE_ASK") or os.path.join(HERE, "oc-free-ask")
+FREE_MODELS = os.environ.get("BRIEF_FREE_MODELS") or os.path.join(HERE, "free-models")
+FREE_MAX = int(os.environ.get("BRIEF_FREE_MAX") or 2)
+SCRUB = os.environ.get("BRIEF_SCRUB") or os.environ.get("OC_FREE_ASK_SCRUB") or "http://127.0.0.1:4102/scrub"
+# 測試沙箱（lib-test-guard）：runner 不在沙箱裡就不用，免得測試打到真模型
+SANDBOX = os.environ.get("MYTHOS_TEST_SANDBOX")
+def _in_box(p):
+    return not SANDBOX or bool(p and os.path.abspath(p).startswith(os.path.abspath(SANDBOX) + os.sep))
+if not _in_box(CLAUDE):
     CLAUDE = None
+if not (_in_box(FREE_ASK) and _in_box(FREE_MODELS)):
+    FREE_MAX = 0
 SYSTEM = """你是老闆的秘書，用 Telegram 口頭回報。根據使用者訊息裡的「資料」回答「問題」。
 繁體中文、台灣口語，像人講話：先講答案，再補一兩句老闆會想知道的細節，最多 6 句。
 不寫標題、條列符號、編號、id、指令、檔案路徑、雜湊、程式碼、模型名稱；除非問題問的就是那個名稱或數字。
 資料沒寫的不講，不推測；資料顯示查不到就直說查不到。"""
+NOT_FOUND = "這件事我翻過以前的紀錄，沒找到相關的內容。要的話跟我說換個說法再查。"
+
+
+def scrub(texts):
+    """回傳去識別後的 texts；scrub 不通回 None（呼叫端不送任何 LLM）。"""
+    try:
+        req = urllib.request.Request(SCRUB, json.dumps({"texts": texts}).encode(), {"Content-Type": "application/json"})
+        out = json.load(urllib.request.urlopen(req, timeout=10))["texts"]
+        return out if len(out) == len(texts) else None
+    except Exception:
+        return None
+
+
+def run_to(cmd, data, timeout):
+    """跑到逾時就砍整個 process group（opencode 是孫行程，只砍子行程會留殭屍）。"""
+    if timeout <= 1:
+        return None
+    try:
+        p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             text=True, cwd=tempfile.gettempdir(), start_new_session=True)
+    except Exception:
+        return None
+    try:
+        out, _ = p.communicate(data, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except Exception:
+            pass
+        p.wait()
+        return None
+    out = (out or "").strip()
+    return out if p.returncode == 0 and out else None
 
 
 def rewrite(q, material):
+    deadline = time.time() + int(os.environ.get("BRIEF_TIMEOUT") or 90)
+    clean = scrub([q, material[:12000]])
+    if clean is None:
+        print("brief-answer: scrub 不通，不送 LLM，推原文", file=sys.stderr)
+        return None
+    user = f"問題：{clean[0]}\n\n資料：\n{clean[1]}"
+    if FREE_MAX > 0:
+        try:
+            ms = subprocess.run([FREE_MODELS], capture_output=True, text=True, timeout=30).stdout.split()
+        except Exception:
+            ms = []
+        for m in ms[:FREE_MAX]:
+            # 每個免費模型最多分到剩餘時間的一半，留時間給 haiku 墊底
+            out = run_to([FREE_ASK, m], f"{SYSTEM}\n\n{user}", min(45, (deadline - time.time()) / 2))
+            if out:
+                return out
     if not CLAUDE:
         return None
-    try:
-        r = subprocess.run(
-            [CLAUDE, "-p", "--setting-sources", "local", "--strict-mcp-config", "--model", MODEL,
-             "--no-session-persistence", "--tools", "", "--system-prompt", SYSTEM],
-            input=f"問題：{q}\n\n資料：\n{material[:12000]}", capture_output=True, text=True, timeout=int(os.environ.get("BRIEF_TIMEOUT") or 90),
-            cwd=tempfile.gettempdir())
-    except Exception:
-        return None
-    out = r.stdout.strip()
-    return out if r.returncode == 0 and out else None
+    return run_to([CLAUDE, "-p", "--setting-sources", "local", "--strict-mcp-config", "--model", MODEL,
+                   "--no-session-persistence", "--tools", "", "--system-prompt", SYSTEM],
+                  user, deadline - time.time())
 
 
 def main(argv):
     kind = q = ""
-    to_stdout = False
+    to_stdout = not_found = False
     i = 0
     while i < len(argv):
         if argv[i] == "--stdout":
             to_stdout, i = True, i + 1
+        elif argv[i] == "--not-found":
+            not_found, i = True, i + 1
         elif argv[i] == "--kind" and i + 1 < len(argv):
             kind, i = argv[i + 1], i + 2
         elif argv[i] == "--q" and i + 1 < len(argv):
@@ -51,19 +108,19 @@ def main(argv):
             print(__doc__.split("\n")[0], file=sys.stderr)
             return 2
     material = sys.stdin.read().strip()
-    if kind not in ("quick", "recall", "done", "fail") or not q or not material or (kind in ("done", "fail") and not to_stdout):
+    if kind not in ("quick", "recall", "done", "fail") or not q or not (material or not_found) or (kind in ("done", "fail") and not to_stdout):
         print(__doc__.split("\n")[0], file=sys.stderr)
         return 2
-    text = rewrite(q, material) or material  # ponytail: 改寫失敗推原文，之後可改成交回 Router
+    text = NOT_FOUND if not_found else (rewrite(q, material) or material)  # ponytail: 改寫失敗推原文
     if to_stdout or os.environ.get("BRIEF_DRY"):
         print(text)
         return 0
     r = subprocess.run([os.path.join(HERE, "tg-send"), "--thread", kind, "--job", f"{kind}-{int(time.time())}"],
                        input=text, capture_output=True, text=True)
-    if r.returncode != 0:
-        print(f"brief-answer: tg-send rc={r.returncode} {r.stderr.strip()[:200]}", file=sys.stderr)
-        return 7
-    return 0
+    if r.returncode == 0:
+        return 0
+    print(f"brief-answer: tg-send rc={r.returncode} {r.stderr.strip()[:200]}", file=sys.stderr)
+    return 7 if r.returncode in (1, 97) else 8  # tg-send：1／97 確定沒送，其他（2）不明
 
 
 if __name__ == "__main__":

@@ -46,8 +46,8 @@ function decision(out) {
 const PIN = '/Users/x/.claude/delegate-guard/p-123.sh'
 
 test('主 session：背景 dispatcher 放行；前景、非 dispatcher、未指定類型都擋', () => {
-  assert.equal(decision(pre('Agent', { subagent_type: 'dispatcher', prompt: 'x' })), null)
-  assert.equal(decision(pre('Agent', { subagent_type: 'dispatcher', prompt: 'x', run_in_background: true })), null)
+  assert.equal(decision(pre('Agent', { subagent_type: 'dispatcher', prompt: 'x' })), 'allow')
+  assert.equal(decision(pre('Agent', { subagent_type: 'dispatcher', prompt: 'x', run_in_background: true })), 'allow')
   assert.equal(decision(pre('Agent', { subagent_type: 'dispatcher', prompt: 'x', run_in_background: false })), 'deny')
   assert.equal(decision(pre('Agent', { subagent_type: 'general-purpose', prompt: 'x' })), 'deny')
   assert.equal(decision(pre('Agent', { prompt: 'x' })), 'deny')
@@ -107,7 +107,7 @@ test('子代理（agent_id）：任意 Write／Bash 放行', () => {
   const extra = { agent_id: 'a1', agent_type: 'dispatcher' }
   assert.equal(decision(pre('Write', { file_path: path.join(os.homedir(), 'dev/x.js') }, undefined, extra)), null)
   assert.equal(decision(pre('Bash', { command: 'bash tests/test_dispatch_deep.sh' }, undefined, extra)), null)
-  assert.equal(decision(pre('Agent', { prompt: 'x', run_in_background: false }, undefined, extra)), null)
+  assert.equal(decision(pre('Agent', { prompt: 'x', run_in_background: false }, undefined, extra)), 'allow')  // 放行但改寫成 haiku
 })
 
 test('pinGuard：主 session 與子代理都擋，#手動 才解，唯讀放行', () => {
@@ -120,7 +120,7 @@ test('pinGuard：主 session 與子代理都擋，#手動 才解，唯讀放行'
 
 test('transcript 不存在時：Agent 照放、主 session 動手照擋', () => {
   const tp = path.join(TMP, 'missing.jsonl')
-  assert.equal(decision(pre('Agent', { subagent_type: 'dispatcher', prompt: 'x' }, tp)), null)
+  assert.equal(decision(pre('Agent', { subagent_type: 'dispatcher', prompt: 'x' }, tp)), 'allow')
   assert.equal(decision(pre('Bash', { command: 'ls' }, tp)), 'deny')
 })
 
@@ -295,7 +295,16 @@ test('秒回派工：bin/dispatch-bg --from-chat <thread> 放行並補 --transcr
   const tp = routerTx(['channel', '幫我修 log'])
   const upd = (command) => JSON.parse(pre('Bash', { command }, tp)).hookSpecificOutput
   assert.equal(upd('bin/dispatch-bg --from-chat t-log').updatedInput.command, `bin/dispatch-bg --from-chat t-log --transcript '${tp}'`)
+  assert.equal(upd('bin/dispatch-bg --from-chat t-log').updatedInput.run_in_background, true, '啟動 worker 不佔 Router 回合')
   assert.equal(upd("bin/dispatch-bg --thread t-log --from-chat t-log --note '接續昨天'").permissionDecision, 'allow')
   assert.equal(upd('bin/dispatch-bg --from-chat t-log; id').permissionDecision, 'deny')
   assert.equal(upd("bin/dispatch-bg --from-chat t-log --transcript '/etc/passwd'").permissionDecision, 'deny')
+})
+
+test('子代理只用 haiku：主 session 與 worker 派的 Agent 一律改寫成 haiku（指定 opus 也一樣）', () => {
+  const upd = (input, tp, extra) => JSON.parse(pre('Agent', input, tp, extra)).hookSpecificOutput.updatedInput
+  assert.deepEqual(upd({ subagent_type: 'dispatcher', prompt: 'x', model: 'opus' }), { subagent_type: 'dispatcher', prompt: 'x', model: 'haiku', run_in_background: true })
+  const w = upd({ subagent_type: 'general-purpose', prompt: 'y', model: 'sonnet' }, undefined, { agent_id: 'a1', agent_type: 'dispatcher' })
+  assert.equal(w.model, 'haiku')
+  assert.equal(w.prompt, 'y')
 })

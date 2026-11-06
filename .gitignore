@@ -73,3 +73,7 @@
 /state/bg/
 *.bak*
 __pycache__/
+!/bin/free-models
+!/tests/test-free-models.sh
+!/tests/test-brief-answer.sh
+!/tests/test_chat_prompt.mjs

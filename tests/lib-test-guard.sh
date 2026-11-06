@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 測試守門（F1）：被 source 後 export MYTHOS_TEST_SANDBOX="$1"（呼叫端傳自己的 TMP）。
-# DISPATCH_DEEP_RUN_BIN／DEEP_RUN_BIN／TMUX_BIN／CLAUDE_BIN 沒設定的，改指 guard 在 sandbox 自建的 stub；
+# DISPATCH_DEEP_RUN_BIN／DEEP_RUN_BIN／TMUX_BIN／CLAUDE_BIN／DCQ_BIN 沒設定的，改指 guard 在 sandbox 自建的 stub；
 # 已設定的一律不動（測試自己的 stub 要在 source 之前設好）。
 # 已設定卻指到 sandbox 外的 runner，由 bin/dispatch、bin/dispatch-bg、bin/dispatch-watch、bin/dispatch-cancel（bg）、bin/dispatch-deep-run
 # 在 MYTHOS_TEST_SANDBOX 非空時 exit 97 擋下（tests/test-test-guard.sh 驗）。
@@ -40,5 +40,6 @@ _guard_var DISPATCH_DEEP_RUN_BIN
 _guard_var DEEP_RUN_BIN
 _guard_var TMUX_BIN
 _guard_var CLAUDE_BIN  # 工單 D：dispatch-bg／dispatch-watch（bg 列）／dispatch-cancel（bg 列）都叫 claude
+_guard_var DCQ_BIN  # 11-07：hard 預設改走 O 後，沒設 DCQ_BIN 的測試會打到真 dcq
 unset _guard_v
 unset -f _guard_var

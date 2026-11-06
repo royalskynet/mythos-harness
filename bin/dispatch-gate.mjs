@@ -253,6 +253,8 @@ function pre(payload) {
     // pinGuard 只剩子代理會碰到；使用者訊息帶 #手動 才解（只解這一層）
     if (!(lastUserText(payload.transcript_path) || '').includes('#手動')) pinGuard(tool, input)
     selfCap(payload, tool, input)
+    // 子代理只用 haiku（11-07 使用者定）：haiku 不勝任就改派 O／opencode 免費模型，不升級子代理模型
+    if ((tool === 'Agent' || tool === 'Task') && input.model !== 'haiku') allowWith(input, { model: 'haiku' })
     allow()
   }
 
@@ -266,13 +268,13 @@ function pre(payload) {
   if (tool === 'Agent' || tool === 'Task') {
     if (input.run_in_background === false) deny('Agent 不可 run_in_background:false，會佔住對話')
     if (input.subagent_type !== 'dispatcher') deny(`主 session 只派 dispatcher，不派 ${input.subagent_type || '(未指定)'}`)
-    allow()
+    allowWith(input, { model: 'haiku', run_in_background: true })
   }
   if (tool === 'Bash' && routerBgBash(input.command)) allow()
   const cmd = String(input.command ?? '')
   if (tool === 'Bash' && ROUTER_FROM_CHAT.test(cmd)) {
     if (!tp || /['\n\r]/.test(tp)) deny('from-chat 沒有可用的 transcript 路徑')
-    allowWith(input, { command: `${cmd} --transcript '${tp}'` })
+    allowWith(input, { command: `${cmd} --transcript '${tp}'`, run_in_background: true })  // 啟動 worker 要數秒，Router 不等；exit 非 0 會以背景完成通知回來
   }
   if (tool === 'Bash' && ROUTER_QUICK.test(cmd)) allowWith(input, { command: cmd.replace(/^bin\/quick (--push )?/, 'bin/quick --push '), run_in_background: true })
   if (tool === 'Bash' && ROUTER_RECALL.test(cmd)) allowWith(input, { run_in_background: true })

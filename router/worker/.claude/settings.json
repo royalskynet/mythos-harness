@@ -39,7 +39,8 @@
   "env": {
     "JEV_COMPACT_ENABLED": "1",
     "JEV_COMPACT_AT_TOKENS": "200000",
-    "CLAUDE_MEM_EXCLUDED_PROJECTS": "__MYTHOS_WORKER_DIR__"
+    "CLAUDE_MEM_EXCLUDED_PROJECTS": "__MYTHOS_WORKER_DIR__",
+    "GENIE_WHEEL_GATE": "0"
   },
   "permissions": {
     "deny": [

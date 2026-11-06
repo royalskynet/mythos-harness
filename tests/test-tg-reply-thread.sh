@@ -72,6 +72,14 @@ c1="$(run | sed -n 1p | jq -r .params.content)"
 rm -f "$TMP/dbg.fail"
 echo '(direct-fail) ok'
 
+# 續派很慢時，工具 RPC 回應不能被卡在後面（11-07 Codex P0：原本全部排同一條鏈）
+{ n '再改一下' 42 ',"reply_to_message_id":"900"'; printf '%s\n' '{"jsonrpc":"2.0","id":7,"result":{"ok":true}}'; } > "$TMP/in.jsonl"
+printf '#!/bin/sh\nsleep 1\necho bg-0e0e0e02\n' > "$TMP/dbg-slow"; chmod +x "$TMP/dbg-slow"
+out="$(sleep 3 | HOME="$TMP" DISPATCH_BG_BIN="$TMP/dbg-slow" FAKE_IN="$TMP/in.jsonl" TG_COMMANDS_CHILD="node $TMP/child.mjs" node "$ROOT/bin/tg-commands.mjs" 2>/dev/null)"
+[ "$(printf '%s\n' "$out" | sed -n 1p | jq -r .id)" = 7 ] || fail "RPC 回應被續派卡住：$out"
+[ "$(printf '%s\n' "$out" | sed -n 2p | jq -r .params.content)" = '[已直送 worker thread=t-a job=bg-0e0e0e02] 再改一下' ] || fail "慢續派的訊息不見：$out"
+echo '(rpc-not-blocked) ok'
+
 # /fix 展開要真的送出去（11-04 前送的是原始那行）
 mkdir -p "$TMP/.claude/commands"; printf -- '---\nx: 1\n---\n症狀：$ARGUMENTS\n' > "$TMP/.claude/commands/fix.md"
 n '/fix 壞了' 42 '' > "$TMP/in.jsonl"

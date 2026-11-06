@@ -22,6 +22,10 @@ export function items(lines) {
     } else if (e?.type === 'assistant') {
       for (const c of e.message?.content ?? []) {
         if (c?.type === 'tool_use' && c.name === 'mcp__telegram__reply' && c.input?.text) out.push({ who: 'router', text: String(c.input.text).trim() })
+        // 11-07：quick／recall／dispatch-bg 處理掉的訊息沒有 reply，當邊界，免得下次 --from-chat 把舊問題一起派
+        else if (c?.type === 'tool_use' && c.name === 'Bash' && /^bin\/(quick|recall|dispatch-bg)\s/.test(String(c.input?.command ?? ''))) {
+          out.push({ who: 'router', text: '（已交背景處理）' })
+        }
       }
     }
   }
