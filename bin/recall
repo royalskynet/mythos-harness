@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""記憶快查（11-07 使用者定）：Router 自己查主 session 記憶、自己答，不派 dispatcher、不叫 LLM。
+用法：bin/recall '<關鍵字>'   一次查三處，各回索引
+      bin/recall --obs <id>    展開 claude-mem 一筆
+      bin/recall --fix <id>    展開 fixindex 一筆
+- claude-mem：只打 worker 的 HTTP GET /api/search、/api/observation/<id>（唯讀）；不載 plugin，Mythos 對話不寫進 claude-mem。
+  紀錄多是英文標題：中文詞組沒命中就逐詞再查。
+- fixindex find --spill；主 session memory 目錄（MEMORY.md、feedback/project/reference、state/）逐行比對。
+- 全程本機，不出機，所以不過 PII 閘。
+exit：0 有結果｜1 三處都沒有｜2 用法
+"""
+import json, os, re, subprocess, sys, urllib.parse, urllib.request
+
+MEM_URL = os.environ.get("RECALL_MEM_URL") or "http://127.0.0.1:37701"
+FIXINDEX = os.environ.get("RECALL_FIXINDEX") or os.path.expanduser("~/.local/bin/fixindex")
+FIX_DIR = os.environ.get("RECALL_FIX_DIR") or os.path.expanduser("~/dev/fix-store/fixes")
+MEM_DIR = os.environ.get("RECALL_MEM_DIR") or os.path.expanduser("~/.claude/projects/-Users-51mini/memory")
+LIMIT = 5
+
+
+def get(path):
+    try:
+        with urllib.request.urlopen(MEM_URL + path, timeout=8) as r:
+            return json.load(r)
+    except Exception as e:
+        return {"_err": str(e)}
+
+
+def mem_search(q):
+    terms = [q] + ([t for t in q.split() if len(t) > 1] if " " in q.strip() else [])
+    seen, rows, err = set(), [], None
+    for t in terms:
+        d = get(f"/api/search?format=json&limit={LIMIT}&query={urllib.parse.quote(t)}")
+        err = err or d.get("_err")
+        for o in d.get("observations") or []:
+            if o.get("id") not in seen:
+                seen.add(o.get("id"))
+                rows.append(f"  #{o.get('id')} {str(o.get('created_at', ''))[:10]} {o.get('title', '')}")
+        if rows:
+            break
+    return rows[:LIMIT], err
+
+
+def fix_search(q):
+    try:
+        out = subprocess.run([FIXINDEX, "find", q, "--spill", "--limit", "20"], capture_output=True, text=True, timeout=30).stdout
+    except Exception as e:
+        return [f"  （fixindex 失敗：{e}）"]
+    # find 是語意排序、分數正規化，亂打也回滿 → 只留內文真的含全部關鍵字的條目
+    terms = [t.lower() for t in q.split() if t]
+    rows = []
+    for l in out.splitlines():
+        m = re.match(r"\s+\d+#\d+\s+\[\w+\]\s+(\S+\.md)", l)
+        if not m:
+            continue
+        try:
+            body = open(os.path.join(FIX_DIR, m.group(1)), encoding="utf-8", errors="replace").read().lower()
+        except OSError:
+            continue
+        if all(t in body for t in terms):
+            rows.append(l.rstrip()[:200])
+    return rows[:LIMIT]
+
+
+def memdir_search(q):
+    terms = [t.lower() for t in q.split() if t]
+    rows = []
+    for root, _, files in os.walk(MEM_DIR):
+        for f in sorted(files):
+            if not f.endswith(".md"):
+                continue
+            p = os.path.join(root, f)
+            try:
+                lines = open(p, encoding="utf-8", errors="replace").read().splitlines()
+            except OSError:
+                continue
+            hits = [l.strip() for l in lines if all(t in l.lower() for t in terms)]
+            if hits:
+                rows.append(f"  {os.path.relpath(p, MEM_DIR)}：{hits[0][:160]}")
+    return rows[:LIMIT * 2]
+
+
+def main(argv):
+    if len(argv) == 2 and argv[0] == "--obs" and argv[1].isdigit():
+        d = get(f"/api/observation/{argv[1]}")
+        if d.get("_err") or not d.get("id"):
+            print(f"claude-mem 查不到 #{argv[1]}：{d.get('_err', '')}")
+            return 1
+        facts = d.get("facts")
+        facts = json.loads(facts) if isinstance(facts, str) and facts.startswith("[") else facts or []
+        print(f"#{d['id']} {str(d.get('created_at', ''))[:10]} [{d.get('project')}] {d.get('title')}\n{d.get('narrative') or d.get('text') or ''}")
+        for x in facts[:8]:
+            print(f"- {x}")
+        return 0
+    if len(argv) == 2 and argv[0] == "--fix" and argv[1].isdigit():
+        r = subprocess.run([FIXINDEX, "show", argv[1]], capture_output=True, text=True, timeout=30)
+        print(r.stdout[:3000] or f"fixindex 查不到 {argv[1]}")
+        return 0 if r.stdout else 1
+    q = " ".join(argv).strip()
+    if not q or q.startswith("-"):
+        print(__doc__, file=sys.stderr)
+        return 2
+    mem, err = mem_search(q)
+    fix, md = fix_search(q), memdir_search(q)
+    print(f"## claude-mem（展開：bin/recall --obs <id>）" + (f"｜連線失敗：{err}" if err and not mem else ""))
+    print("\n".join(mem) or "  （無）")
+    print("## fixindex（展開：bin/recall --fix <id>）")
+    print("\n".join(fix) or "  （無）")
+    print(f"## memory 目錄 {MEM_DIR}")
+    print("\n".join(md) or "  （無）")
+    return 0 if (mem or fix or md) else 1
+
+
+def selftest():
+    global MEM_URL, MEM_DIR
+    import tempfile
+    d = tempfile.mkdtemp()
+    open(os.path.join(d, "a.md"), "w").write("x\n訂閱＝花錢 Go 月費\n")
+    MEM_DIR, MEM_URL = d, "http://127.0.0.1:1"
+    assert memdir_search("訂閱 月費") == ["  a.md：訂閱＝花錢 Go 月費"], memdir_search("訂閱 月費")
+    assert memdir_search("訂閱 不存在") == []
+    rows, err = mem_search("x y")
+    assert rows == [] and err, (rows, err)
+    global FIXINDEX, FIX_DIR
+    open(os.path.join(d, "11.md"), "w").write("加輪 授權")
+    open(os.path.join(d, "fake"), "w").write("#!/bin/sh\necho '  11#1  [U] 11.md  t'\necho '  12#1  [U] 12.md  t'\n")
+    os.chmod(os.path.join(d, "fake"), 0o755)
+    FIXINDEX, FIX_DIR = os.path.join(d, "fake"), d
+    assert fix_search("加輪") == ["  11#1  [U] 11.md  t"], fix_search("加輪")
+    assert fix_search("不存在") == []
+    assert main([]) == 2 and main(["--obs", "abc"]) == 2
+    print("selftest ok")
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["--selftest"]:
+        selftest()
+    else:
+        sys.exit(main(sys.argv[1:]))

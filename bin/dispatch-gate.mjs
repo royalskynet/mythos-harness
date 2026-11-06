@@ -206,6 +206,8 @@ export const ROUTER_BG_BASH = /^bin\/dispatch-bg( --thread [A-Za-z0-9-]+)? [A-Za
 const BG_META = /[;&|$`\n\r]/
 // 快查線（11-06）：Router 可直接跑 bin/quick <絕對路徑> '<問題>'；問題只准包在單引號裡（裡面不展開），整行不可再接別的指令
 export const ROUTER_QUICK = /^bin\/quick \/[A-Za-z0-9._\/-]+ '[^'\n\r]+'$/
+// 記憶快查（11-07）：Router 自己查主 session 記憶（claude-mem HTTP／fixindex／memory 目錄，零 LLM）；格式同上，另收 --obs/--fix <數字>
+export const ROUTER_RECALL = /^bin\/recall ('[^'\n\r]+'|--(obs|fix) [0-9]+)$/
 const BG_DIR = path.join(MYTHOS, 'state', 'bg')
 function routerBgBash(cmd) {
   const c = String(cmd ?? '')
@@ -251,6 +253,7 @@ function pre(payload) {
   }
   if (tool === 'Bash' && routerBgBash(input.command)) allow()
   if (tool === 'Bash' && ROUTER_QUICK.test(String(input.command ?? ''))) allow()
+  if (tool === 'Bash' && ROUTER_RECALL.test(String(input.command ?? ''))) allow()
   if (tool === 'Write' && routerBgWrite(input.file_path)) allow()
   deny(`主 session 不用 ${tool || '(空)'}`)
 }
