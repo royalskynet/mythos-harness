@@ -3,6 +3,7 @@
 # 重派的那張再 FAIL → 用秘書口吻（brief-answer --kind fail）直接告訴使用者，事件 ACK；STALL → 先 cancel 再重派；
 # PASS 直送走 brief-answer --kind done。dispatch-bg／dispatch-cancel／tg-send／brief-answer 全換 stub。
 set -eu
+export LC_ALL=C  # 跟 launchd 一樣沒有 UTF-8 locale：awk／sed 的方括號會把全形字拆成位元組
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/bg-autoheal.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
