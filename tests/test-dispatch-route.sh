@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 驗收：bin/dispatch 路由只看難度（11-02 使用者定，不分急緩）：easy／mid→dcq 派of（free）、hard→deep；舊第四參數照收不理。
+# 驗收：bin/dispatch 路由只看難度（11-02 使用者定，不分急緩）：easy→dcq 派of（free）、mid→dcq 派os（sub，11-06）、hard→deep；舊第四參數照收不理。
 set -euo pipefail
 export DISPATCH_HARD_BACKEND=deep  # 工單 D：hard 預設改 bg-hard；本檔驗的是 deep 舊路徑，明設才走 deep-run
 
@@ -34,12 +34,12 @@ run() { : > "$TMP/dcq.log"; : > "$TMP/deep.log"
 }
 
 run easy;        grep -q 'order=free tier=easy' "$TMP/dcq.log" || fail "easy 應走 dcq free：$(cat "$TMP/dcq.log")"
-run mid;         grep -q 'order=free tier=mid' "$TMP/dcq.log" || fail "mid 應走 dcq free：$(cat "$TMP/dcq.log")"
+run mid;         grep -q 'order=sub tier=mid' "$TMP/dcq.log" || fail "mid 應走 dcq sub：$(cat "$TMP/dcq.log")"
 [ "$(tail -1 "$TMP/m/state/dispatch-jobs.tsv" | cut -f6)" = "$TMP" ] || fail "O 列要記 cwd（第 6 欄），dispatch-retry 才重派得了"
 [ -s "$TMP/deep.log" ] && fail "mid 不該叫 deep"
 run hard;        [ -s "$TMP/deep.log" ] || fail "hard 應走 deep"
 [ -s "$TMP/dcq.log" ] && fail "hard 不該進 dcq"
-run mid urgent;  grep -q 'order=free tier=mid' "$TMP/dcq.log" || fail "舊第四參數 urgent 應被忽略"
+run mid urgent;  grep -q 'order=sub tier=mid' "$TMP/dcq.log" || fail "舊第四參數 urgent 應被忽略"
 run hard later;  [ -s "$TMP/deep.log" ] || fail "舊第四參數 later 應被忽略"
 
 set +e
