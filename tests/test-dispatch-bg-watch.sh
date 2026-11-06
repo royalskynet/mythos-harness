@@ -181,4 +181,13 @@ grep -q 'event_id=bg-c8c80003-STALL' "$TMUX_LOG" || fail "8c：沒開工沒判 S
 grep -q '沒開工' "$TMUX_LOG" || fail "8c：STALL 沒寫沒開工：$(cat "$TMUX_LOG")"
 grep -q 'bg-d8d80004-STALL' "$TMUX_LOG" && fail "8d：剛派出就判沒開工：$(cat "$TMUX_LOG")"
 echo '(8) ok'
+# 9) 對帳不得把 bg 單當 dcq 單（11-06 bg-2157532a 誤判）：進行中、worker 在清單、超過 GONE_MIN → 不轉 FAIL
+now="$(date +%s)"
+row bg-99990009 bg $((now - 7200))
+printf '[{"sessionId":"99990009-1111-2222-3333-444455556666","kind":"background","state":"working"}]' > "$FAKE_AGENTS"
+printf 'BG_STALL_MIN=600\n' > "$MYTHOS_DIR/state/watchdog-knobs.env"
+: > "$TMUX_LOG"
+GONE_MIN=1 bash "$ROOT/bin/dispatch-watch" 9>&- || fail '9：非零退出'
+jq -e 'select(.job_id=="bg-99990009")' "$MYTHOS_DIR/state/events.jsonl" >/dev/null 2>&1 && fail '9：進行中的 bg 單被建了事件（對帳誤判）'
+echo '(9) ok'
 echo 'DISPATCH-BG-WATCH PASS'

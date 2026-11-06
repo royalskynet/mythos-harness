@@ -23,6 +23,8 @@ if [ -z "$task" ] || [ -z "$cwd" ] || [ -z "$tier" ]; then
   echo "用法：bin/dispatch <task.md 絕對路徑> <cwd 絕對路徑> <easy|mid|hard>" >&2
   exit 2
 fi
+# 相對路徑一律轉絕對（deep-run 拒收相對路徑，11-06 bk-binance-relogin）
+case "$task" in /*) ;; *) [ -f "$task" ] && task="$(cd "$(dirname "$task")" && pwd)/$(basename "$task")" ;; esac
 
 case "$tier" in
   easy | mid | hard) ;;

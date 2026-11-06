@@ -8,7 +8,8 @@
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-orphans() { ps -A -o pid=,ppid=,command= | awk -v t="$TAG" '$2==1 { sub(/^[ \t]+/, ""); c=$0; sub(/^[0-9]+ +[0-9]+ +/, "", c); if (c=="sleep " t) print $1 }'; }
+# 只看活著的（stat 非 Z）：剛被 kill、還沒被 reap 的 zombie 也是 ppid=1，但它已死、不是孤兒（偶發假陽性）。
+orphans() { ps -A -o pid=,ppid=,stat=,args= | awk -v t="$TAG" '$2==1 && $3 !~ /^Z/ { c=""; for (i=4; i<=NF; i++) c=c (i>4?" ":"") $i; if (c=="sleep " t) print $1 }'; }
 
 TAG="600.$$"
 set +e

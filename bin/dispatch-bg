@@ -62,6 +62,16 @@ WORKER_DIR="${MYTHOS_WORKER_DIR:-$HOME/bots/mythos-worker}"
 [ -d "$WORKER_DIR" ] || { echo "worker 目錄不存在：${WORKER_DIR}（跑 run.sh 會從 router/worker 同步）" >&2; exit 1; }
 mkdir -p "$MYTHOS_DIR/state/bg"
 
+# 11-06 去重：同 thread 已有未收尾（pending）的非 hard bg worker 時，新開改成續派，不再平行多開一個 Sonnet
+# （11-05 實測 t-dsh 1 分鐘內開 3 個、e2e-resume／t-binance-relogin 各 2 個）。DISPATCH_BG_NODEDUP=1 關閉；
+# 復原：cp bin/dispatch-bg.bak-20261106-dedup bin/dispatch-bg
+if [ -z "$thflag" ] && [ -z "$hard" ] && [ "$thread" != - ] && [ -z "${DISPATCH_BG_NODEDUP:-}" ] && [ -f "$MYTHOS_DIR/state/dispatch-jobs.tsv" ]; then
+  if awk -F'\t' -v th="$thread" -v now="$(date +%s)" '($7 == th && $8 == "bg" && $5 == "pending" && now - $4 < 1800) { f = 1 } END { exit !f }' "$MYTHOS_DIR/state/dispatch-jobs.tsv"; then
+    thflag=1
+    echo "去重：thread ${thread} 已有進行中的 worker，改續派" >&2
+  fi
+fi
+
 resume=''
 if [ -n "$thflag" ] && [ -f "$MYTHOS_DIR/state/dispatch-jobs.tsv" ]; then
   resume="$(awk -F'\t' -v th="$thread" '
@@ -95,6 +105,9 @@ if [ -n "$hard" ]; then
   args+=(--settings "$settings")
   backend=bg-hard
 fi
+# 11-06 瘦身：非 hard worker 不載入 skill 清單（實測少約 8K 新輸入）；DISPATCH_BG_KEEP_SKILLS=1 關閉。
+# 復原：cp state/backups-20261106-slim/dispatch-bg.bak-20261106-slim bin/dispatch-bg
+[ -z "$hard" ] && [ -z "${DISPATCH_BG_KEEP_SKILLS:-}" ] && args+=(--disable-slash-commands)
 [ -n "$resume" ] && args+=(--resume "$resume")
 # 最後一個參數才是 prompt 內容
 body="$(cat "$prompt")"

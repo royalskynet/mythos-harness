@@ -12,5 +12,18 @@
         ]
       }
     ]
+  },
+  "autoCompactWindow": 200000,
+  "env": {
+    "JEV_COMPACT_ENABLED": "1",
+    "JEV_COMPACT_AT_TOKENS": "200000",
+    "CLAUDE_MEM_EXCLUDED_PROJECTS": "__MYTHOS_WORKER_DIR__"
+  },
+  "permissions": {
+    "deny": [
+      "mcp__context7",
+      "mcp__jev_gate",
+      "mcp__plugin_claude-mem_mcp-search"
+    ]
   }
 }

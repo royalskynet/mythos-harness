@@ -15,7 +15,8 @@ else
   cp "$SRC/.claude/settings.json" "$SRC/.claude/hard.json" "$DEST/.claude/"
 fi
 esc="$(printf '%s' "$REPO" | sed -e 's/[\\|&]/\\&/g')"
+escw="$(printf '%s' "$DEST" | sed -e 's/[\\|&]/\\&/g')"
 for f in "$DEST/CLAUDE.md" "$DEST/.claude/settings.json"; do
-  sed "s|__MYTHOS_DIR__|${esc}|g" "$f" > "$f.tmp.$$" && mv "$f.tmp.$$" "$f"
+  sed -e "s|__MYTHOS_DIR__|${esc}|g" -e "s|__MYTHOS_WORKER_DIR__|${escw}|g" "$f" > "$f.tmp.$$" && mv "$f.tmp.$$" "$f"
 done
 chmod 644 "$DEST/CLAUDE.md" "$DEST"/.claude/*.json

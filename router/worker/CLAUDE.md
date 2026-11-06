@@ -46,6 +46,7 @@ hard 單一律在 git worktree 跑（`DISPATCH_HARD_BACKEND=deep` 的舊路徑�
 
 - PASS：自己重跑該工單 `## 驗收`（不接 `| tail` 吃退出碼，用 `> /tmp/x.log 2>&1; echo rc=$?` 再看尾段），看 `git diff --stat` 改動範圍是否超出工單；都對才回「完成」。
 - FAIL／STALL／REVIEW：先唯讀診斷哪條斷言沒過，再決定 `__MYTHOS_DIR__/bin/dispatch-retry <id> "<補充>"`／`__MYTHOS_DIR__/bin/dispatch-cancel <id>`；同一張重派 3 次仍失敗就停，回報使用者。
+- 失敗單一定要收尾（11-06）：FAIL／STALL／TIMEOUT 單處理完（重派、作廢、問題已解）都要留收尾記錄，否則 dispatch-watch 超過 6 小時會打 UNRESOLVED 回報。重派用 `__MYTHOS_DIR__/bin/dispatch-retry`（自動記）；其餘用 `__MYTHOS_DIR__/bin/dispatch-close [--quiet] <id> <superseded|done|informed|resolved> "<白話備註>"`。重複殘留單加 `--quiet`（只記帳不推）；有結果或要使用者決定的不加（會推一行給使用者）。收到 UNRESOLVED 就補收尾，不要只回「收到」。
 - 驗收不准自我評分：不改工單的 `## 驗收`、不改 delegate-guard 的 p-*／ledger-*（hook 會擋）；驗收過期另開新票，舊票標 superseded。
 
 ## 不能派出去的
@@ -53,3 +54,7 @@ hard 單一律在 git worktree 跑（`DISPATCH_HARD_BACKEND=deep` 的舊路徑�
 - 合規／客戶資料、憑證、`~/.claude/**`、launchd、`.git/config`：不派 O／deep（資料會出機給外部模型），你自己做。
 - 憑證不 cat／echo；查有沒有用 `creds has VAR`。
 - 不送 Telegram 訊息（那是 Router 的事），不碰專案外的內部系統，除非任務明說。
+
+## skills
+
+worker 啟動時不載入 skill 清單（省約 8K token，11-06 瘦身；`dispatch-bg` 帶 `--disable-slash-commands`，bg-hard 不受影響）。要用某個 skill（wheel、fixindex、fi 等）就直接 Read `~/.claude/skills/<名>/SKILL.md`（wheel 在 `~/dev/wheel/skills/wheel/SKILL.md`）照做，不用 Skill 工具。

@@ -39,6 +39,21 @@ case "$backend:$tier" in
   bg-hard:*) tier=hard; export DISPATCH_HARD_BACKEND=bg ;;
   bg:*) echo "bg 票用 bin/dispatch-bg --thread <thread> <prompt檔> 續派，不走 dispatch-retry：$id" >&2; exit 2 ;;
 esac
+# deep 兜底（11-06，使用者定「派o 沒別的可派才 deep」）：原票是 dcq（mid／easy）、已在 ~/.dcq/failed（免費層全敗，
+# 含 Zen 額度用完冷卻）、同題（root）還沒派過 deep、工單沒標 NO-DEEP → 這次改派 deep 一次（deep-run 走 OpenCode Go 訂閱，不碰 API 層）。
+# 每題最多一次：ledger 已有同 root 的 deep 票就不再兜底；之後的重派照原後端。關閉：DISPATCH_DEEP_FALLBACK=0。
+# 復原：cp dispatch-retry.bak-20261106-deepfb dispatch-retry
+DEEP_FB=0
+if [ "${DISPATCH_DEEP_FALLBACK:-1}" = 1 ] && [ "$backend" = dcq ] && [ -f "$HOME/.dcq/failed/$id.job" ] \
+   && ! grep -q '^CANCELLED=1' "$HOME/.dcq/failed/$id.job" 2>/dev/null; then
+  _b="$(basename "$task")"; _r="${_b%.md}"; _r="$(printf '%s' "$_r" | sed 's/-r[0-9][0-9]*$//')"
+  _had="$(awk -F'\t' -v r="$_r" '{ t=$3; sub(/.*\//,"",t); sub(/\.md$/,"",t); sub(/-r[0-9]+$/,"",t); b=$8; if (t==r && b=="deep") c++ } END { print c+0 }' "$TSV")"
+  if [ "$_had" = 0 ] && [ -f "$task" ] && ! grep -q 'NO-DEEP' "$task" \
+     && case "$task" in "$HOME"/.claude/*) false ;; *) true ;; esac; then
+    DEEP_FB=1; tier=hard; export DISPATCH_HARD_BACKEND=deep
+    echo "deep 兜底：派o 免費層全敗（$id），這題改派 deep 一次" >&2
+  fi
+fi
 # 沿用原 thread（D）；沒有就 - ，同票重派才接得上
 thread="$(printf '%s\n' "$row" | cut -f7)"
 case "$thread" in ''|-|*[!A-Za-z0-9-]*) thread=- ;; esac
@@ -73,3 +88,7 @@ ts="$(date '+%Y-%m-%d %H:%M')"
 } > "$newtask"
 
 DISPATCH_THREAD="$thread" "$ROOT_DIR/bin/dispatch" "$newtask" "$cwd" "$tier"
+rc=$?
+# 11-06：重派成功＝舊票收尾（dispatch-watch 的未收尾檢查看 state/closeouts.tsv）；不推使用者，新票自己會有結果
+[ "$rc" = 0 ] && "$ROOT_DIR/bin/dispatch-close" --quiet "$id" retried "dispatch-retry 重派 → ${root}-r${N}" >/dev/null 2>&1
+exit "$rc"
