@@ -82,7 +82,7 @@ touch "$TMP/oc-called"; echo ON_TRACK
 EOF
 chmod +x "$TMP/fake-oc"
 set +e
-echo hi | OC_FREE_ASK_SCRUB=http://127.0.0.1:9/scrub OC_FREE_ASK_BIN="$TMP/fake-oc" "$BIN/oc-free-ask" >/dev/null 2>&1
+echo hi | FREE_MODELS=fake-free OC_FREE_ASK_SCRUB=http://127.0.0.1:9/scrub OC_FREE_ASK_BIN="$TMP/fake-oc" "$BIN/oc-free-ask" >/dev/null 2>&1
 rc=$?
 set -e
 [ "$rc" = 3 ] || fail "scrub 不通 oc-free-ask 應 exit 3，得到 $rc"
