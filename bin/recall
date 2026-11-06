@@ -7,14 +7,18 @@
   紀錄多是英文標題：中文詞組沒命中就逐詞再查。
 - fixindex find --spill；主 session memory 目錄（MEMORY.md、feedback/project/reference、state/）逐行比對。
 - 全程本機，不出機，所以不過 PII 閘。
-exit：0 有結果｜1 三處都沒有｜2 用法
+- 三個來源都是選用：沒裝／沒開的自動略過；RECALL_SOURCES=mem,fix,md 挑要用哪幾個（預設全部）。
+exit：0 有結果｜1 都查不到｜2 用法｜6 沒有任何可用來源（呼叫端改派 dispatcher）
 """
-import json, os, re, subprocess, sys, urllib.parse, urllib.request
+import json, os, re, shutil, subprocess, sys, urllib.parse, urllib.request
 
 MEM_URL = os.environ.get("RECALL_MEM_URL") or "http://127.0.0.1:37701"
-FIXINDEX = os.environ.get("RECALL_FIXINDEX") or os.path.expanduser("~/.local/bin/fixindex")
+FIXINDEX = os.environ.get("RECALL_FIXINDEX") or shutil.which("fixindex") or os.path.expanduser("~/.local/bin/fixindex")
 FIX_DIR = os.environ.get("RECALL_FIX_DIR") or os.path.expanduser("~/dev/fix-store/fixes")
-MEM_DIR = os.environ.get("RECALL_MEM_DIR") or os.path.expanduser("~/.claude/projects/-Users-mac-mini/memory")
+# 主 session（cwd＝家目錄）的 Claude Code auto-memory：~/.claude/projects/<家目錄路徑 / . 換成 ->/memory
+MEM_DIR = os.environ.get("RECALL_MEM_DIR") or os.path.join(
+    os.path.expanduser("~/.claude/projects"), re.sub(r"[/.]", "-", os.path.expanduser("~")), "memory")
+SOURCES = [x.strip() for x in (os.environ.get("RECALL_SOURCES") or "mem,fix,md").split(",") if x.strip()]
 LIMIT = 5
 
 
@@ -24,6 +28,17 @@ def get(path):
             return json.load(r)
     except Exception as e:
         return {"_err": str(e)}
+
+
+def available():
+    ok = []
+    if "mem" in SOURCES and get("/api/health").get("status") == "ok":
+        ok.append("mem")
+    if "fix" in SOURCES and os.access(FIXINDEX, os.X_OK) and os.path.isdir(FIX_DIR):
+        ok.append("fix")
+    if "md" in SOURCES and os.path.isdir(MEM_DIR):
+        ok.append("md")
+    return ok
 
 
 def mem_search(q):
@@ -81,6 +96,11 @@ def memdir_search(q):
 
 
 def main(argv):
+    ok = available()
+    if len(argv) == 2 and argv[0] in ("--obs", "--fix") and argv[1].isdigit() and \
+            {"--obs": "mem", "--fix": "fix"}[argv[0]] not in ok:
+        print(f"{argv[0][2:]} 來源沒裝或沒開，改派 dispatcher", file=sys.stderr)
+        return 6
     if len(argv) == 2 and argv[0] == "--obs" and argv[1].isdigit():
         d = get(f"/api/observation/{argv[1]}")
         if d.get("_err") or not d.get("id"):
@@ -100,14 +120,25 @@ def main(argv):
     if not q or q.startswith("-"):
         print(__doc__, file=sys.stderr)
         return 2
-    mem, err = mem_search(q)
-    fix, md = fix_search(q), memdir_search(q)
-    print(f"## claude-mem（展開：bin/recall --obs <id>）" + (f"｜連線失敗：{err}" if err and not mem else ""))
-    print("\n".join(mem) or "  （無）")
-    print("## fixindex（展開：bin/recall --fix <id>）")
-    print("\n".join(fix) or "  （無）")
-    print(f"## memory 目錄 {MEM_DIR}")
-    print("\n".join(md) or "  （無）")
+    if not ok:
+        print(f"沒有可用的記憶來源（RECALL_SOURCES={','.join(SOURCES)}；claude-mem worker／fixindex／{MEM_DIR} 都不在），改派 dispatcher", file=sys.stderr)
+        return 6
+    mem = fix = md = []
+    if "mem" in ok:
+        mem, err = mem_search(q)
+        print(f"## claude-mem（展開：bin/recall --obs <id>）" + (f"｜連線失敗：{err}" if err and not mem else ""))
+        print("\n".join(mem) or "  （無）")
+    if "fix" in ok:
+        fix = fix_search(q)
+        print("## fixindex（展開：bin/recall --fix <id>）")
+        print("\n".join(fix) or "  （無）")
+    if "md" in ok:
+        md = memdir_search(q)
+        print(f"## memory 目錄 {MEM_DIR}")
+        print("\n".join(md) or "  （無）")
+    skipped = [x for x in SOURCES if x not in ok]
+    if skipped:
+        print(f"（略過，沒裝或沒開：{','.join(skipped)}）")
     return 0 if (mem or fix or md) else 1
 
 
@@ -129,6 +160,16 @@ def selftest():
     assert fix_search("加輪") == ["  11#1  [U] 11.md  t"], fix_search("加輪")
     assert fix_search("不存在") == []
     assert main([]) == 2 and main(["--obs", "abc"]) == 2
+    # 選用來源：claude-mem 不通（MEM_URL 指向 :1）→ 只用其餘；全部不在 → 6
+    global SOURCES
+    assert available() == ["fix", "md"], available()
+    assert main(["--obs", "1"]) == 6
+    assert main(["加輪"]) == 0
+    MEM_DIR, FIXINDEX = os.path.join(d, "nope"), os.path.join(d, "nope")
+    assert available() == [] and main(["加輪"]) == 6
+    SOURCES = ["md"]
+    MEM_DIR = d
+    assert available() == ["md"] and main(["加輪"]) == 0 and main(["不存在"]) == 1
     print("selftest ok")
 
 
