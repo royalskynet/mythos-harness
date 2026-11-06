@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""brief-answer [--stdout] --kind <quick|recall|done|fail> --q '<老闆原問題或交辦原話>' < 原始資料
+把快查／記憶查到的原始資料寫成「秘書對老闆」的口語回報，直送 Telegram（bin/tg-send），不經 Router（11-07）。
+改寫用 haiku（claude -p，--setting-sources local＋空目錄：不載使用者層 plugin／hook、不寫 claude-mem；
+不用 --bare，它只認按量計費的 API key）。claude CLI 沒裝或改寫失敗 → 推原文（選用依賴，降級不擋）。
+--stdout：只改寫印到 stdout、不送（dispatch-watch 直送 worker 結果時用，它自己帶 --thread／--job 送）。
+exit：0 已送｜2 用法｜7 送不出去（tg-send 失敗，呼叫端交回 Router 轉述）
+env：BRIEF_MODEL（預設 claude-haiku-5-5）BRIEF_CLAUDE（claude 路徑）BRIEF_DRY=1（只印不送，測試用）
+"""
+import os, shutil, subprocess, sys, tempfile, time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+MODEL = os.environ.get("BRIEF_MODEL", "claude-haiku-5-5")
+CLAUDE = os.environ.get("BRIEF_CLAUDE") or os.environ.get("CLAUDE_BIN") or shutil.which("claude")
+# 測試沙箱（lib-test-guard）：claude 不在沙箱裡就不改寫，免得測試打到真模型
+if os.environ.get("MYTHOS_TEST_SANDBOX") and CLAUDE and not os.path.abspath(CLAUDE).startswith(os.environ["MYTHOS_TEST_SANDBOX"]):
+    CLAUDE = None
+SYSTEM = """你是老闆的秘書，用 Telegram 口頭回報。根據使用者訊息裡的「資料」回答「問題」。
+繁體中文、台灣口語，像人講話：先講答案，再補一兩句老闆會想知道的細節，最多 6 句。
+不寫標題、條列符號、編號、id、指令、檔案路徑、雜湊、程式碼、模型名稱；除非問題問的就是那個名稱或數字。
+資料沒寫的不講，不推測；資料顯示查不到就直說查不到。"""
+
+
+def rewrite(q, material):
+    if not CLAUDE:
+        return None
+    try:
+        r = subprocess.run(
+            [CLAUDE, "-p", "--setting-sources", "local", "--strict-mcp-config", "--model", MODEL,
+             "--no-session-persistence", "--tools", "", "--system-prompt", SYSTEM],
+            input=f"問題：{q}\n\n資料：\n{material[:12000]}", capture_output=True, text=True, timeout=int(os.environ.get("BRIEF_TIMEOUT") or 90),
+            cwd=tempfile.gettempdir())
+    except Exception:
+        return None
+    out = r.stdout.strip()
+    return out if r.returncode == 0 and out else None
+
+
+def main(argv):
+    kind = q = ""
+    to_stdout = False
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--stdout":
+            to_stdout, i = True, i + 1
+        elif argv[i] == "--kind" and i + 1 < len(argv):
+            kind, i = argv[i + 1], i + 2
+        elif argv[i] == "--q" and i + 1 < len(argv):
+            q, i = argv[i + 1], i + 2
+        else:
+            print(__doc__.split("\n")[0], file=sys.stderr)
+            return 2
+    material = sys.stdin.read().strip()
+    if kind not in ("quick", "recall", "done", "fail") or not q or not material or (kind in ("done", "fail") and not to_stdout):
+        print(__doc__.split("\n")[0], file=sys.stderr)
+        return 2
+    text = rewrite(q, material) or material  # ponytail: 改寫失敗推原文，之後可改成交回 Router
+    if to_stdout or os.environ.get("BRIEF_DRY"):
+        print(text)
+        return 0
+    r = subprocess.run([os.path.join(HERE, "tg-send"), "--thread", kind, "--job", f"{kind}-{int(time.time())}"],
+                       input=text, capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"brief-answer: tg-send rc={r.returncode} {r.stderr.strip()[:200]}", file=sys.stderr)
+        return 7
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

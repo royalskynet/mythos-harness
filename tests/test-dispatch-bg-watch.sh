@@ -17,6 +17,7 @@ export CLAUDE_BIN="$TMP/claude"
 export FAKE_AGENTS="$TMP/agents.json"
 export STOP_RC="$TMP/stop.rc"
 export CLAUDE_LOG="$TMP/claude.log"
+export BG_AUTOHEAL=0  # 本檔驗舊路徑（事件交 Router）；自癒另見 test-bg-autoheal.sh
 # stub 只做自己那件事、不 cat 任何會讀 stdin 的東西：watch 的 while-read 迴圈會把還沒讀的行交給子行程
 cat > "$CLAUDE_BIN" <<'STUB'
 #!/bin/sh

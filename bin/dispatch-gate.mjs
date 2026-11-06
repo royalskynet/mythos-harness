@@ -36,6 +36,15 @@ function allow() {
   process.exit(0)
 }
 
+// 改寫後放行（11-07 秒回）：updatedInput 取代整個 input，所以帶上原欄位再覆寫
+function allowWith(input, patch) {
+  log(`ALLOW-REWRITE ${String(patch.command ?? '').slice(0, 80)}`)
+  fs.writeSync(1, JSON.stringify({
+    hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', updatedInput: { ...input, ...patch } },
+  }))
+  process.exit(0)
+}
+
 function deny(why, reasonOverride) {
   const reason = reasonOverride || `Mythos 主 session 只聊天派工，不自己動手：用 Agent 工具派背景 dispatcher 子代理（subagent_type: "dispatcher"，不設 run_in_background 或設 true），把使用者原話與你知道的脈絡交給它，它會判難度、自己做或派 O／deep；派完立刻 reply 使用者一句「已派 dispatcher」，結束本回合。${why ? `（${why}）` : ''}`
   log(`DENY ${why}`)
@@ -207,10 +216,15 @@ function pinGuard(tool, input) {
 // 字元集已排除 ;&|$` 與換行（JS 的 $ 不帶 m 旗標只認字串尾），另外再明擋一次，正規式被改寬也不會漏。
 export const ROUTER_BG_BASH = /^bin\/dispatch-bg( --thread [A-Za-z0-9-]+)? [A-Za-z0-9-]+ state\/bg\/[A-Za-z0-9._-]+\.md$/
 const BG_META = /[;&|$`\n\r]/
+// 11-07 秒回：Router 派工只寫這行，prompt 由 dispatch-bg 從 transcript 抓原話自動寫；gate 補 --transcript（Router 不必知道路徑）
+export const ROUTER_FROM_CHAT = /^bin\/dispatch-bg (--thread [A-Za-z0-9-]+ )?--from-chat [A-Za-z0-9-]+( --note '[^'\n\r]+')?$/
 // 快查線（11-06）：Router 可直接跑 bin/quick <絕對路徑> '<問題>'；問題只准包在單引號裡（裡面不展開），整行不可再接別的指令
-export const ROUTER_QUICK = /^bin\/quick \/[A-Za-z0-9._\/-]+ '[^'\n\r]+'$/
-// 記憶快查（11-07）：Router 自己查主 session 記憶（claude-mem HTTP／fixindex／memory 目錄，零 LLM）；格式同上，另收 --obs/--fix <數字>
-export const ROUTER_RECALL = /^bin\/recall ('[^'\n\r]+'|--(obs|fix) [0-9]+)$/
+// 11-07 秒回：gate 一律改寫成 --push＋run_in_background，答案由 brief-answer 直送，Router 回合不被佔住
+export const ROUTER_QUICK = /^bin\/quick (--push )?\/[A-Za-z0-9._\/-]+ '[^'\n\r]+'$/
+// 記憶快查（11-07）：關鍵字查詢必帶 --ask '<原問題>'，gate 改寫成背景跑、結果直送；--obs/--fix <數字> 是秒級細節查詢，前景照放
+export const ROUTER_RECALL = /^bin\/recall '[^'\n\r]+' --ask '[^'\n\r]+'$/
+export const ROUTER_RECALL_DETAIL = /^bin\/recall --(obs|fix) [0-9]+$/
+const RECALL_BARE = /^bin\/recall '[^'\n\r]+'$/
 const BG_DIR = path.join(MYTHOS, 'state', 'bg')
 function routerBgBash(cmd) {
   const c = String(cmd ?? '')
@@ -255,8 +269,15 @@ function pre(payload) {
     allow()
   }
   if (tool === 'Bash' && routerBgBash(input.command)) allow()
-  if (tool === 'Bash' && ROUTER_QUICK.test(String(input.command ?? ''))) allow()
-  if (tool === 'Bash' && ROUTER_RECALL.test(String(input.command ?? ''))) allow()
+  const cmd = String(input.command ?? '')
+  if (tool === 'Bash' && ROUTER_FROM_CHAT.test(cmd)) {
+    if (!tp || /['\n\r]/.test(tp)) deny('from-chat 沒有可用的 transcript 路徑')
+    allowWith(input, { command: `${cmd} --transcript '${tp}'` })
+  }
+  if (tool === 'Bash' && ROUTER_QUICK.test(cmd)) allowWith(input, { command: cmd.replace(/^bin\/quick (--push )?/, 'bin/quick --push '), run_in_background: true })
+  if (tool === 'Bash' && ROUTER_RECALL.test(cmd)) allowWith(input, { run_in_background: true })
+  if (tool === 'Bash' && ROUTER_RECALL_DETAIL.test(cmd)) allow()
+  if (tool === 'Bash' && RECALL_BARE.test(cmd)) deny('recall 缺 --ask', "記憶查詢改背景直送：用 bin/recall '<關鍵字>' --ask '<使用者原問題>'，結果會用秘書口吻直接送給使用者；你這回合不用等，也不用 reply 收到。")
   if (tool === 'Write' && routerBgWrite(input.file_path)) allow()
   deny(`主 session 不用 ${tool || '(空)'}`)
 }

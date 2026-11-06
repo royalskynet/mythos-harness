@@ -90,7 +90,7 @@ watch
 [ "$(calls)" = 1 ] || fail "(a) stub 應收到 1 次：$(calls)"
 grep -q '全部做完' "$STUB_CALLS" || fail '(a) stub 沒收到摘要'
 if grep -q 'commit abc1234\|thread=t-aaaa0001' "$STUB_CALLS"; then fail '(a) 細節段／thread 行被發給使用者'; fi
-grep -q '有問題直接回覆這則' "$STUB_CALLS" || fail '(a) 缺續派提示'
+if grep -q '✅\|有問題直接回覆這則' "$STUB_CALLS"; then fail '(a) 直送不該再帶代號標題／固定句（11-07 秘書口吻）'; fi
 grep -q "$(printf '^42\t900\tt-aaaa0001\tbg-aaaa0001\t')" "$MAP" || fail "(a) 對照表沒登錄：$(cat "$MAP" 2>/dev/null)"
 if grep -q 'event_id=bg-aaaa0001-PASS' "$TMUX_LOG" 2>/dev/null; then fail '(a) 直發成功還投遞給 Router'; fi
 [ "$(ev bg-aaaa0001-PASS .direct)" = sent ] || fail "(a) direct 應是 sent：$(ev bg-aaaa0001-PASS .direct)"

@@ -3,6 +3,7 @@
 用法：bin/recall '<關鍵字>'   一次查三處，各回索引
       bin/recall --obs <id>    展開 claude-mem 一筆
       bin/recall --fix <id>    展開 fixindex 一筆
+      bin/recall '<關鍵字>' --ask '<原問題>'   查完交 bin/brief-answer 寫成秘書口吻直送 Telegram，stdout 只回「已直送」（11-07 秒回）
 - claude-mem：只打 worker 的 HTTP GET /api/search、/api/observation/<id>（唯讀）；不載 plugin，Mythos 對話不寫進 claude-mem。
   紀錄多是英文標題：中文詞組沒命中就逐詞再查。
 - fixindex find --spill；主 session memory 目錄（MEMORY.md、feedback/project/reference、state/）逐行比對。
@@ -142,6 +143,29 @@ def main(argv):
     return 0 if (mem or fix or md) else 1
 
 
+BRIEF = os.environ.get("RECALL_BRIEF") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "brief-answer")
+
+
+def ask_main(argv):
+    """--ask：結果（含查不到）交 brief-answer 直送；送不出去或沒來源（6）就照舊印給呼叫端。"""
+    import contextlib, io
+    i = argv.index("--ask")
+    q, rest = (argv[i + 1] if i + 1 < len(argv) else ""), argv[:i] + argv[i + 2:]
+    if not q.strip():
+        print(__doc__, file=sys.stderr)
+        return 2
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = main(rest)
+    if rc in (0, 1):
+        material = buf.getvalue() if rc == 0 else f"記憶三處都查不到「{' '.join(rest)}」"
+        if subprocess.run([BRIEF, "--kind", "recall", "--q", q], input=material, text=True).returncode == 0:
+            print("已直送使用者（秘書口吻），不用再 reply。")
+            return 0
+    sys.stdout.write(buf.getvalue())
+    return rc
+
+
 def selftest():
     global MEM_URL, MEM_DIR
     import tempfile
@@ -170,11 +194,27 @@ def selftest():
     SOURCES = ["md"]
     MEM_DIR = d
     assert available() == ["md"] and main(["加輪"]) == 0 and main(["不存在"]) == 1
+    # --ask：有結果／查不到都交 brief-answer；brief 失敗就把結果印回呼叫端
+    global BRIEF
+    log = os.path.join(d, "brief.log")
+    open(os.path.join(d, "brief"), "w").write(f"#!/bin/sh\necho \"$*\" >> {log}\ncat >> {log}\nexit ${{BRIEF_RC:-0}}\n")
+    os.chmod(os.path.join(d, "brief"), 0o755)
+    BRIEF = os.path.join(d, "brief")
+    assert ask_main(["加輪", "--ask", "加輪怎麼用？"]) == 0
+    assert ask_main(["不存在", "--ask", "那個呢"]) == 0
+    got = open(log).read()
+    assert "--kind recall --q 加輪怎麼用？" in got and "11.md" in got and "查不到「不存在」" in got, got
+    os.environ["BRIEF_RC"] = "7"
+    assert ask_main(["加輪", "--ask", "再一次"]) == 0  # brief 失敗 → 照舊印結果，rc 跟 main 一樣
+    del os.environ["BRIEF_RC"]
+    assert ask_main(["加輪", "--ask", ""]) == 2
     print("selftest ok")
 
 
 if __name__ == "__main__":
     if sys.argv[1:] == ["--selftest"]:
         selftest()
+    elif "--ask" in sys.argv[1:]:
+        sys.exit(ask_main(sys.argv[1:]))
     else:
         sys.exit(main(sys.argv[1:]))

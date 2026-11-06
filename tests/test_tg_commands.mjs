@@ -4,7 +4,7 @@ import assert from 'assert'
 const src = fs.readFileSync(new URL('../bin/tg-commands.mjs', import.meta.url), 'utf8')
 const pick = re => src.match(re)[0]
 const formatContext = new Function(pick(/^const kNum[^\n]*\n/m) + pick(/^function formatContext[\s\S]*?^}\n/m) + 'return formatContext')()
-const busyRe = new RegExp(src.match(/const isBusy = .*?\/(.+?)\/\.test/)[1])
+const busyRe = new RegExp(src.match(/const isBusy = [\s\S]*?\/(.+?)\/\.test/)[1])
 
 const pane = `  ⎿  Context Usage
      ⛁ ⛀ ⛁   131.7k/200k tokens (66%)

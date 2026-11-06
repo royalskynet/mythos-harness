@@ -260,7 +260,8 @@ test('加輪：Router 送 #加輪 要使用者 Telegram 回過「加輪」，自
 test('快查線：Router 可跑 bin/quick <絕對路徑> \'<問題>\'，夾帶指令或雙引號都擋', () => {
   const tp = routerTx(['channel', '查一下'])
   const bash = (command) => decision(pre('Bash', { command }, tp))
-  assert.equal(bash("bin/quick /home/u/repo 'bin 底下有幾個 gate 檔；含 $HOME 也只是字'"), null)
+  assert.equal(bash("bin/quick /home/u/repo 'bin 底下有幾個 gate 檔；含 $HOME 也只是字'"), 'allow')
+  assert.equal(bash("bin/quick --push /home/u/repo 'q'"), 'allow')
   assert.equal(bash("bin/quick /home/u/repo 'q'; rm -rf /tmp/x"), 'deny')
   assert.equal(bash('bin/quick /home/u/repo "$(id)"'), 'deny')
   assert.equal(bash("bin/quick relative/path 'q'"), 'deny')
@@ -270,11 +271,31 @@ test('快查線：Router 可跑 bin/quick <絕對路徑> \'<問題>\'，夾帶�
 test('記憶快查：Router 可跑 bin/recall \'<關鍵字>\' 與 --obs/--fix <數字>，其餘擋', () => {
   const tp = routerTx(['channel', '之前怎麼定的'])
   const bash = (command) => decision(pre('Bash', { command }, tp))
-  assert.equal(bash("bin/recall '訂閱 花錢'"), null)
+  assert.equal(bash("bin/recall '訂閱 花錢' --ask '訂閱算不算花錢'"), 'allow')
+  assert.equal(bash("bin/recall '訂閱 花錢'"), 'deny')
+  assert.equal(bash("bin/recall 'a' --ask 'b'; id"), 'deny')
   assert.equal(bash('bin/recall --obs 9457'), null)
   assert.equal(bash('bin/recall --fix 11774'), null)
   assert.equal(bash("bin/recall 'q'; rm -rf /tmp/x"), 'deny')
   assert.equal(bash('bin/recall "$(id)"'), 'deny')
   assert.equal(bash('bin/recall --obs 1; id'), 'deny')
   assert.equal(bash('bin/recall --selftest'), 'deny')
+})
+
+test('秒回：quick／recall 被改寫成背景跑，quick 強制 --push，其餘欄位保留', () => {
+  const tp = routerTx(['channel', '查一下'])
+  const upd = (command) => JSON.parse(pre('Bash', { command, description: 'd' }, tp)).hookSpecificOutput.updatedInput
+  assert.deepEqual(upd("bin/quick /r 'q'"), { command: "bin/quick --push /r 'q'", description: 'd', run_in_background: true })
+  assert.deepEqual(upd("bin/quick --push /r 'q'"), { command: "bin/quick --push /r 'q'", description: 'd', run_in_background: true })
+  assert.deepEqual(upd("bin/recall 'k' --ask 'q'"), { command: "bin/recall 'k' --ask 'q'", description: 'd', run_in_background: true })
+  assert.equal(pre('Bash', { command: 'bin/recall --fix 1' }, tp).trim(), '')
+})
+
+test('秒回派工：bin/dispatch-bg --from-chat <thread> 放行並補 --transcript；夾帶指令擋', () => {
+  const tp = routerTx(['channel', '幫我修 log'])
+  const upd = (command) => JSON.parse(pre('Bash', { command }, tp)).hookSpecificOutput
+  assert.equal(upd('bin/dispatch-bg --from-chat t-log').updatedInput.command, `bin/dispatch-bg --from-chat t-log --transcript '${tp}'`)
+  assert.equal(upd("bin/dispatch-bg --thread t-log --from-chat t-log --note '接續昨天'").permissionDecision, 'allow')
+  assert.equal(upd('bin/dispatch-bg --from-chat t-log; id').permissionDecision, 'deny')
+  assert.equal(upd("bin/dispatch-bg --from-chat t-log --transcript '/etc/passwd'").permissionDecision, 'deny')
 })
