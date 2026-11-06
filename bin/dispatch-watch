@@ -182,7 +182,7 @@ direct_unknown() { # job eid
 summary_of() { # result檔
   awk '/^---細節---[[:space:]]*$/ { if (on) { ok = 1; exit } }
        on { buf = buf $0 "\n"; next }
-       /^摘要[:：]/ { on = 1; sub(/^摘要[:：][[:space:]]*/, ""); if ($0 != "") buf = $0 "\n" }
+       /^摘要(:|：)/ { on = 1; sub(/^摘要(:|：)[[:space:]]*/, ""); if ($0 != "") buf = $0 "\n" }  # 不用 [:：]：launchd 沒 UTF-8 locale，方括號會把全形冒號拆成位元組
        END { if (ok) printf "%s", buf }' "$1" 2>/dev/null | sed '/./,$!d'
 }
 
