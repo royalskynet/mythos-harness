@@ -24,6 +24,10 @@ function useSessionState(sid) {
 }
 const LOG = process.env.TG_PROGRESS_LOG || path.join(HOME, 'bots/mythos/logs/tg-progress.log')
 const API = process.env.TG_API_BASE || 'https://api.telegram.org'
+// worker Stop 後留墓碑（done＋done_at）而不是刪檔：async hook 晚到的 pre 會在刪檔後重發一則刪不掉的進度（11-07 Codex P1）。
+// 墓碑過了 DONE_GRACE_MS 才當新回合（同一個 worker session 被續派）。
+const DONE_GRACE_MS = Number(process.env.TG_PROGRESS_DONE_GRACE_MS || 120000)
+const STALE_MS = 6 * 3600 * 1000
 const EDIT_GAP_MS = WORKER ? 5000 : 1500 // Telegram 對同一 chat 的修改頻率有上限；worker 可能多個並行，放慢
 const SHOW_STEPS = 8
 
@@ -160,7 +164,8 @@ async function pre(h) {
   let wait = 0
   await withLock(async () => {
     let s = readState()
-    if (s.turn !== turn) s = { turn, chat_id: ch.chat_id, title: WORKER ? workerTitle(h.transcript_path) : '', steps: [], msg_id: null, shown: 0, last_edit: 0, done: false }
+    const expired = WORKER && s.done && Date.now() - (s.done_at ?? 0) > DONE_GRACE_MS
+    if (s.turn !== turn || expired) s = { turn, chat_id: ch.chat_id, title: WORKER ? workerTitle(h.transcript_path) : '', steps: [], msg_id: null, shown: 0, last_edit: 0, done: false }
     if (s.done) return
     s.steps.push(step)
     if (!WORKER) void api('sendChatAction', { chat_id: s.chat_id, action: 'typing' })  // worker 在背景，不佔「輸入中」
@@ -196,13 +201,25 @@ async function stop(h = {}) {
     const s = readState()
     if (!s.turn || s.done) return
     s.done = true
+    s.done_at = Date.now()
     writeState(s) // 先標 done：還在路上的 pre 不會再發新訊息
     if (s.msg_id) {
       await api('deleteMessage', { chat_id: s.chat_id, message_id: s.msg_id })
       log(`turn done steps=${s.steps.length}`)
     }
   })
-  if (WORKER) try { fs.unlinkSync(STATE) } catch {}
+  if (WORKER) pruneWorkerStates()
+}
+
+// 墓碑不刪，改在 Stop 時清掉 6 小時沒動的 worker 狀態檔
+function pruneWorkerStates() {
+  try {
+    for (const f of fs.readdirSync(STATE_DIR)) {
+      if (!/^progress-w-.*\.json$/.test(f)) continue
+      const p = path.join(STATE_DIR, f)
+      if (Date.now() - fs.statSync(p).mtimeMs > STALE_MS) fs.unlinkSync(p)
+    }
+  } catch {}
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

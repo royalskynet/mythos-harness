@@ -70,9 +70,14 @@ L1_BATCH="${WATCHDOG_L1_BATCH:-10}"
 QUEUE_MAX="${WATCHDOG_QUEUE_MAX:-200}"
 # 每棒硬砍秒數（沿用 review-judge 的 run_to 寫法）
 LLM_TIMEOUT_S="${WATCHDOG_LLM_TIMEOUT_S:-40}"
-# 退路鏈：beam-free → OC Go 次選免費模型 → local-llm（:4000 閘道，含 Presidio）；以 ; 分隔，每棒可帶參數
-LLM_ALT="${WATCHDOG_LLM_ALT:-opencode-go/iceman-contributor-free}"
-LEGS="${WATCHDOG_LLM_LEGS:-$HERE/oc-free-ask;$HERE/oc-free-ask $LLM_ALT;$HERE/local-llm}"
+# 退路鏈：免費池第一名 → 第二名 → local-llm（:4000 閘道，含 Presidio）；以 ; 分隔，每棒可帶參數。
+# 模型名取 bin/free-models（隨每日 probe 換，不寫死）；只在沒設 WATCHDOG_LLM_LEGS 時才去查
+if [ -z "${WATCHDOG_LLM_LEGS:-}" ]; then
+  LLM_ALT="${WATCHDOG_LLM_ALT:-$("$HERE/free-models" 2>/dev/null | sed -n 2p)}"
+  LEGS="$HERE/oc-free-ask;${LLM_ALT:+$HERE/oc-free-ask $LLM_ALT;}$HERE/local-llm"
+else
+  LEGS="$WATCHDOG_LLM_LEGS"
+fi
 # L2 兩棒刻意不同體系（opencode CLI vs :4000 閘道）
 L2_LEGS="${WATCHDOG_L2_LEGS:-$HERE/oc-free-ask;$HERE/local-llm}"
 SCRUB_URL="${OC_FREE_ASK_SCRUB:-http://127.0.0.1:4102/scrub}"
@@ -542,7 +547,7 @@ EOF
       cur="$(knob_get "$name" '-')"
       knob_set "$name" "$1"
       log "L2 APPLY $name ${cur}→$1（兩棒同值）"
-      alert "knob-$name-$1-$now" "Watchdog 已調 ${name}：${cur}→$1（beam-free 與 local-llm 同值、在上下限內）"
+      alert "knob-$name-$1-$now" "Watchdog 已調 ${name}：${cur}→$1（免費模型與 local-llm 同值、在上下限內）"
     else
       l2_propose_file "$name" "$val" "兩棒不一致或超界（L1=${val}；L2=$(printf '%s' "$vals" | sed 's/^ //')）" "$lo$detail"
     fi

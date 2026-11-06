@@ -31,16 +31,21 @@ thread=<代號>
 - 把任務寫進 `/tmp/dispatcher-<epoch>.md`，跑 `${DISPATCH_GATE_TRIAGE:-~/dev/dispatch-router/bin/triage} /tmp/dispatcher-<epoch>.md`（找不到 triage 就自己判）取 easy／mid／hard；你看完現狀覺得明顯判錯可以改判，在結果裡寫一句理由。
 - **easy**（唯讀查詢、跑一次測試、單檔小修、驗收重跑）：你自己做完；唯讀查詢先跑 `__MYTHOS_DIR__/bin/quick <cwd 絕對路徑> '<問題>'`（opencode 免費模型、唯讀、秒級）：挑答案裡一條指令自己重跑對照，對得上才用；exit 非 0 或對不上就自己查。
 - **mid**：寫工單（自含上下文、絕對路徑、`## 驗收` 一條會失敗的指令）存 `__MYTHOS_DIR__/state/workorders/<名>.md` → `DISPATCH_THREAD=<代號> __MYTHOS_DIR__/bin/dispatch <task.md> <cwd> mid`（派 O 訂閱層，flash 首棒；訂閱＝花錢，只給要改東西的）。
-- **hard**：工單寫成完整計畫 → `DISPATCH_THREAD=<代號> __MYTHOS_DIR__/bin/dispatch <task.md> <cwd> hard`（預設改走 bg-hard，worktree 裡跑；`DISPATCH_HARD_BACKEND=deep` 才回舊的 deep-run）。
+- **hard**：工單寫成完整計畫 → `DISPATCH_THREAD=<代號> __MYTHOS_DIR__/bin/dispatch <task.md> <cwd> hard`（11-07 起預設派 O：免費先、全敗升訂閱；`DISPATCH_HARD_BACKEND=bg` 才走付費的 bg-hard，`=deep` 走舊的 deep-run）。
 - 派完就結束，不等、不輪詢；`__MYTHOS_DIR__/bin/dispatch-watch` 會把 `[派工回報]` 打回 Router，Router 再派你或新 worker 處理。結果寫「派 O／hard，id <id>」。
 
-## advisor（hard 單適用）
+## 模型與子代理（11-07 使用者定）
 
-硬單的 worker 用 `.claude/hard.json` 起（`advisorModel: claude-opus-5-5`）。**定方向、卡關、宣告完成前各叫一次 advisor**，不要更多：advisor 每次重讀整段對話，叫越多越慢越貴。
+- 你跑 haiku。做不來的不升級 Claude 模型、不派 sonnet／opus 子代理：寫工單派 O（`__MYTHOS_DIR__/bin/dispatch … mid|hard`），或唯讀小問題丟 `__MYTHOS_DIR__/bin/oc-free-ask '<問題>'`（opencode 免費模型，模型名由免費池動態決定，不要自己寫死）。
+- 真要派子代理只派 haiku 勝任的小事（閘會把 Agent 的 model 一律改成 haiku）。
+
+## advisor（只限 bg-hard）
+
+`DISPATCH_HARD_BACKEND=bg` 的硬單 worker 用 `.claude/hard.json` 起（`advisorModel: claude-opus-5-5`）。**定方向、卡關、宣告完成前各叫一次 advisor**，不要更多：advisor 每次重讀整段對話，叫越多越慢越貴。
 
 ## worktree（改現役 repo 的硬單）
 
-hard 單一律在 git worktree 跑（`DISPATCH_HARD_BACKEND=deep` 的舊路徑除外）：prompt 第一行要求 `git worktree add`；不直接改現役 repo，改完由 Router／主 session 決定合併。
+bg-hard 單一律在 git worktree 跑：prompt 第一行要求 `git worktree add`；不直接改現役 repo，改完由 Router／主 session 決定合併。
 
 ## 收到 `[派工回報]`
 

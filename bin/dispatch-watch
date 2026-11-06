@@ -230,9 +230,12 @@ bg_autoheal() { # id eid thread task extra kind(FAIL|STALL)
       [ -n "$(printf '%s' "$text" | tr -d '[:space:]')" ] || text="這件事自動重試一次還是沒做完：${extra}。要再試或換做法，回這則跟我說。"
       printf '%s\n' "$text" | MYTHOS_DIR="$MYTHOS_DIR" "${NODE_BIN:-node}" "$TG_SEND_BIN" --thread "$th" --job "$id" 9>&- >/dev/null 2>>"$WATCH_LOG"
       rc=${PIPESTATUS[1]}
-      [ "$rc" = 0 ] || { log "autoheal 告知失敗 rc=$rc $eid"; return 1; }
-      ledger_events set "$EVENTS_FILE" "$eid" "{\"direct\":\"sent\",\"acked_at\":$now}" >/dev/null
-      log "autoheal 第二次失敗已告知使用者 $eid"
+      case "$rc" in
+        0) ledger_events set "$EVENTS_FILE" "$eid" "{\"direct\":\"sent\",\"acked_at\":$now}" >/dev/null
+           log "autoheal 第二次失敗已告知使用者 $eid" ;;
+        1|97) log "autoheal 告知失敗 rc=$rc $eid"; return 1 ;;
+        *) direct_unknown "$id" "$eid" ;;  # 11-07 Codex P0：rc2 可能已送出，交回 Router 會重複告知（寧漏不重）
+      esac
       return 0 ;;
   esac
   p="$MYTHOS_DIR/state/bg/$th-autoretry-$now.md"

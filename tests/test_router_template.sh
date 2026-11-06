@@ -17,7 +17,9 @@ call() { printf '%s' "$1" | CLAUDE_PROJECT_DIR="$ROOT" MYTHOS_DIR="$TMP/bot" MYT
 mkdir -p "$TMP/bot/state"
 call '{"tool_name":"Write","tool_input":{"file_path":"/opt/elsewhere/foo.js"},"transcript_path":"'"$TMP/t.jsonl"'"}' \
   | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null || fail "應擋 Router 親手寫檔"
-[ -z "$(call '{"tool_name":"Agent","tool_input":{"subagent_type":"dispatcher","prompt":"x"},"transcript_path":"'"$TMP/t.jsonl"'"}')" ] || fail "背景 Agent 應放行"
+# 11-07：放行時改寫成 haiku＋背景（updatedInput），不再是空輸出
+call '{"tool_name":"Agent","tool_input":{"subagent_type":"dispatcher","prompt":"x"},"transcript_path":"'"$TMP/t.jsonl"'"}' \
+  | jq -e '.hookSpecificOutput.permissionDecision == "allow" and .hookSpecificOutput.updatedInput.model == "haiku" and .hookSpecificOutput.updatedInput.run_in_background == true' >/dev/null || fail "背景 Agent 應放行並改寫成 haiku 背景"
 jq -e '.hooks.PreToolUse[0].matcher == "*"' "$S" >/dev/null || fail "派工閘 matcher 要是 *（整份白名單）"
 D="$ROOT/router/agents/dispatcher.md"
 [ "$(sed -n 2p "$D")" = "name: dispatcher" ] || fail "dispatcher agent 定義缺 name"

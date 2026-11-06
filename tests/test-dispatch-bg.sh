@@ -59,7 +59,7 @@ line="$(cat "$TSV")"
 [ "$(printf '%s' "$line" | cut -f8)" = bg ] || fail "backend 應是 bg：$line"
 call="$(cat "$CLAUDE_LOG")"
 case "$call" in "CWD=$WORKER_REAL"$'\t'*) ;; *) fail "沒在 worker 目錄跑：$call" ;; esac
-for a in '--bg' '--model sonnet' '--name mythos:t-a' '--allowedTools Bash Read Write Edit Glob Grep' 'doing x'; do
+for a in '--bg' '--model haiku' '--name mythos:t-a' '--allowedTools Bash Read Write Edit Glob Grep' 'doing x'; do
   case "$call" in *"$a"*) ;; *) fail "argv 少了 ${a}：$call" ;; esac
 done
 case "$call" in *telegram*) fail "argv 帶了 telegram 工具：$call" ;; esac
@@ -101,6 +101,7 @@ echo deadbeef-0000-0000-0000-000000000000 > "$FAKE_ID"
 : > "$CLAUDE_LOG"
 idh="$(bash "$ROOT/bin/dispatch-bg" --hard t-a "$TMP/p.md")"
 grep -q -- "--settings $MYTHOS_WORKER_DIR/.claude/hard.json" "$CLAUDE_LOG" || fail "--hard 沒帶 hard.json：$(cat "$CLAUDE_LOG")"
+grep -q -- '--model sonnet' "$CLAUDE_LOG" || fail "--hard 應維持 sonnet：$(cat "$CLAUDE_LOG")"
 field() { awk -F "\t" -v i="$1" -v n="$2" '$1==i {print $n; exit}' "$TSV"; }
 [ "$(field "$idh" 8)" = bg-hard ] || fail "--hard 的 backend 不是 bg-hard：$(cat "$TSV")"
 [ "$(field "$idh" 2)" = hard ] || fail "--hard 的 tier 不是 hard"
@@ -130,7 +131,7 @@ echo cafe0007-0000-0000-0000-000000000000 > "$FAKE_ID"
 : > "$CLAUDE_LOG"
 mkdir -p "$TMP/repo"
 cp "$TSV" "$TMP/before7"
-id7="$(env -u DISPATCH_HARD_BACKEND DISPATCH_THREAD=t-a bash "$ROOT/bin/dispatch" "$TMP/p.md" "$TMP/repo" hard)"
+id7="$(DISPATCH_HARD_BACKEND=bg DISPATCH_THREAD=t-a bash "$ROOT/bin/dispatch" "$TMP/p.md" "$TMP/repo" hard)"
 [ "$id7" = bg-cafe0007 ] || fail "7：dispatch hard 沒走 dispatch-bg：$id7"
 [ "$(field "$id7" 8)" = bg-hard ] || fail "7：backend 不是 bg-hard：$(cat "$TSV")"
 [ "$(field "$id7" 7)" = t-a ] || fail '7：thread 沒帶到 ledger'
@@ -139,7 +140,7 @@ grep -q -- "第一步：git -C '$TMP/repo' worktree add" "$CLAUDE_LOG" || fail "
 [ "$(awk -F'\t' '$8=="deep" || $5=="queued"' "$TSV" | wc -l | tr -d ' ')" = 0 ] || fail "7：bg-hard 進了 deep／repo 佇列：$(cat "$TSV")"
 # 沒給 DISPATCH_THREAD（thread=-）也能新開
 echo cafe0008-0000-0000-0000-000000000000 > "$FAKE_ID"
-id8="$(env -u DISPATCH_HARD_BACKEND -u DISPATCH_THREAD bash "$ROOT/bin/dispatch" "$TMP/p.md" "$TMP/repo" hard)"
+id8="$(env -u DISPATCH_THREAD DISPATCH_HARD_BACKEND=bg bash "$ROOT/bin/dispatch" "$TMP/p.md" "$TMP/repo" hard)"
 [ "$id8" = bg-cafe0008 ] || fail "7：thread=- 的 hard 派不出去：$id8"
 echo '(7) ok'
 
@@ -234,5 +235,9 @@ grep -q '幫我把 log 輪替修好' "$CLAUDE_LOG" || fail "14：worker prompt �
 grep -q '先看 launchd' "$CLAUDE_LOG" || fail "14：worker prompt 沒帶補充"
 case "$(field "$id15" 3)" in */mythos/state/bg/t-fc-*.md) ;; *) fail "14：ledger task 欄應是自動 prompt 檔：$(field "$id15" 3)" ;; esac
 bash "$ROOT/bin/dispatch-bg" --from-chat t-fc 2>/dev/null && fail '14：缺 --transcript 應拒跑'
+# 續派寫法（規則檔指定）：--thread X --from-chat X 兩個 X 要被吃掉；不一致拒跑
+echo f5000016-0000-0000-0000-000000000000 > "$FAKE_ID"
+bash "$ROOT/bin/dispatch-bg" --thread t-fc --from-chat t-fc --transcript "$RT" >/dev/null 2>"$TMP/fc.err" || fail "14：續派寫法失敗：$(cat "$TMP/fc.err")"
+bash "$ROOT/bin/dispatch-bg" --thread t-fc --from-chat t-zz --transcript "$RT" >/dev/null 2>&1 && fail '14：thread 不一致應拒跑'
 echo '(14) ok'
 echo 'DISPATCH-BG PASS'

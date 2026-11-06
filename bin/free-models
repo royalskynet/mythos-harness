@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# 印目前 opencode 免費層的模型清單（一行一個，排名先後照 dcq）。來源＝dcq（orchestrator）的免費層，
+# 每日 probe 會換模型，所以呼叫端不准寫死模型名（11-07 使用者定）。取不到就 exit 1、什麼都不印，不退回寫死清單。
+# env：DCQ_BIN（dcq 路徑）FREE_MODELS（測試／臨時覆寫，空白分隔）
+set -u
+if [ -n "${FREE_MODELS:-}" ]; then printf '%s\n' $FREE_MODELS; exit 0; fi
+DCQ="${DCQ_BIN:-$(command -v dcq || echo "$HOME/.local/bin/dcq")}"
+[ -x "$DCQ" ] || { echo "free-models: 找不到 dcq（${DCQ}）" >&2; exit 1; }
+line="$(DCQ_ORDER=free "$DCQ" plan /dev/null 2>/dev/null | sed -n 's/^ *1 免費 opencode：//p' | head -1)"
+[ -n "$line" ] || { echo "free-models: dcq plan 沒列出免費 opencode 層" >&2; exit 1; }
+printf '%s\n' $line

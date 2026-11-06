@@ -354,7 +354,6 @@ function directFollowup(th, job, text) {
 async function handleChannel(msg, line) {
   const orig = msg.params?.content
   if (intercept(msg.params)) return
-  await onUserMessage(msg.params?.meta?.chat_id)
   const hit = replyTag(msg.params)
   // /fix、/wheel 展開會改 content：改過就送改過的（11-04 前送的是原始 line，展開內容被丟掉）；沒改才原樣轉發
   if (!hit) return process.stdout.write((msg.params?.content === orig ? line : JSON.stringify(msg)) + '\n')
@@ -480,20 +479,20 @@ child.on('exit', (code, sig) => {
   if (!shuttingDown) process.exit(code ?? 1) // 收尾中：等計時器補 SIGKILL 給孫行程
 })
 
-// 全部經同一條 promise 鏈：直送續派要等 dispatch-bg（數秒），後面的行不能插隊
+// 只有 channel 通知排同一條鏈（直送續派要等 dispatch-bg，使用者訊息之間不能插隊）；
+// 工具 RPC 回應等其他行立刻透傳，輸入中／忙碌先回在排隊前就做（11-07 Codex：原本一則續派能把 reply 回應卡 60 秒）
 let chain = Promise.resolve()
 createInterface({ input: child.stdout }).on('line', line => {
-  chain = chain.then(async () => {
-    let msg
-    try {
-      msg = JSON.parse(line)
-    } catch {
-      process.stdout.write(line + '\n') // 非 JSON（bun 的雜訊）照原樣轉發
-      return
-    }
-    if (msg?.method === 'notifications/claude/channel') return handleChannel(msg, line)
-    process.stdout.write(line + '\n')
-  }).catch(e => log(`line handler: ${e.message}`))
+  let msg
+  try {
+    msg = JSON.parse(line)
+  } catch {
+    return process.stdout.write(line + '\n') // 非 JSON（bun 的雜訊）照原樣轉發
+  }
+  if (msg?.method !== 'notifications/claude/channel') return process.stdout.write(line + '\n')
+  const c = msg.params?.content
+  if (!(typeof c === 'string' && c.trim().startsWith('/'))) onUserMessage(msg.params?.meta?.chat_id).catch(e => log(`ack: ${e.message}`))
+  chain = chain.then(() => handleChannel(msg, line)).catch(e => log(`line handler: ${e.message}`))
 })
 
 // plugin 在開始輪詢時會自己 setMyCommands（只有 start/help/status）。等它印出那行再覆寫，

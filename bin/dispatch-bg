@@ -7,7 +7,7 @@
 #   bin/dispatch-bg --from-chat <thread> [--note '<補充>'] --transcript <Router transcript>
 #                                                prompt 由 bin/chat-prompt.mjs 從 transcript 抓老闆原話自動寫（11-07 秒回；
 #                                                Router 只寫 --from-chat <thread>，--transcript 由 dispatch-gate 補）
-#   bin/dispatch-bg --hard [--cwd <repo>] …      同上，worker 用 hard.json（sonnet＋Opus advisor），backend=bg-hard；
+#   bin/dispatch-bg --hard [--cwd <repo>] …      同上，worker 用 hard.json（sonnet＋Opus advisor），backend=bg-hard（非 hard 預設 haiku）；
 #                                                prompt 第一行要求在 <repo> 開 git worktree（bin/dispatch hard 會帶 --cwd）
 # 成功：stdout 印 ledger id（bg-<短id>）；取不到 claude 印的短 id → stderr 原文、ledger 不寫、exit 1。
 set -u
@@ -49,7 +49,12 @@ while [ $# -gt 0 ]; do
   shift
 done
 if [ -n "$fromchat" ]; then
-  [ -n "$thread" ] || { thread="${1:-}"; shift || true; }
+  # 位置參數＝thread；續派寫法 --thread X --from-chat X 兩個都給，要一致（11-07 Codex：原本第二個 X 被當未知參數）
+  if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
+    if [ -z "$thread" ]; then thread="$1"
+    elif [ "$1" != "$thread" ]; then echo "--thread ${thread} 與 --from-chat ${1} 不一致" >&2; exit 2; fi
+    shift
+  fi
   while [ $# -gt 0 ]; do
     case "$1" in
       --note) chat_note="${2:-}"; shift ;;
@@ -119,7 +124,11 @@ if [ -n "$resume" ]; then
   fi
 fi
 
-args=(--bg --model sonnet --allowedTools "$ALLOWED_TOOLS" --name "mythos:$thread")
+# 11-07 使用者定：worker 預設 haiku，不勝任就派 O（bin/dispatch）或 opencode 免費，不升 Claude 模型；
+# bg-hard 是明設 DISPATCH_HARD_BACKEND=bg 才走的付費路，維持 sonnet。DISPATCH_BG_MODEL 覆寫非 hard worker 的模型。
+model="${DISPATCH_BG_MODEL:-haiku}"
+[ -n "$hard" ] && model=sonnet
+args=(--bg --model "$model" --allowedTools "$ALLOWED_TOOLS" --name "mythos:$thread")
 backend=bg
 settings=''
 if [ -n "$hard" ]; then

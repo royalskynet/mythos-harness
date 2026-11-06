@@ -128,7 +128,7 @@ mkdir -p "$TMP/worker/.claude"; printf '{}\n' > "$TMP/worker/.claude/hard.json"
 export MYTHOS_WORKER_DIR="$TMP/worker"
 : > "$TSV"; cp "$TSV" "$TMP/h.before"
 rc=0
-env -u DISPATCH_HARD_BACKEND CLAUDE_BIN="$OUTSIDE/claude" bash "$ROOT/bin/dispatch" "$TMP/t.md" "$TMP/cwd" hard >/dev/null 2>"$TMP/h1.err" || rc=$?
+DISPATCH_HARD_BACKEND=bg CLAUDE_BIN="$OUTSIDE/claude" bash "$ROOT/bin/dispatch" "$TMP/t.md" "$TMP/cwd" hard >/dev/null 2>"$TMP/h1.err" || rc=$?
 [ "$rc" = 97 ] || fail "(h) dispatch hard（bg-hard）用 sandbox 外 claude 應 exit 97，得到 $rc"
 cmp -s "$TSV" "$TMP/h.before" || fail "(h) dispatch hard 寫了 ledger：$(cat "$TSV")"
 rc=0
@@ -147,6 +147,17 @@ CLAUDE_BIN="$OUTSIDE/claude" bash "$ROOT/bin/dispatch-cancel" bg-0491f0d0 >/dev/
 [ "$rc" = 97 ] || fail "(h) dispatch-cancel bg 列、claude 在 sandbox 外應 exit 97，得到 $rc"
 cmp -s "$TSV" "$TMP/h.before" || fail '(h) dispatch-cancel 改了 ledger'
 echo '(h) ok'
+
+# (i) DCQ_BIN 在 sandbox 外（11-07：hard 預設改走 O）→ dispatch mid／hard 都 exit 97、ledger 不動
+printf '#!/bin/sh\necho "$0 $*" >> "%s/outside-calls.log"\necho job-x\n' "$OUTSIDE" > "$OUTSIDE/dcq"; chmod +x "$OUTSIDE/dcq"
+: > "$TSV"; cp "$TSV" "$TMP/i.before"
+for t in mid hard; do
+  rc=0
+  env -u DISPATCH_HARD_BACKEND LINT_SKIP=1 DCQ_BIN="$OUTSIDE/dcq" bash "$ROOT/bin/dispatch" "$TMP/t.md" "$TMP/cwd" "$t" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 97 ] || fail "(i) dispatch $t 用 sandbox 外 dcq 應 exit 97，得到 $rc"
+done
+cmp -s "$TSV" "$TMP/i.before" || fail '(i) ledger 被改了'
+echo '(i) ok'
 
 [ ! -s "$OUTSIDE/outside-calls.log" ] || fail "sandbox 外的 deep-run 被叫到了：$(cat "$OUTSIDE/outside-calls.log")"
 echo 'TEST-GUARD PASS'

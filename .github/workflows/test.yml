@@ -63,3 +63,9 @@ jobs:
         timeout-minutes: 4
       - run: bash tests/test-ctx-guard.sh
         timeout-minutes: 4
+      - run: bash tests/test-free-models.sh
+        timeout-minutes: 4
+      - run: bash tests/test-brief-answer.sh
+        timeout-minutes: 4
+      - run: node --test tests/test_chat_prompt.mjs
+        timeout-minutes: 4

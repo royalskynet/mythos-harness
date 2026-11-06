@@ -159,8 +159,11 @@ def ask_main(argv):
         rc = main(rest)
     if rc in (0, 1):
         material = buf.getvalue() if rc == 0 else f"記憶三處都查不到「{' '.join(rest)}」"
-        if subprocess.run([BRIEF, "--kind", "recall", "--q", q], input=material, text=True).returncode == 0:
-            print("已直送使用者（秘書口吻），不用再 reply。")
+        # 查不到用固定句子（--not-found），不花模型；brief 8＝送出結果不明，可能已到，不再交 Router 轉述
+        brc = subprocess.run([BRIEF, "--kind", "recall", "--q", q] + ([] if rc == 0 else ["--not-found"]),
+                             input=material, text=True).returncode
+        if brc in (0, 8):
+            print("已直送使用者（秘書口吻），不用再 reply。" if brc == 0 else "已直送使用者（送出結果不明，可能已到），不用再 reply。")
             return 0
     sys.stdout.write(buf.getvalue())
     return rc
@@ -204,6 +207,12 @@ def selftest():
     assert ask_main(["不存在", "--ask", "那個呢"]) == 0
     got = open(log).read()
     assert "--kind recall --q 加輪怎麼用？" in got and "11.md" in got and "查不到「不存在」" in got, got
+    assert "--q 那個呢 --not-found" in got and "--q 加輪怎麼用？ --not-found" not in got, got
+    os.environ["BRIEF_RC"] = "8"
+    buf8 = __import__("io").StringIO()
+    with __import__("contextlib").redirect_stdout(buf8):
+        assert ask_main(["加輪", "--ask", "不明"]) == 0
+    assert "已直送" in buf8.getvalue() and "11.md" not in buf8.getvalue(), buf8.getvalue()  # 8＝可能已送，不再印給 Router
     os.environ["BRIEF_RC"] = "7"
     assert ask_main(["加輪", "--ask", "再一次"]) == 0  # brief 失敗 → 照舊印結果，rc 跟 main 一樣
     del os.environ["BRIEF_RC"]

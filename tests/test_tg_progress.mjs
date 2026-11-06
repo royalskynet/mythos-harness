@@ -65,7 +65,7 @@ await pre('Read', { file_path: '/d' })
 await run('stop')
 assert.equal(calls.length, 0, '非 TG 來的回合不打 API')
 
-// --worker（11-07）：chat 取 access.json allowFrom[0]、標題取 prompt 的「> 」原話、不送 typing、狀態檔每 session 一份且 Stop 後刪、不動 Router 的 progress.json
+// --worker（11-07）：chat 取 access.json allowFrom[0]、標題取 prompt 的「> 」原話、不送 typing、狀態檔每 session 一份且 Stop 後留墓碑、不動 Router 的 progress.json
 calls.length = 0
 const tgDir = path.join(dir, 'tg'); fs.mkdirSync(tgDir)
 fs.writeFileSync(path.join(tgDir, 'access.json'), JSON.stringify({ allowFrom: ['77'] }))
@@ -85,7 +85,19 @@ assert.equal(of('sendChatAction').length, 0, 'worker 不送 typing')
 assert.ok(fs.existsSync(path.join(dir, 'progress-w-w9.json')), 'worker 狀態檔每 session 一份')
 await runW('stop')
 assert.equal(of('deleteMessage').length, 1, 'worker Stop 刪進度訊息')
-assert.ok(!fs.existsSync(path.join(dir, 'progress-w-w9.json')), 'worker Stop 後刪狀態檔')
+// 11-07 Codex P1：Stop 後留墓碑；晚到的 pre（async hook）不再發一則刪不掉的進度
+const wst = path.join(dir, 'progress-w-w9.json')
+assert.equal(JSON.parse(fs.readFileSync(wst, 'utf8')).done, true, 'worker Stop 後留 done 墓碑')
+await runW('pre', { tool_name: 'Read', tool_input: { file_path: '/x/late.log' } })
+assert.equal(of('sendMessage').length, 1, '墓碑期間晚到的 pre 不發新訊息')
+// 墓碑過期（同 session 被續派）→ 當新回合
+const old = JSON.parse(fs.readFileSync(wst, 'utf8')); old.done_at = Date.now() - 10 * 60 * 1000; fs.writeFileSync(wst, JSON.stringify(old))
+await runW('pre', { tool_name: 'Read', tool_input: { file_path: '/x/next.log' } })
+assert.equal(of('sendMessage').length, 2, '墓碑過期後新回合照常發')
+// 6 小時沒動的別的 worker 狀態檔，Stop 時清掉
+const stale = path.join(dir, 'progress-w-old1.json'); fs.writeFileSync(stale, '{}'); fs.utimesSync(stale, new Date(0), new Date(0))
+await runW('stop')
+assert.ok(!fs.existsSync(stale), '過期 worker 狀態檔被清')
 assert.equal(fs.readFileSync(path.join(dir, 'progress.json'), 'utf8'), '{"turn":"router-keep"}', 'worker 不動 Router 的狀態')
 
 srv.close()
