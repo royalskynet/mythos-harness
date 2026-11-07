@@ -63,6 +63,7 @@
 !/tests/test-opus-plan.sh
 !/tests/test-dispatch-bg-hermes.sh
 !/tests/test-dispatch-hard-head.sh
+!/tests/test-claude-mem-hermes-limits.sh
 !/tests/test-knob-timing.sh
 !/tests/test-latency-report.sh
 !/tests/test-repo-queue.sh
