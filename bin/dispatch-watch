@@ -204,6 +204,11 @@ brief_text() { # kind task < 資料
   out="$(BRIEF_TIMEOUT="${BRIEF_TIMEOUT:-45}" "$BRIEF_BIN" --stdout --kind "$1" --q "$(task_ask "$2" | head -c 1200)" 9>&- 2>>"$WATCH_LOG")" || out=''
   printf '%s\n' "$out"
 }
+# 11-07：摘要含請示句（要我…嗎／回一句／回好…）不直發，交 Router：Router 的 reply 有同一份 ASK_PERMISSION 閘，會改成直接派工
+asks_permission() { # 摘要檔；0＝含請示句
+  GATE="$(dirname "$0")/dispatch-gate.mjs" "${NODE_BIN:-node}" -e \
+    'import(process.env.GATE).then(m => process.exit(m.ASK_PERMISSION.test(require("fs").readFileSync(process.argv[1], "utf8")) ? 0 : 1), () => process.exit(1))' "$1" </dev/null 2>/dev/null
+}
 direct_send() { # job eid thread 摘要檔 task
   local rc text
   mkdir -p "$(dirname "$WATCH_LOG")" 2>/dev/null
@@ -453,6 +458,8 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
           if [ "$(head -1 "$sf" | tr -d '[:space:]')" = "[靜默]" ]; then
             # 11-06：例行排程（daily-backlog）沒事時不推 TG；摘要第一行寫 [靜默] 就只 ack、不直發不交 Router
             ledger_events set "$EVENTS_FILE" "$id-PASS" "{\"direct\":\"quiet\",\"acked_at\":$now}" >/dev/null && log "quiet ack $id-PASS"
+          elif asks_permission "$sf"; then
+            log "ask-permission, Router 轉述 $id-PASS"
           else
             direct_send "$id" "$id-PASS" "$thread" "$sf" "$task"
           fi
