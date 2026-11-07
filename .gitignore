@@ -65,6 +65,11 @@
 !/tests/mk-path.sh
 !/tests/test-opus-plan.sh
 !/tests/test-adhd-split.sh
+!/tests/test-adhd-leak.sh
+!/tests/test-adhd-lint.sh
+!/tests/test-dispatch-hermes-rc.sh
+!/tests/test-dispatch-cancel-hermes.sh
+!/tests/test-dispatch-latency.sh
 !/tests/test-dispatch-bg-hermes.sh
 !/tests/test-dispatch-hard-head.sh
 !/tests/test-cutover-dryrun.sh

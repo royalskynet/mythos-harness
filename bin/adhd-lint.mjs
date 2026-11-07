@@ -6,6 +6,8 @@
 // 3. 進行中的事寫具體時間（約 10 分鐘、今晚 02:00），不寫「稍後」「後續」。
 // 4. 做完的事寫「已完成」放前面。
 // 5. 不寫安撫、預告、客套句（您可以放心、有結果再跟您回報、目前沒有需要您決定的事、我這邊的理解是）。
+// 6. 11-08b 斷裂用語：出口含 工單／派工／後台／團隊／工作者／背景任務／job id／thread／t-<代號>／八碼 hex job id＝lint 失敗。
+//    --truncate 遇到時把含該詞的句子（以。！？換行切）刪掉；刪完是空的就回「好，我處理一下。」。
 // 其餘：不貼 job id、thread 代號、commit、路徑、英文術語。
 // 數字上限（環境變數可覆寫）：ADHD_MAX_CHARS=220, ADHD_MAX_LINES=6, ADHD_MAX_LINE_CHARS=40
 import { fileURLToPath } from 'node:url'
@@ -15,11 +17,38 @@ const MAX_LINES = Number(process.env.ADHD_MAX_LINES) || 6
 const MAX_LINE_CHARS = Number(process.env.ADHD_MAX_LINE_CHARS) || 40
 const FILLER_RE = /您可以(先)?放心|(有結果|做完|後續)[^。\n]{0,8}(再|會)(跟|向)?您回報|目前沒有需要您決定|我這邊的理解是|請您放心/g
 
+// 斷裂用語（老闆聽不懂的內部詞）。t-代號要前面不是英數字（避開 short-term、post-mortem）；八碼 hex 要含至少一個 a-f 且前後不是英數字
+//（避開 20261108 這種日期／金額）。
+export const LEAK_RE = /工單|派工|後台|團隊|工作者|背景任務|job id|thread|(?<![A-Za-z0-9])t-[a-z0-9-]{4,}|(?<![0-9A-Za-z])(?=[0-9a-f]*[a-f])[0-9a-f]{8}(?![0-9A-Za-z])/i
+const LEAK_G = new RegExp(LEAK_RE.source, 'gi')
+
+function leakErrors(t) {
+  LEAK_G.lastIndex = 0
+  const errs = []
+  let m
+  while ((m = LEAK_G.exec(t))) errs.push(`斷裂用語：${m[0]}`)
+  return errs
+}
+
+// 刪掉含斷裂用語的句子（以 。！？ 與換行切）；編號行刪掉後重新編號；全刪光回固定一句。
+export function stripLeakSentences(raw) {
+  const kept = []
+  for (const line of String(raw).replace(/\r\n?/g, '\n').split('\n')) {
+    const segs = line.match(/[^。！？]+[。！？]*/g) || []
+    const out = segs.filter(s => !LEAK_RE.test(s)).join('').trim()
+    if (out) kept.push(out)
+  }
+  let n = 0
+  const numbered = kept.some(l => /^\d+\.\s/.test(l))
+  const res = kept.map(l => (numbered && /^\d+\.\s/.test(l)) ? l.replace(/^\d+\./, `${++n}.`) : l)
+  return res.length ? res.join('\n') : '好，我處理一下。'
+}
+
 export function adhdLint(text) {
   const t = String(text ?? '').replace(/\r\n?/g, '\n').trim()
   if (!t) return []
   const stripped = t.replace(/\s+/g, '')
-  if (stripped.length <= 12) return []
+  if (stripped.length <= 12) return leakErrors(t)
   const lines = t.split('\n').map(l => l.trimEnd())
   const nonEmpty = lines.filter(l => l.trim() !== '')
   const errs = []
@@ -36,6 +65,7 @@ export function adhdLint(text) {
   FILLER_RE.lastIndex = 0
   let m
   while ((m = FILLER_RE.exec(t))) errs.push(`客套句：${m[0]}`)
+  errs.push(...leakErrors(t))
   return errs
 }
 
@@ -103,6 +133,8 @@ function main() {
   process.stdin.on('data', c => (buf += c))
   process.stdin.on('end', () => {
     if (truncate) {
+      // 斷裂用語先處理：句子刪掉後再走原本的 lint／拆行／截斷流程（刪完仍過長也照舊截）
+      if (leakErrors(buf).length) buf = stripLeakSentences(buf)
       const split = adhdSplitLong(buf)
       const merged = adhdSplitLong(adhdMergeTail(buf))
       process.stdout.write(!adhdLint(buf).length ? buf : !adhdLint(split).length ? split : !adhdLint(merged).length ? merged : adhdTruncate(buf))

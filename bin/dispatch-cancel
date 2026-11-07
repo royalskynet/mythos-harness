@@ -18,7 +18,7 @@ fi
 row="$(awk -F'\t' -v id="$id" '$1 == id { print; exit }' "$TSV" 2>/dev/null | ledger_fields)"
 backend="$(printf '%s' "$row" | cut -f8)"
 case "$backend" in
-  deep|dcq|bg|bg-hard) ;;
+  deep|dcq|bg|bg-hard|hermes) ;;
   *) case "$id" in deep-*) backend=deep ;; bg-*) backend=bg ;; *) backend=dcq ;; esac ;;
 esac
 
@@ -70,6 +70,28 @@ fail_ledger() {
 if [ "$backend" = dcq ]; then
   "$DCQ" cancel "$id" || { echo "dcq cancel 失敗：$id" >&2; exit 1; }
   mark_cancelled || fail_ledger "拿不到鎖或寫檔失敗"
+  exit 0
+fi
+
+# hermes（11-08b dsh 差距 #2）：worker 是 dispatch-bg 起的 detached subshell＋hermes，pid 在 state/bg/<sid>.pid（subshell 的 pid）。
+# 先持鎖確認還是 pending 並標 cancelled（之後 dispatch-watch 不會 deliver），再殺整個行程樹：先收集後代、TERM 全部，
+# 1 秒後還活著的補 KILL（參考 dsh background.ts:159-164 的清程序樹）。已不是 pending＝已收尾，不動、exit 0。
+if [ "$backend" = hermes ]; then
+  sid="${id#bg-}"
+  case "$sid" in ''|*[!0-9a-f]*) echo "id 取不出 hermes sid：$id" >&2; exit 1 ;; esac
+  mark_cancelled pending
+  case $? in
+    0) ;;
+    2) echo "不是進行中，不用取消：$id" >&2; exit 0 ;;
+    *) echo "拿不到 ledger 鎖或寫檔失敗：${id}" >&2; exit 1 ;;
+  esac
+  hp="$(tr -d '[:space:]' < "$MYTHOS_DIR/state/bg/$sid.pid" 2>/dev/null)"
+  case "$hp" in ''|*[!0-9]*) echo "hermes 沒有 pid 檔，ledger 已標 cancelled：$id" >&2; exit 0 ;; esac
+  tree_pids() { local c; echo "$1"; for c in $(pgrep -P "$1" 2>/dev/null); do tree_pids "$c"; done; }
+  all="$(tree_pids "$hp")"
+  for p in $all; do kill -TERM "$p" 2>/dev/null; done
+  sleep 1
+  for p in $all; do kill -0 "$p" 2>/dev/null && kill -KILL "$p" 2>/dev/null; done
   exit 0
 fi
 

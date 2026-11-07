@@ -12,6 +12,10 @@
 # 成功：stdout 印 ledger id（bg-<短id>）；取不到 claude 印的短 id → stderr 原文、ledger 不寫、exit 1。
 # WO3-v3：DISPATCH_BG_WORKER=claude（預設，上段行為不變）| hermes → 起 `hermes -p mythos-worker -z "<prompt>"`（detached、
 #   stdin=/dev/null、argv 不放 prompt），stdout 串流寫進同一份 result 檔、pid 寫 <sid>.pid，backend=hermes。
+# 11-08b（dsh 差距 #1／#3）：hermes worker 的 stdout 只寫 result 檔、stderr 另寫 <result>.err、結束碼寫 <result>.rc；
+#   worker 一結束（寫完 rc）立刻在同一個 subshell 觸發一次 dispatch-watch（launchd 每 120 秒留作補漏）。
+# 11-08b（dsh 差距 #2）：--cancel <thread>＝停掉該 thread 進行中的 worker（整個行程樹）、ledger 記 cancelled；
+#   --interrupt <thread> <新指示檔>＝先 cancel，再以「原需求＋新指示」重派同 thread。
 # 兩邊都留 <sid>.rkey，dispatch-watch 從 r-<rk>.result 找回本輪結果檔。
 set -u
 
@@ -40,6 +44,7 @@ thread=''
 thflag=''
 tcwd=''
 fromchat=''
+mode=''
 chat_tp=''
 chat_note=''
 while [ $# -gt 0 ]; do
@@ -49,6 +54,8 @@ while [ $# -gt 0 ]; do
     --thread=*) thread="${1#--thread=}"; thflag=1 ;;
     --cwd) tcwd="${2:-}"; shift ;;
     --from-chat) fromchat=1 ;;
+    --cancel) mode=cancel ;;
+    --interrupt) mode=interrupt ;;
     --transcript) chat_tp="${2:-}"; shift ;;
     --) shift; break ;;
     -) break ;;  # thread=-（bin/dispatch 沒帶 DISPATCH_THREAD）
@@ -92,8 +99,50 @@ case "$thread" in
   _none) thread=- ;;
   ''|-|*[!A-Za-z0-9-]*) echo "用法：bin/dispatch-bg [--hard] [--thread <代號>] <thread> <prompt檔>" >&2; exit 2 ;;
 esac
-[ -n "$prompt" ] && [ -f "$prompt" ] || { echo "prompt 檔不存在：${prompt}" >&2; exit 2; }
-case "$prompt" in /*) ;; *) prompt="$PWD/$prompt" ;; esac  # ledger 記絕對路徑（Router 給的是 state/bg/ 相對路徑）
+# 11-08b：--cancel／--interrupt 一定要真 thread（不能靠「同 thread 最新一張」猜）
+if [ -n "$mode" ]; then
+  [ "$thread" != - ] || { echo "--${mode} 必帶 thread" >&2; exit 2; }
+  [ -z "$fromchat" ] || { echo "--${mode} 不能和 --from-chat 並用" >&2; exit 2; }
+fi
+if [ "$mode" != cancel ]; then
+  [ -n "$prompt" ] && [ -f "$prompt" ] || { echo "prompt 檔不存在：${prompt}" >&2; exit 2; }
+  case "$prompt" in /*) ;; *) prompt="$PWD/$prompt" ;; esac  # ledger 記絕對路徑（Router 給的是 state/bg/ 相對路徑）
+fi
+
+# 11-08b dsh 差距 #2：停該 thread 進行中的 worker。停的動作交 bin/dispatch-cancel（hermes＝殺整個行程樹、claude＝claude stop，
+# 兩者都把 ledger 標 cancelled，dispatch-watch 對 cancelled 不 deliver）。必須在取 ledger 鎖之前做（dispatch-cancel 自己拿鎖）。
+if [ -n "$mode" ]; then
+  CANCEL_BIN="${DISPATCH_CANCEL_BIN:-$ROOT_DIR/bin/dispatch-cancel}"
+  TSV0="$MYTHOS_DIR/state/dispatch-jobs.tsv"
+  stopped=''
+  if [ -f "$TSV0" ]; then
+    for aid in $(awk -F'\t' -v th="$thread" '$7==th && ($8=="bg" || $8=="bg-hard" || $8=="hermes") && $5=="pending" {print $1}' "$TSV0"); do
+      MYTHOS_DIR="$MYTHOS_DIR" bash "$CANCEL_BIN" "$aid" 9>&- >&2 || { echo "停不掉 ${aid}，未${mode}" >&2; exit 1; }
+      stopped="$stopped $aid"
+    done
+  fi
+  # 排在信箱的補充是對舊方向說的；不清掉，dispatch-watch 會在舊 worker 被停後把它當新單派出去
+  rm -rf "$MYTHOS_DIR/state/mailbox/$thread" 2>/dev/null
+  if [ "$mode" = cancel ]; then
+    if [ -n "$stopped" ]; then echo "已停${stopped}"; else echo "thread ${thread} 沒有進行中的事"; fi
+    exit 0
+  fi
+  # interrupt：原需求取 ledger 該 thread 最新一張的 prompt 檔（沒有就只用新指示）
+  orig=''
+  [ -f "$TSV0" ] && orig="$(awk -F'\t' -v th="$thread" '$7==th && ($8=="bg" || $8=="bg-hard" || $8=="hermes") {p=$3} END{print p}' "$TSV0")"
+  mkdir -p "$MYTHOS_DIR/state/bg" || exit 1
+  ipf="$MYTHOS_DIR/state/bg/$thread-interrupt-$(date +%s)-$$.md"
+  {
+    if [ -n "$orig" ] && [ -f "$orig" ]; then
+      printf '【原需求（老闆先前交辦，已被打斷、舊的做法作廢）】\n'
+      cat "$orig"
+      printf '\n【老闆改口，以這段新指示為準】\n'
+    fi
+    cat "$prompt"
+  } > "$ipf" || exit 1
+  prompt="$ipf"
+  thflag=1
+fi
 
 WORKER_DIR="${MYTHOS_WORKER_DIR:-$HOME/bots/mythos-worker}"
 [ -d "$WORKER_DIR" ] || { echo "worker 目錄不存在：${WORKER_DIR}（跑 run.sh 會從 router/worker 同步）" >&2; exit 1; }
@@ -241,7 +290,24 @@ if [ -n "$hb" ]; then
   # ponytail: hermes 停不掉（寫 ledger 失敗只能殺這個 pid 這一支）；續派不帶前情。
   : > "$rfbody" || { echo "result 檔開不了：$rfbody" >&2; exit 1; }
   sid="$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
-  ( cd "$WORKER_DIR" && "$HERMES" -p mythos-worker -z "$body" </dev/null >"$rfbody" 2>&1 9>&- ) 9>&- &  # 11-08：subshell 本身也要關 fd 9，否則 ledger 鎖會被它握到 worker 結束（dispatch-watch 拿不到鎖）
+  # 11-08b #1：stdout 只進 result、stderr 進 <result>.err、結束碼進 <result>.rc（原子寫），dispatch-watch 以 rc／stdout 判完成。
+  # 11-08b #3：worker 結束、rc 落地後立刻觸發一次 dispatch-watch（等 dispatch-bg 把 ledger 列與 pid 檔登完；dispatch-watch 以 rc 檔優先於 pid 判完成）。
+  # subshell 自己的 stdin／stdout／stderr 也指到 /dev/null：不然它會握著呼叫端的 $() 管道直到 worker 結束（mythos_dispatch 的 subprocess 就等不到 EOF）。
+  WATCH_BIN="${DISPATCH_WATCH_BIN:-$ROOT_DIR/bin/dispatch-watch}"
+  trig=1
+  [ "${DISPATCH_BG_NO_TRIGGER:-}" = 1 ] && trig=''
+  if [ -n "${MYTHOS_TEST_SANDBOX:-}" ]; then
+    case "$WATCH_BIN" in "$MYTHOS_TEST_SANDBOX"/*) ;; *) trig='' ;; esac  # 測試守門：不在 sandbox 的 watch 不觸發
+  fi
+  (
+    cd "$WORKER_DIR" && "$HERMES" -p mythos-worker -z "$body" </dev/null >"$rfbody" 2>"$rfbody.err" 9>&-
+    wrc=$?
+    printf '%s\n' "$wrc" > "$rfbody.rc.tmp" && mv -f "$rfbody.rc.tmp" "$rfbody.rc"
+    if [ -n "$trig" ]; then
+      n=0; while [ ! -f "$MYTHOS_DIR/state/bg/$sid.pid" ] && [ "$n" -lt 300 ]; do sleep 0.1; n=$((n + 1)); done
+      MYTHOS_DIR="$MYTHOS_DIR" bash "$WATCH_BIN" </dev/null >/dev/null 2>&1 9>&-
+    fi
+  ) </dev/null >/dev/null 2>&1 9>&- &  # 11-08：subshell 本身也要關 fd 9，否則 ledger 鎖會被它握到 worker 結束（dispatch-watch 拿不到鎖）
   hpid=$!
 else
 # 9>&-：claude 會活過本行程，不能繼承 ledger 鎖
@@ -265,7 +331,7 @@ row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$id" "$([ -n "$hard" ] && echo h
 # F2：登錄失敗要收掉已啟動的 worker，不然 Router fallback 再派一次就有兩個 worker
 stop_worker() { # 原因
   if [ -n "$hb" ]; then
-    kill "$hpid" 2>/dev/null; echo "${1}；已停止 worker ${sid}（hermes）" >&2; return
+    pkill -P "$hpid" 2>/dev/null; kill "$hpid" 2>/dev/null; echo "${1}；已停止 worker ${sid}（hermes）" >&2; return
   fi
   if "$CLAUDE" stop "$sid" </dev/null 9>&- >/dev/null 2>&1; then
     echo "${1}；已停止 worker ${sid}" >&2
