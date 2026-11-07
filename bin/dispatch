@@ -50,6 +50,8 @@ fi
 # hard 預設走 O（11-07）；DISPATCH_HARD_BACKEND=bg 才走 bg-hard（獨立 claude --bg session），=deep 走舊的 deep-run
 hard_backend="${DISPATCH_HARD_BACKEND:-o}"
 # 11-07（WO3g-r2）：hard 第一段先跑 dc go flash（bin/hard-head）；billing-quiet 要在進 deep 分支前就補
+# 規劃單（第一行 then-run 標記）不走 head：它要 dcq 的 SPIN=0／不切 worktree（見下方 then-run 段）
+case "$(head -n 1 "$task" 2>/dev/null)" in '<!-- mythos:then-run '*) DISPATCH_HARD_HEAD= ;; esac
 if [ "$tier" = hard ] && [ "$hard_backend" = o ] && [ "${DISPATCH_HARD_HEAD-1}" != '' ]; then
   hard_backend=head
   grep -qx '<!-- dc:billing-quiet -->' "$task" || printf '\n<!-- dc:billing-quiet -->\n' >> "$task"
