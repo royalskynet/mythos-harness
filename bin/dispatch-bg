@@ -206,6 +206,17 @@ if [ -n "$hard" ]; then
 
 $body"
 fi
+# 11-07 帳本機械計數：prompt 內容含「單／派工／工單／未解／未收尾／dcq／帳本／卡住」任一關鍵字時，
+# body 尾端附 bin/ledger-status 的前 15 行；worker 轉述單數、時間一律照這段，不自己數帳本或換算 epoch。
+# ledger-status 失敗（或沒輸出）就不附，不擋派工。
+if printf '%s' "$body" | grep -qE '單|派工|工單|未解|未收尾|dcq|帳本|卡住'; then
+  ledger="$(MYTHOS_DIR="$MYTHOS_DIR" DCQ_HOME="${DCQ_HOME:-$HOME/.dcq}" "$ROOT_DIR/bin/ledger-status" 2>/dev/null)"
+  if [ -n "$ledger" ]; then
+    ledger="$(printf '%s\n%s' '【帳本現況（bin/ledger-status 機械計數；回報單數、時間一律照這段，不要自己數或換算 epoch）】' "$(printf '%s\n' "$ledger" | head -15)")"
+    body="$body
+$ledger"
+  fi
+fi
 args+=("$body")
 "${NODE_BIN:-node}" "$ROOT_DIR/bin/lib-request.mjs" log "$MYTHOS_DIR" queued "$prompt" "" 9>&- || echo "request 紀錄寫入失敗（不擋派工）" >&2
 # 9>&-：claude 會活過本行程，不能繼承 ledger 鎖

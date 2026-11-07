@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# 帳本機械計數（11-07）：dispatch-jobs.tsv 每列分三類——進行中（status=pending）、
+# 未收尾（其余且 ledger_is_closed 為假）、已結案。haiku worker 回報單數、時間
+# 一律照第一行與明細引述，不自己數帳本、不自己換算 epoch。
+# 用法：bin/ledger-status [--json]
+#   第一行固定：進行中 N｜未收尾 M｜今日結案 K（今日＝Asia/Taipei 當天，以 epoch 判）
+#   之後每張非結案單一行（時間為 Asia/Taipei）：
+#     <類別> <id> <MM-DD HH:MM> 已 <分鐘> 分 <status> thread=<thread> <backend> [附註]
+#   進行中的 dcq 單：$DCQ_HOME/running/<id>.job 存在 → 附 runner.log 該 id 最後一個 model=；
+#   不在 running 也不在 pending 佇列 → 標「dcq 已不在佇列」。
+# 環境變數 MYTHOS_DIR、DCQ_HOME 可覆寫路徑（測試用）。
+set -u
+
+MYTHOS_DIR="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+DCQ_HOME="${DCQ_HOME:-$HOME/.dcq}"
+TSV="$MYTHOS_DIR/state/dispatch-jobs.tsv"
+CLOSEOUTS="$MYTHOS_DIR/state/closeouts.tsv"
+RUNNING_DIR="$DCQ_HOME/running"
+PENDING_DIR="$DCQ_HOME/pending"
+RUNNER_LOG="$DCQ_HOME/logs/runner.log"
+
+. "$(cd "$(dirname "$0")" && pwd)/lib-ledger.sh"
+
+json=''  # 非空 → 輸出 JSON 陣列（首元素＝計數，之後＝每張非結案單一個物件）
+case "${1:-}" in
+  --json) json=1 ;;
+  ''|-h|--help) ;;
+  *) echo "用法：bin/ledger-status [--json]" >&2; exit 2 ;;
+esac
+
+tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/ledger-status.XXXXXX")" || exit 1
+trap 'rm -rf "$tmpdir"' EXIT
+: > "$tmpdir/job.jsonl"
+
+N_Prog=0; N_Unres=0; N_Today=0
+today="$(TZ=Asia/Taipei date '+%F')"
+now="$(date +%s)"
+rows=''
+
+if [ -f "$TSV" ]; then
+  rows="$(ledger_fields < "$TSV")"
+fi
+while IFS=$'\t' read -r id tier task ep status cwd thread backend; do
+  [ -n "$id" ] || continue
+  mins=$(( (now - ep) / 60 )); [ "$mins" -ge 0 ] || mins=0
+  tstr="$(TZ=Asia/Taipei date -r "$ep" '+%m-%d %H:%M')"
+  if [ "$status" = pending ]; then
+    cat='進行中'; N_Prog=$((N_Prog + 1))
+  elif ledger_is_closed "$id" "$status" "$thread" "$ep" "$rows" "$CLOSEOUTS"; then
+    [ "$(TZ=Asia/Taipei date -r "$ep" '+%F')" = "$today" ] && N_Today=$((N_Today + 1))
+    continue
+  else
+    cat='未收尾'; N_Unres=$((N_Unres + 1))
+  fi
+  note=''; note_json=''
+  if [ "$backend" = dcq ]; then
+    if [ -e "$RUNNING_DIR/$id.job" ]; then
+      m="$(grep -F "[$id]" "$RUNNER_LOG" 2>/dev/null | grep 'model=' | tail -1 | sed -n 's/^.*model=\([^ ]*\).*/\1/p')"
+      if [ -n "$m" ]; then note=" model=$m"; note_json="$m"; fi
+    elif [ ! -e "$PENDING_DIR/$id.job" ]; then
+      note=' dcq 已不在佇列'; note_json='dcq 已不在佇列'
+    fi
+  fi
+  printf '%s %s %s 已 %d 分 %s thread=%s %s%s\n' "$cat" "$id" "$tstr" "$mins" "$status" "$thread" "$backend" "$note" >> "$tmpdir/lines"
+  jq -cn --arg c "$cat" --arg id "$id" --arg at "$tstr" --argjson m "$mins" --arg st "$status" \
+    --arg th "$thread" --arg be "$backend" --arg note "$note_json" '
+    {category:$c, id:$id, time:$at, age_min:$m, status:$st, thread:$th, backend:$be}
+    + (if $note == "" then {} else {note:$note} end)' >> "$tmpdir/job.jsonl"
+done <<< "$rows"
+
+if [ "$json" = 1 ]; then
+  jq -cn --argjson p "$N_Prog" --argjson u "$N_Unres" --argjson k "$N_Today" --slurpfile jobs "$tmpdir/job.jsonl" \
+    '[{"進行中":$p,"未收尾":$u,"今日結案":$k}] + $jobs'
+  exit 0
+fi
+
+printf '進行中 %d｜未收尾 %d｜今日結案 %d\n' "$N_Prog" "$N_Unres" "$N_Today"
+if [ -f "$tmpdir/lines" ]; then cat "$tmpdir/lines"; fi
+exit 0

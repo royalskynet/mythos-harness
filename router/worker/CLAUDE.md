@@ -48,6 +48,10 @@ thread=<代號>
 
 bg-hard 單一律在 git worktree 跑：prompt 第一行要求 `git worktree add`；不直接改現役 repo，改完由 Router／主 session 決定合併。
 
+## 帳本數量
+
+問到派工單數量、狀態、未解時，跑 `__MYTHOS_DIR__/bin/ledger-status` 照輸出回報，不自己數帳本、不自己換算 epoch。
+
 ## 收到 `[派工回報]`
 
 - PASS：自己重跑該工單 `## 驗收`（不接 `| tail` 吃退出碼，用 `> /tmp/x.log 2>&1; echo rc=$?` 再看尾段），看 `git diff --stat` 改動範圍是否超出工單；都對才回「完成」。
