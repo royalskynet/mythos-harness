@@ -7,7 +7,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { adhdLint } from './adhd-lint.mjs'
+import { adhdLint, adhdTruncate } from './adhd-lint.mjs'
 import { record, jobIds, envIds } from './lib-request.mjs'
 
 const ROOT = process.env.MYTHOS_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -15,7 +15,6 @@ const STATE_DIR = process.env.TELEGRAM_STATE_DIR || path.join(process.env.HOME, 
 const BASE = process.env.TG_API_BASE || 'https://api.telegram.org'
 const TIMEOUT_MS = Number(process.env.TG_SEND_TIMEOUT_MS) || 15000
 const MAX_CHARS = 3500
-const ADHD_MAX = Number(process.env.ADHD_MAX_CHARS) || 220
 const NOT_SENT = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH'])
 
 function stripCodes(s) {
@@ -27,35 +26,6 @@ function stripCodes(s) {
     .replace(/^ +| +$/gm, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
-}
-
-function cutFirstLine(line) {
-  if (line.length <= 40) return line
-  const head = line.slice(0, 40)
-  const m = /^(.*[，。；])[^，。；]*$/.exec(head)
-  return (m ? m[1] : head).trim()
-}
-
-function adhdTruncate(raw) {
-  const lines = String(raw).replace(/\r\n?/g, '\n').split('\n').map(l => l.trim()).filter(Boolean)
-  const first = cutFirstLine(lines[0] || '')
-  const numbered = lines.slice(1).filter(l => /^\d+\.\s/.test(l)).slice(0, 3)
-  let out = [first, ...numbered].filter(Boolean).join('\n')
-  const tail = '\n回「詳細」看全文'
-  if ((out + tail).replace(/\s+/g, '').length > ADHD_MAX) {
-    let budget = ADHD_MAX - tail.replace(/\s+/g, '').length - first.replace(/\s+/g, '').length
-    const kept = []
-    for (const n of numbered) {
-      const c = n.replace(/\s+/g, '').length
-      if (budget - c < 0) break
-      budget -= c
-      kept.push(n)
-    }
-    out = [first, ...kept].filter(Boolean).join('\n')
-  }
-  out = (out + tail).trim()
-  if (out.replace(/\s+/g, '').length > ADHD_MAX) out = (first + tail).trim()
-  return out
 }
 
 const die = (code, msg) => {

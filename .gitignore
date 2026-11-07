@@ -96,3 +96,4 @@ __pycache__/
 !/bin/lib-request.mjs
 !/bin/lib-maintenance.mjs
 !/tests/test-quick-config.sh
+!/tests/test-adhd-truncate.sh

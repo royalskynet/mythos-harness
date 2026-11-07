@@ -194,7 +194,7 @@ echo ok > "$STUB_MODE"
 echo '(i) ok'
 
 # (h) 未設 MYTHOS_DIR、cwd=/ → 對照表寫到腳本所在 repo 的 state/
-mkdir -p "$TMP/repo/bin"; cp "$ROOT/bin/tg-send" "$ROOT/bin/lib-request.mjs" "$TMP/repo/bin/"
+mkdir -p "$TMP/repo/bin"; cp "$ROOT/bin/tg-send" "$ROOT/bin/lib-request.mjs" "$ROOT/bin/adhd-lint.mjs" "$TMP/repo/bin/"
 (cd / && echo hi | env -u MYTHOS_DIR node "$TMP/repo/bin/tg-send" --thread t-h --job bg-hhhh0008 >/dev/null) || fail '(h) tg-send 失敗'
 grep -q 'bg-hhhh0008' "$TMP/repo/state/tg-msg-thread.tsv" || fail '(h) 對照表沒寫到 repo/state'
 echo '(h) ok'
