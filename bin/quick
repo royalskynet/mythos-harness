@@ -112,14 +112,18 @@ def request_stage(stage):
 def clean_config_env():
     """沙箱擋憑證目錄後，opencode 讀到引用檔案的金鑰欄位會整個起不來（11-07 實測）。
     複製一份去掉引用檔案的 provider 與 mcp 的設定，用 XDG_CONFIG_HOME 指過去；免費模型不靠這些金鑰。
+    順便加 opencode 原生權限當第一層：改檔、出 cwd、讀 .env 先在工具層擋掉。
+    原生 read 規則管不到 bash 的 cat，所以沙箱與 audit 照留，這層只是提早擋。
     ponytail: 只處理純 JSON 的 opencode.json（plugin、opencode.jsonc 不帶）；要帶再擴充。"""
     src = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "opencode", "opencode.json")
     try:
         cfg = json.load(open(src))
     except (OSError, ValueError):
-        return None
+        cfg = {}
     cfg.pop("mcp", None)
     cfg["provider"] = {k: v for k, v in (cfg.get("provider") or {}).items() if "{file:" not in json.dumps(v)}
+    cfg["permission"] = {"edit": "deny", "external_directory": "deny", "webfetch": "deny",
+                         "read": {"*": "allow", "*.env": "deny", "*.env.*": "deny"}}
     home = tempfile.mkdtemp(prefix="quick-cfg-")
     os.makedirs(os.path.join(home, "opencode"))
     with open(os.path.join(home, "opencode", "opencode.json"), "w") as f:
