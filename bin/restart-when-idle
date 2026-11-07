@@ -6,7 +6,8 @@
 # 重開後等新行程起來，刪掉 CLEANUP_LINK（plugin update 留的舊版 cache symlink，fix 11101）。逾時 MAX_H 小時就放棄、不重開。
 # 用法：nohup bin/restart-when-idle >> logs/restart-when-idle.log 2>&1 &
 TMUX=${TMUX_BIN:-/opt/homebrew/bin/tmux}
-PROJ=${PROJ:-$HOME/.claude/projects/-Users-mac-mini-bots-mythos}
+MYTHOS_DIR=${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}
+PROJ=${PROJ:-$HOME/.claude/projects/$(printf '%s' "$MYTHOS_DIR" | sed 's/[^A-Za-z0-9]/-/g')}
 IDLE_MIN=${IDLE_MIN:-3}
 MAX_H=${MAX_H:-12}
 CLEANUP_LINK=${CLEANUP_LINK:-$HOME/.claude/plugins/cache/genie-harness/genie-harness/0.4.4}
