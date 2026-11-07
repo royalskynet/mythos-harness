@@ -40,8 +40,8 @@ export function adhdLint(text) {
 }
 
 function cutFirstLine(line) {
-  if (line.length <= 40) return line
-  const head = line.slice(0, 40)
+  if (line.length <= MAX_LINE_CHARS) return line
+  const head = line.slice(0, MAX_LINE_CHARS)
   const m = /^(.*[，。；])[^，。；]*$/.exec(head)
   return (m ? m[1] : head).trim()
 }
@@ -77,9 +77,7 @@ export function adhdTruncate(raw) {
   const first = cutFirstLine(lines[0] || '')
   const numbered = lines.slice(1).filter(l => /^\d+\.\s/.test(l)).slice(0, 3)
   let out = [first, ...numbered].filter(Boolean).join('\n')
-  // 只有一行且本就是單一長字串（沒空白可斷）：不切字、不塞「詳細」（沒東西可取回），
-  // 原樣往上丟——「≤220 字」的保證由呼叫端（Hermes 出口）的行數上限負責。
-  if (lines.length === 1 && String(raw).trim().length > MAX_CHARS) return String(raw).trim()
+  // 11-08 audit#6：單行超長也走截斷（無標點可斷就硬切前 MAX_LINE_CHARS 字＋「回「詳細」看全文」）；出口外掛發現輸出≠原文會存全文。
   const tail = '\n回「詳細」看全文'
   if ((out + tail).replace(/\s+/g, '').length > MAX_CHARS) {
     let budget = MAX_CHARS - tail.replace(/\s+/g, '').length - first.replace(/\s+/g, '').length

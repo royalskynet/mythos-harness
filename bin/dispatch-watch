@@ -422,7 +422,9 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
     else st=stopped; fi
   fi
   # 11-07 b-watch：worker 已 idle（status=idle、waitingFor 為 null）且 result 已寫好並過 grace → 視為 done
-  case "$st" in working|busy|running|active|blocked)
+  # 11-08 audit#1：hermes 的 st 已由 pid 判定；claude 專用補救（bg_idle／bg_pid 對 hermes 必空）不得覆寫
+  [ "$backend" = hermes ] && st_guard=skip || st_guard="$st"
+  case "$st_guard" in working|busy|running|active|blocked)
     if [ "$(bg_idle "$id")" = 1 ]; then
       rf="$(bg_rf "$sid")"
       if [ -s "$rf" ]; then

@@ -111,11 +111,11 @@ printf '%s\n' "$$" > "$reserve" || exit 1
 eid="${DISPATCH_BG_EID:-}"
 case "$eid" in .*|*[!A-Za-z0-9_.-]*) echo "不合法的重派 eid" >&2; exit 2 ;; esac
 if [ -n "$eid" ] && [ -f "$MYTHOS_DIR/state/dispatch-jobs.tsv" ]; then
-  prior="$(awk -F'\t' -v th="$thread" -v p="$prompt" '$7==th && $3==p && ($8=="bg" || $8=="bg-hard") {id=$1} END{print id}' "$MYTHOS_DIR/state/dispatch-jobs.tsv")"
+  prior="$(awk -F'\t' -v th="$thread" -v p="$prompt" '$7==th && $3==p && ($8=="bg" || $8=="bg-hard" || $8=="hermes") {id=$1} END{print id}' "$MYTHOS_DIR/state/dispatch-jobs.tsv")"
   if [ -n "$prior" ]; then echo "$prior"; exit 0; fi
 fi
 if [ "$thread" != - ] && [ -f "$MYTHOS_DIR/state/dispatch-jobs.tsv" ]; then
-  active="$(awk -F'\t' -v th="$thread" '$7==th && ($8=="bg" || $8=="bg-hard") {id=$1; st=$5} END{if(st=="pending") print id}' "$MYTHOS_DIR/state/dispatch-jobs.tsv")"
+  active="$(awk -F'\t' -v th="$thread" '$7==th && ($8=="bg" || $8=="bg-hard" || $8=="hermes") {id=$1; st=$5} END{if(st=="pending") print id}' "$MYTHOS_DIR/state/dispatch-jobs.tsv")"
   # hermes 沒有 claude agents 可問：同 thread 還在跑就一律排信箱（pid 由 dispatch-watch 判斷，這裡不猜）
   if [ -n "$active" ] && { [ -n "$hb" ] || ! jq -e --arg id "$active" 'select(.job_id==$id and (.status=="PASS" or .status=="FAIL" or .status=="TIMEOUT"))' "$MYTHOS_DIR/state/events.jsonl" >/dev/null 2>&1; }; then
     # ledger 尚未收尾時，以 agents 確認終態；查不到一律先排隊，避免未知狀態又開一個。
@@ -147,6 +147,7 @@ fi
 
 resume=''
 if [ -n "$thflag" ] && [ -f "$MYTHOS_DIR/state/dispatch-jobs.tsv" ]; then
+  # 11-08 audit#2：resume 刻意不納入 hermes 列——hermes sid 是隨機碼、不是 claude session，拿去 --resume 會失敗。
   resume="$(awk -F'\t' -v th="$thread" '
     { if (NF < 8) $8 = $8 }
     ($7 == th && ($8 == "bg" || $8 == "bg-hard")) { sid = substr($1, 4) }
@@ -240,7 +241,7 @@ if [ -n "$hb" ]; then
   # ponytail: hermes 停不掉（寫 ledger 失敗只能殺這個 pid 這一支）；續派不帶前情。
   : > "$rfbody" || { echo "result 檔開不了：$rfbody" >&2; exit 1; }
   sid="$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
-  ( cd "$WORKER_DIR" && "$HERMES" -p mythos-worker -z "$body" </dev/null >"$rfbody" 2>&1 9>&- ) &
+  ( cd "$WORKER_DIR" && "$HERMES" -p mythos-worker -z "$body" </dev/null >"$rfbody" 2>&1 9>&- ) 9>&- &  # 11-08：subshell 本身也要關 fd 9，否則 ledger 鎖會被它握到 worker 結束（dispatch-watch 拿不到鎖）
   hpid=$!
 else
 # 9>&-：claude 會活過本行程，不能繼承 ledger 鎖

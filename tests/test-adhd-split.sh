@@ -20,4 +20,10 @@ case "$o2" in *'回「詳細」看全文'*) echo "FAIL 不該截斷：$o2"; exit
 long="$(printf '很長的結論一行。\n'; for i in 1 2 3 4 5 6 7 8; do printf '這是第%s段補充說明，內容很多很多很多很多很多很多很多。\n' "$i"; done)"
 o3="$(printf '%s\n' "$long" | node bin/adhd-lint.mjs --truncate)"
 case "$o3" in *'回「詳細」看全文'*) ;; *) echo "FAIL 超長沒截斷：$o3"; exit 1;; esac
+# 11-08 audit#6：無標點單行 300 字不再原樣放行：去空白 ≤220 且過 lint、帶「詳細」
+t4="$(printf '甲%.0s' $(seq 1 300))"
+o4="$(printf '%s' "$t4" | node bin/adhd-lint.mjs --truncate)"
+[ "$(printf '%s' "$o4" | tr -d '[:space:]' | wc -m)" -le 220 ] || { echo "FAIL 單行超長沒截斷：$o4"; exit 1; }
+printf '%s\n' "$o4" | node bin/adhd-lint.mjs || { echo "FAIL 單行超長截斷後不過 lint"; exit 1; }
+case "$o4" in *'回「詳細」看全文'*) ;; *) echo "FAIL 缺詳細尾巴：$o4"; exit 1;; esac
 echo "PASS test-adhd-split"
