@@ -173,8 +173,20 @@ fi
 # 復原：cp state/backups-20261106-slim/dispatch-bg.bak-20261106-slim bin/dispatch-bg
 [ -z "$hard" ] && [ -z "${DISPATCH_BG_KEEP_SKILLS:-}" ] && args+=(--disable-slash-commands)
 [ -n "$resume" ] && args+=(--resume "$resume")
+# 11-07（bg-97f17c4d）：本輪專用結果檔由這裡指定，不讓 worker 自己猜短 id；續派 worker 才不會把結果寫回上一輪的檔。
+# watch 從 <sid>.rkey 找 r-<rk>.result。本輪專用路徑也寫進給 worker 的 prompt 開頭。
+rk="$(date +%s)-$$"
+rfbody="$MYTHOS_DIR/state/bg/r-$rk.result"
+rfline="結果檔：${rfbody}（本輪專用，不沿用前幾輪的檔名）"
+insert_after_first() { # body line → 插在第一行 thread= 之後（跟 tier 同一處理方式），沒有 thread= 就放最前面
+  case "$1" in
+    thread=*) printf '%s\n%s\n%s' "${1%%$'\n'*}" "$2" "${1#*$'\n'}" ;;
+    *) printf '%s\n%s' "$2" "$1" ;;
+  esac
+}
 # 最後一個參數才是 prompt 內容
 body="$(cat "$prompt")"
+body="$(insert_after_first "$body" "$rfline")"
 # 11-07 判難度前移：haiku worker 只做勝任的事，所以難度由本機 Laya（triage，零 token、約 3 秒）先判好寫進 prompt，
 # worker 只能往上改不能往下改。找不到 triage 一律當 mid（不讓 haiku 自己動手）。
 if [ -z "$hard" ]; then
@@ -183,17 +195,14 @@ if [ -z "$hard" ]; then
   [ -x "$TRIAGE" ] && tier="$("$TRIAGE" "$prompt" 2>/dev/null </dev/null 9>&- | tail -1 | tr -d '[:space:]')"
   case "$tier" in easy|mid|hard) ;; *) tier=mid ;; esac
   tl="tier=${tier}（本機判定；只能往上改，不能往下改）"
-  case "$body" in
-    thread=*) body="${body%%$'\n'*}"$'\n'"$tl"$'\n'"${body#*$'\n'}" ;;  # 第一行 thread= 照舊留第一行
-    *) body="$tl"$'\n'"$body" ;;
-  esac
+  body="$(insert_after_first "$body" "$tl")"  # 第一行 thread= 照舊留第一行
 fi
 if [ -n "$hard" ]; then
   # bg-hard 一律在 worktree 跑（計畫第 6 項）：prompt 第一行就要求 git worktree add，不直接改現役 repo
   repo="${tcwd:-<要改的 repo>}"
   wt="${TMPDIR:-/tmp}/bg-hard-$(date +%s)-$$"
   body="第一步：git -C '$repo' worktree add -b bg-hard/$(basename "$wt") '$wt'；之後所有改動只在 ${wt} 裡做，不直接改 ${repo}，不 merge、不 push，結果寫 worktree 路徑與 branch。
-定方向、卡關、宣告完成前各叫一次 advisor。最後一步寫 ${MYTHOS_DIR}/state/bg/<短id>.result。
+定方向、卡關、宣告完成前各叫一次 advisor。最後一步寫 ${rfbody}。
 
 $body"
 fi
@@ -227,6 +236,8 @@ stop_worker() { # 原因
 if ! printf '%s\n' "$row" >> "$MYTHOS_DIR/state/dispatch-jobs.tsv"; then
   stop_worker "寫 ledger 失敗：${id}"; exit 1
 fi
+# 11-07 續派：ledger 寫成後才留 rkey，dispatch-watch 從它找本輪結果檔
+printf '%s\n' "$rk" > "$MYTHOS_DIR/state/bg/$sid.rkey" || echo "rkey 寫入失敗：$sid" >&2
 "${NODE_BIN:-node}" "$ROOT_DIR/bin/lib-request.mjs" log "$MYTHOS_DIR" worker-start "$prompt" "$id" 9>&- || echo "worker 已登錄，但 request 紀錄寫入失敗" >&2
 rm -f "$reserve"; reserve=''
 ledger_unlock

@@ -384,6 +384,20 @@ bg_missing_extra() { # id sid → 印一行（已含「result 缺檔；」前綴
   fi
   printf '%s' "result 缺檔；${txt:-讀不到 claude logs}" | tr '\t\n' '  ' | cut -c1-300
 }
+# 11-07（bg-97f17c4d）：續派 worker 的結果檔名由 dispatch-bg 指定（<sid>.rkey 記 rk，結果在 r-<rk>.result）。
+# <sid>.result 有內容就印它；否則 rkey 存在且 r-<rk>.result 有內容就印那個；都沒有印 <sid>.result。
+bg_rf() { # 短id → 印本該寫結果的路徑
+  local f="$MYTHOS_DIR/state/bg/$1.result" k rf2
+  if [ -s "$f" ]; then printf '%s\n' "$f"; return; fi
+  if [ -f "$MYTHOS_DIR/state/bg/$1.rkey" ]; then
+    k="$(tr -d '[:space:]' < "$MYTHOS_DIR/state/bg/$1.rkey" 2>/dev/null)"
+    case "$k" in ''|*[!A-Za-z0-9._-]*) ;; *)
+      rf2="$MYTHOS_DIR/state/bg/r-$k.result"
+      if [ -s "$rf2" ]; then printf '%s\n' "$rf2"; return; fi ;;
+    esac
+  fi
+  printf '%s\n' "$f"
+}
 # 1-ctx) 零 token context 守衛：掃 Router／worker／deep transcript 的實際 usage，超限動作與告警見 bin/ctx-guard。
 #    掛掉不影響派工回報；CTX_GUARD_OFF=1 關閉。
 ${TO[@]+"${TO[@]}"} "$CTX_GUARD" scan </dev/null 9>&- >/dev/null 2>&1 || log "ctx-guard scan 失敗 rc=$?"
@@ -403,7 +417,7 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
   # 11-07 b-watch：worker 已 idle（status=idle、waitingFor 為 null）且 result 已寫好並過 grace → 視為 done
   case "$st" in working|busy|running|active|blocked)
     if [ "$(bg_idle "$id")" = 1 ]; then
-      rf="$MYTHOS_DIR/state/bg/$sid.result"
+      rf="$(bg_rf "$sid")"
       if [ -s "$rf" ]; then
         m="$(mtime_of "$rf")"
         case "$m" in ''|*[!0-9]*) m=0 ;; esac
@@ -415,7 +429,7 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
     # 11-07：agents 項目沒有 pid 欄＝行程已結束但 state 沒跟上（bg-97f17c4d 還 blocked）。只剩 result 可判：
     #        有 result 且過寬限 → 當 done；沒有 → 當 stopped，下面 F4 分支出 FAIL
     if [ -z "$(bg_pid "$id")" ]; then
-      rf="$MYTHOS_DIR/state/bg/$sid.result"
+      rf="$(bg_rf "$sid")"
       m="$(mtime_of "$rf")"
       case "$m" in ''|*[!0-9]*) m=0 ;; esac
       if [ -s "$rf" ] && [ $((now - m)) -ge "$BG_RESULT_GRACE_SEC" ]; then
@@ -428,7 +442,7 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
   esac
   case "$st" in
     done|completed|exited)
-      rf="$MYTHOS_DIR/state/bg/$sid.result"
+      rf="$(bg_rf "$sid")"
       extra=''
       if [ -s "$rf" ]; then
         extra="$(tr '\t\n' '  ' < "$rf" | cut -c1-300)"
