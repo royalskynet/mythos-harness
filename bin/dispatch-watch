@@ -841,12 +841,7 @@ unresolved_scan() {
     if [ "$closed" = 0 ]; then
       case "$kind" in
         STALL) [ "$st" = pending ] || closed=1 ;;
-        *)
-          case "$st" in superseded|cancelled|resolved|notified-PASS|retried) closed=1 ;; esac
-          if [ "$closed" = 0 ] && [ -n "$th" ] && [ "$th" != - ]; then
-            later="$(printf '%s\n' "$rows" | awk -F'\t' -v t="$th" -v i="$jid" -v e="$ep" '$7==t && $1!=i && $4+0>e+0 {c++} END{print c+0}')"
-            [ "$later" -gt 0 ] && closed=1
-          fi ;;
+        *) if ledger_is_closed "$jid" "$st" "$th" "$ep" "$rows" "$CLOSEOUTS"; then closed=1; fi ;;
       esac
     fi
     [ "$closed" = 1 ] && continue

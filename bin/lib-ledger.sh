@@ -40,6 +40,19 @@ ledger_events() {
   return "$rc"
 }
 
+# 未收尾判定（11-07 從 dispatch-watch unresolved_scan 抽出，FAIL/TIMEOUT 規則共用）：
+#   closeouts 有該 id；或帳本狀態已是收尾狀態；或同 thread 後面有 epoch 更大的別張單（重派）。
+# 回 0＝已收尾、1＝未收尾。STALL 單的判定（pending 才算未收尾）由呼叫端自理。
+#   $1 id；$2 status；$3 thread；$4 epoch；$5 整份帳本（ledger_fields 輸出）；$6 closeouts 檔路徑
+ledger_is_closed() {
+  local id="$1" st="$2" th="$3" ep="$4" rows="$5" cx="$6"
+  if [ -f "$cx" ] && cut -f1 "$cx" | grep -qxF -- "$id"; then return 0; fi
+  case "$st" in superseded|cancelled|resolved|notified-PASS|retried|informed|done) return 0 ;; esac
+  case "$th" in ''|-) return 1 ;; esac
+  printf '%s\n' "$rows" | awk -F'\t' -v t="$th" -v i="$id" -v e="$ep" '
+    $7==t && $1!=i && $4+0>e+0 { c++ } END { exit (c+0)>0 ? 0 : 1 }'
+}
+
 # 讀一列並統一成 8 欄。缺的欄位只填預設，不改寫歷史列。
 #   thread 沒有、id 也不是 deep- 開頭（O 票）→ 用 id 當 thread（同票重派所以還是同一個）
 ledger_fields() {
