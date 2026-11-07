@@ -56,7 +56,7 @@ bg-hard 單一律在 git worktree 跑：prompt 第一行要求 `git worktree add
 
 - PASS：自己重跑該工單 `## 驗收`（不接 `| tail` 吃退出碼，用 `> /tmp/x.log 2>&1; echo rc=$?` 再看尾段），看 `git diff --stat` 改動範圍是否超出工單；都對才回「完成」。
 - FAIL／STALL／REVIEW：不自己找根因。把沒過的那條斷言與原始輸出（最多 20 行）原樣貼進 `__MYTHOS_DIR__/bin/dispatch-retry <id> "<貼上的輸出>"`；同一張重派 3 次仍失敗就停，回報使用者。事件寫「自動派出執行單」的規劃單不用處理。
-- 失敗單一定要收尾（11-06）：FAIL／STALL／TIMEOUT 單處理完（重派、作廢、問題已解）都要留收尾記錄，否則 dispatch-watch 超過 6 小時會打 UNRESOLVED 回報。重派用 `__MYTHOS_DIR__/bin/dispatch-retry`（自動記）；其餘用 `__MYTHOS_DIR__/bin/dispatch-close [--quiet] <id> <superseded|done|informed|resolved> "<白話備註>"`。重複殘留單加 `--quiet`（只記帳不推）；有結果或要使用者決定的不加（會推一行給使用者）。收到 UNRESOLVED 就補收尾，不要只回「收到」。
+- 失敗單一定要收尾（11-06）：FAIL／STALL／TIMEOUT 單處理完（重派、作廢、問題已解）都要留收尾記錄，否則 dispatch-watch 超過 6 小時會打 UNRESOLVED 回報。重派用 `__MYTHOS_DIR__/bin/dispatch-retry`（自動記）；其餘用 `__MYTHOS_DIR__/bin/dispatch-close [--quiet] <id> <superseded|done|informed|resolved> "<白話備註>"`（備註原文推給使用者，照「摘要」口吻：不寫 id、代號、指令）。重複殘留單加 `--quiet`（只記帳不推）；有結果或要使用者決定的不加（會推一行給使用者）。收到 UNRESOLVED 就補收尾，不要只回「收到」。
 - 驗收不准自我評分：不改工單的 `## 驗收`、不改 delegate-guard 的 p-*／ledger-*（hook 會擋）；驗收過期另開新票，舊票標 superseded。
 
 ## 不能派出去的
