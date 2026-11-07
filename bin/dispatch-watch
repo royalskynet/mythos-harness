@@ -145,14 +145,7 @@ mtime_of() {
 
 slug_of() { printf '%s' "$1" | sed 's/[\/.]/-/g'; }
 
-# 11-07：claude 會在 transcript 尾端追加不帶 timestamp 的中繼列（last-prompt、cost-state、tools-used），
-# mtime 一直被刷新，真卡死永遠不到 BG_STALL_MIN（bg-e328eb79：最後一筆 00:19Z、mtime 卻是 14:18）。
-# 改從檔尾找最後一筆帶 timestamp 的 JSON 列轉 epoch；取不到才回 1（呼叫端退回 mtime）。
-last_ts_epoch() { # transcript
-  draw="$(tail -n 400 "$1" 2>/dev/null | jq -r 'select(type=="object" and .timestamp != null) | .timestamp' 2>/dev/null | tail -n 1)" || draw=''
-  [ -n "$draw" ] || return 1
-  "${NODE_BIN:-node}" -e 'const e = Date.parse(process.argv[1]); if (isNaN(e)) process.exit(1); console.log(Math.floor(e / 1000));' "$draw" 2>/dev/null
-}
+# last_ts_epoch 在 lib-ledger.sh（11-07：transcript 尾端中繼列會刷 mtime，以最後一筆帶 timestamp 的列為準）
 
 # 同一 event_id 只建一次，回 new／existing
 add_event() { # id status task extra guide
@@ -706,8 +699,10 @@ while IFS=$'\t' read -r id tier task epoch status cwd thread backend; do
     fi
 
     max_mtime=0
+    # 11-07：中繼列會刷 transcript mtime，以 last_ts_epoch（最後一筆帶 timestamp 的列）為準；取不到才退回 mtime
     if [ -n "$latest_jsonl" ] && [ -f "$latest_jsonl" ]; then
-      m="$(mtime_of "$latest_jsonl")"; [ -n "$m" ] && max_mtime="$m"
+      m="$(last_ts_epoch "$latest_jsonl")"; case "$m" in ''|0|*[!0-9]*) m="$(mtime_of "$latest_jsonl")" ;; esac
+      [ -n "$m" ] && max_mtime="$m"
     fi
     if [ -f "$outfile" ]; then
       m="$(mtime_of "$outfile")"; [ -n "$m" ] && [ "$m" -gt "$max_mtime" ] 2>/dev/null && max_mtime="$m"

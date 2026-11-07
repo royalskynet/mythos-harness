@@ -26,6 +26,9 @@ now="$(date +%s)"
 mkdir -p "$MYTHOS_DIR/logs" "$MYTHOS_DIR/state"
 log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG"; }
 
+# last_ts_epoch（transcript 尾端中繼列會刷 mtime，改看最後一筆帶 timestamp 的列）跟 ledger lib 走
+. "$(cd "$(dirname "$0")" && pwd)/lib-ledger.sh"
+
 # 去重狀態檔：不存在或不合法就重建（首次啟動不能每輪重複告警）
 if ! jq -e '.alerted | type == "object"' "$STATE" >/dev/null 2>&1; then
   printf '%s\n' '{"alerted":{}}' > "$STATE" || { log "ERROR 無法建立 $STATE"; exit 1; }
@@ -431,19 +434,22 @@ while IFS= read -r sess; do
   dir="$CLAUDE_PROJECTS_DIR/$(printf '%s' "$cwd" | sed 's/[\/.]/-/g')"
   latest="$(ls -t "$dir"/*.jsonl 2>/dev/null | head -1)"
   [ -n "$latest" ] || continue   # transcript 還沒出現：交 dispatch-watch 判
-  m="$(mtime_of "$latest")"
+  # 11-07：中繼列會刷 mtime，以 last_ts_epoch（最後一筆帶 timestamp 的列）為準；取不到才退回 mtime
+  m="$(last_ts_epoch "$latest")"
+  case "$m" in ''|0|*[!0-9]*) m="$(mtime_of "$latest")" ;; esac
   if [ "$m" -gt 0 ] && [ $((now - m)) -ge $((deep_stall_min * 60)) ]; then
     alert "deep-stall-$sess-$m" "deep session ${sess}（job=${jid}）transcript $(( (now - m) / 60 )) 分鐘沒動"
   fi
 done < <(run_to 10 "$TMUX_BIN" -L deep ls -F '#{session_name}' 2>/dev/null)
 
-# 5b) claude agents 的背景 worker state=blocked（卡在權限提示）超過 BG_STALL_MIN 分鐘 → 告警
+# 5b) claude agents 的背景 worker 卡在權限提示（waitingFor=permission prompt）超過 BG_STALL_MIN 分鐘 → 告警
+#     11-07：state=blocked 不可靠（已完成收尾的 worker 也是 blocked），以 waitingFor 為準；
 #     blocked 沒有時間欄位，第一次看到記在 watchdog.json 的 bg_blocked，解除就移掉
 bg_stall_min="$(knob_get BG_STALL_MIN 10)"
 if command -v "$CLAUDE_BIN" >/dev/null 2>&1 \
   && bg_json="$(run_to 20 "$CLAUDE_BIN" agents --json --all 2>/dev/null)" \
   && printf '%s' "$bg_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
-  blocked="$(printf '%s' "$bg_json" | jq -c '[.[] | select(.kind == "background" and .state == "blocked") | (.id // .sessionId // empty) | tostring]')"
+  blocked="$(printf '%s' "$bg_json" | jq -c '[.[] | select(.kind == "background" and .waitingFor == "permission prompt") | (.id // .sessionId // empty) | tostring]')"
   st_update --argjson b "$blocked" --argjson now "$now" \
     '(.bg_blocked // {}) as $old | .bg_blocked = (reduce $b[] as $x ({}; .[$x] = ($old[$x] // $now)))'
   while IFS=$'\t' read -r bid since; do
