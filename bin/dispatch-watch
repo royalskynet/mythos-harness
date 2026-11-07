@@ -336,6 +336,11 @@ bg_state() {
   [ -n "$AGENTS_JSON" ] || return 0
   printf '%s' "$AGENTS_JSON" | "$NODE_BIN" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const id=process.argv[1];let a=[];try{a=JSON.parse(s)}catch{return}const hit=a.find(x=>(x.sessionId||"").startsWith(id))||a.find(x=>x.id===id);if(hit)process.stdout.write(String(hit.state||"")||"")})' "${1#bg-}" 9>&- 2>/dev/null
 }
+# 短 id → 該筆 agent 的 status 為 idle 且 waitingFor 為 null／不存在時印 1（11-07 b-watch）
+bg_idle() {
+  [ -n "$AGENTS_JSON" ] || return 0
+  printf '%s' "$AGENTS_JSON" | "$NODE_BIN" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const id=process.argv[1];let a=[];try{a=JSON.parse(s)}catch{return}const hit=a.find(x=>(x.sessionId||"").startsWith(id))||a.find(x=>x.id===id);if(hit && hit.status==="idle" && (hit.waitingFor==null)) process.stdout.write("1")})' "${1#bg-}" 9>&- 2>/dev/null
+}
 # 短 id → 「完整 sessionId<TAB>cwd」（兩個都有才印）
 bg_info() {
   [ -n "$AGENTS_JSON" ] || return 0
@@ -374,6 +379,20 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
   case "$backend" in bg|bg-hard) ;; *) continue ;; esac
   sid="${id#bg-}"
   st="$(bg_state "$id")"
+  # 11-07 b-watch：worker 已 idle（status=idle、waitingFor 為 null）且 result 已寫好並過 grace → 視為 done
+  case "$st" in working|busy|running|active|blocked)
+    if [ "$(bg_idle "$id")" = 1 ]; then
+      rf="$MYTHOS_DIR/state/bg/$sid.result"
+      if [ -s "$rf" ]; then
+        m="$(mtime_of "$rf")"
+        case "$m" in ''|*[!0-9]*) m=0 ;; esac
+        if [ $((now - m)) -ge "$BG_RESULT_GRACE_SEC" ]; then
+          st=done
+        fi
+      fi
+    fi
+    ;;
+  esac
   case "$st" in
     done|completed|exited)
       rf="$MYTHOS_DIR/state/bg/$sid.result"
