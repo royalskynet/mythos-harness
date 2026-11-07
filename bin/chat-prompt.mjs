@@ -75,4 +75,5 @@ function main(argv) {
   return 0
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === new URL(import.meta.url).pathname) process.exit(main(process.argv.slice(2)))
+// realpath：node 的 import.meta.url 已解 symlink（/var→/private/var），argv[1] 沒解，直比會靜默不跑（11-07 worktree 實測）
+if (process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(new URL(import.meta.url).pathname)) process.exit(main(process.argv.slice(2)))

@@ -262,7 +262,7 @@ bg_autoheal() { # id eid thread task extra kind(FAIL|STALL)
   fi
   ledger_events set "$EVENTS_FILE" "$eid" '{"direct":"retrying"}' >/dev/null || return 1
   # intent 與穩定 prompt 都先落地；dispatch-bg 在鎖內查同 prompt，登錄後中斷也不會重開。
-  if ! awk -F'\t' -v p="$p" '$3==p && ($8=="bg" || $8=="bg-hard") {f=1} END{exit !f}' "$TSV"; then
+  if ! awk -F'\t' -v p="$p" '$3==p && ($8=="bg" || $8=="bg-hard" || $8=="hermes") {f=1} END{exit !f}' "$TSV"; then
     # 恢復已登錄的 intent 不再 cancel，避免停到沿用同 session 的新 worker。
     if [ "$kind" = STALL ] && [ "$(awk -F'\t' -v id="$id" '$1==id {print $5;exit}' "$TSV")" = pending ]; then
       MYTHOS_DIR="$MYTHOS_DIR" bash "$DISPATCH_CANCEL_BIN" "$id" 9>&- >/dev/null 2>>"$WATCH_LOG" || return 1
@@ -409,9 +409,17 @@ fi
 # 1a) bg／bg-hard 掃描：done 走事件投遞、working 逾時發 STALL
 while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend; do
   [ "$status" = pending ] || continue
-  case "$backend" in bg|bg-hard) ;; *) continue ;; esac
+  case "$backend" in bg|bg-hard|hermes) ;; *) continue ;; esac
   sid="${id#bg-}"
   st="$(bg_state "$id")"
+  # WO3-v3：hermes worker 不在 claude agents，用 state/bg/<短id>.pid 判存活——活著算 working；
+  # 走了看本輪 result 有沒有內容：有＝done（走下方 PASS 投遞），沒有＝stopped（走 F4 fail_handoff，有寬限）。
+  if [ "$backend" = hermes ]; then
+    hp="$(tr -d '[:space:]' < "$MYTHOS_DIR/state/bg/$sid.pid" 2>/dev/null)"
+    if [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null; then st=working
+    elif [ -s "$(bg_rf "$sid")" ]; then st=done
+    else st=stopped; fi
+  fi
   # 11-07 b-watch：worker 已 idle（status=idle、waitingFor 為 null）且 result 已寫好並過 grace → 視為 done
   case "$st" in working|busy|running|active|blocked)
     if [ "$(bg_idle "$id")" = 1 ]; then
@@ -452,7 +460,8 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
         extra="$(bg_missing_extra "$id" "$sid")"
       fi
       guide="看結果決定：要續派用 bin/dispatch-bg --thread $thread <prompt檔>，卡死就 bin/dispatch-cancel $id"
-      if add_event "$id" PASS "$task" "$extra" "$guide" >/dev/null && [ "$backend" = bg ] && [ -s "$rf" ]; then
+      case "$backend" in bg|hermes) bgb=1 ;; *) bgb='' ;; esac
+      if add_event "$id" PASS "$task" "$extra" "$guide" >/dev/null && [ -n "$bgb" ] && [ -s "$rf" ]; then
         sf="$MYTHOS_DIR/state/bg/$sid.summary"
         if summary_of "$rf" > "$sf" && [ -n "$(tr -d '[:space:]' < "$sf")" ]; then
           if [ "$(head -1 "$sf" | tr -d '[:space:]')" = "[靜默]" ]; then
@@ -543,7 +552,7 @@ for mb in "$MYTHOS_DIR"/state/mailbox/*; do
   th="${mb##*/}"
   case "$th" in ''|*[!A-Za-z0-9-]*) continue ;; esac
   ledger_lock || continue
-  active="$(awk -F'\t' -v th="$th" '$7==th && ($8=="bg" || $8=="bg-hard") {id=$1; st=$5} END{if(st=="pending") print id}' "$TSV")"
+  active="$(awk -F'\t' -v th="$th" '$7==th && ($8=="bg" || $8=="bg-hard" || $8=="hermes") {id=$1; st=$5} END{if(st=="pending") print id}' "$TSV")"
   if [ -n "$active" ] && ! jq -e --arg id "$active" 'select(.job_id==$id and (.status=="PASS" or .status=="FAIL" or .status=="TIMEOUT"))' "$EVENTS_FILE" >/dev/null 2>&1; then
     ledger_unlock; continue
   fi
@@ -564,7 +573,7 @@ for mb in "$MYTHOS_DIR"/state/mailbox/*; do
     } > "$p.tmp" && mv "$p.tmp" "$p" || { ledger_unlock; continue; }
   fi
   next_args=(--thread "$th")
-  last_backend="$(awk -F'\t' -v th="$th" '$7==th && ($8=="bg" || $8=="bg-hard") {b=$8} END{print b}' "$TSV")"
+  last_backend="$(awk -F'\t' -v th="$th" '$7==th && ($8=="bg" || $8=="bg-hard" || $8=="hermes") {b=$8} END{print b}' "$TSV")"
   if [ "$last_backend" = bg-hard ]; then
     last_cwd="$(awk -F'\t' -v th="$th" '$7==th && $8=="bg-hard" {c=$6} END{print c}' "$TSV")"
     next_args=(--hard --cwd "$last_cwd" --thread "$th")

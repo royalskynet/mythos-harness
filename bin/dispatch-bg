@@ -10,16 +10,25 @@
 #   bin/dispatch-bg --hard [--cwd <repo>] …      同上，worker 用 hard.json（sonnet＋Opus advisor），backend=bg-hard（非 hard 預設 haiku）；
 #                                                prompt 第一行要求在 <repo> 開 git worktree（bin/dispatch hard 會帶 --cwd）
 # 成功：stdout 印 ledger id（bg-<短id>）；取不到 claude 印的短 id → stderr 原文、ledger 不寫、exit 1。
+# WO3-v3：DISPATCH_BG_WORKER=claude（預設，上段行為不變）| hermes → 起 `hermes -p mythos-worker -z "<prompt>"`（detached、
+#   stdin=/dev/null、argv 不放 prompt），stdout 串流寫進同一份 result 檔、pid 寫 <sid>.pid，backend=hermes。
+# 兩邊都留 <sid>.rkey，dispatch-watch 從 r-<rk>.result 找回本輪結果檔。
 set -u
 
 MYTHOS_DIR="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CLAUDE="${CLAUDE_BIN:-claude}"
+BG_WORKER="${DISPATCH_BG_WORKER:-claude}"
+HERMES="${DISPATCH_BG_HERMES_BIN:-$HOME/.local/bin/hermes}"
+case "$BG_WORKER" in claude|hermes) ;; *) echo "DISPATCH_BG_WORKER 只認 claude 或 hermes：$BG_WORKER" >&2; exit 2 ;; esac
+hb=''
+[ "$BG_WORKER" = hermes ] && hb=1
 # 工具白名單（計畫第 1 項）：不帶 mcp__telegram__*，worker 不能直接回使用者
 ALLOWED_TOOLS='Bash Read Write Edit Glob Grep'
-# 測試守門（F1）：sandbox 非空時 claude 必須也在 sandbox 裡，否則一律拒跑、ledger 不寫
+# 測試守門（F1）：sandbox 非空時 runner（claude 或 hermes）必須也在 sandbox 裡，否則一律拒跑、ledger 不寫
+RUNNER="$CLAUDE"; [ -n "$hb" ] && RUNNER="$HERMES"
 if [ -n "${MYTHOS_TEST_SANDBOX:-}" ]; then
-  case "$CLAUDE" in
+  case "$RUNNER" in
     "$MYTHOS_TEST_SANDBOX"/*) ;;
     *) echo "測試模式拒跑真 runner" >&2; exit 97 ;;
   esac
@@ -107,13 +116,17 @@ if [ -n "$eid" ] && [ -f "$MYTHOS_DIR/state/dispatch-jobs.tsv" ]; then
 fi
 if [ "$thread" != - ] && [ -f "$MYTHOS_DIR/state/dispatch-jobs.tsv" ]; then
   active="$(awk -F'\t' -v th="$thread" '$7==th && ($8=="bg" || $8=="bg-hard") {id=$1; st=$5} END{if(st=="pending") print id}' "$MYTHOS_DIR/state/dispatch-jobs.tsv")"
-  if [ -n "$active" ] && ! jq -e --arg id "$active" 'select(.job_id==$id and (.status=="PASS" or .status=="FAIL" or .status=="TIMEOUT"))' "$MYTHOS_DIR/state/events.jsonl" >/dev/null 2>&1; then
+  # hermes 沒有 claude agents 可問：同 thread 還在跑就一律排信箱（pid 由 dispatch-watch 判斷，這裡不猜）
+  if [ -n "$active" ] && { [ -n "$hb" ] || ! jq -e --arg id "$active" 'select(.job_id==$id and (.status=="PASS" or .status=="FAIL" or .status=="TIMEOUT"))' "$MYTHOS_DIR/state/events.jsonl" >/dev/null 2>&1; }; then
     # ledger 尚未收尾時，以 agents 確認終態；查不到一律先排隊，避免未知狀態又開一個。
     if command -v timeout >/dev/null 2>&1; then CHECK_TO=(timeout -k 5 20)
     elif command -v gtimeout >/dev/null 2>&1; then CHECK_TO=(gtimeout -k 5 20)
     else CHECK_TO=()
     fi
-    ast="$(${CHECK_TO[@]+"${CHECK_TO[@]}"} "$CLAUDE" agents --json --all </dev/null 9>&- 2>/dev/null | jq -r --arg s "${active#bg-}" '[.[]? | select((.sessionId // .id // "") | startswith($s)) | .state][0] // "unknown"' 2>/dev/null)"
+    ast='queued'
+    if [ -z "$hb" ]; then
+      ast="$(${CHECK_TO[@]+"${CHECK_TO[@]}"} "$CLAUDE" agents --json --all </dev/null 9>&- 2>/dev/null | jq -r --arg s "${active#bg-}" '[.[]? | select((.sessionId // .id // "") | startswith($s)) | .state][0] // "unknown"' 2>/dev/null)"
+    fi
     case "$ast" in done|completed|exited|stopped|failed|error|killed) ;;
       *)
         mb="$MYTHOS_DIR/state/mailbox/$thread"
@@ -141,7 +154,7 @@ if [ -n "$thflag" ] && [ -f "$MYTHOS_DIR/state/dispatch-jobs.tsv" ]; then
 fi
 # --resume 要完整 sessionId（11-04 實測）：只給 8 碼短 id 時 claude 起一個「copy」，停在 working、不寫 transcript，
 # watchlist-watch 兩次續派都這樣卡到 STALL。ledger 只存短 id，這裡向 claude agents 換回完整 id；換不到就新開，不硬續。
-if [ -n "$resume" ]; then
+if [ -n "$resume" ] && [ -z "$hb" ]; then
   if command -v timeout >/dev/null 2>&1; then TO=(timeout -k 5 20)
   elif command -v gtimeout >/dev/null 2>&1; then TO=(gtimeout -k 5 20)
   else TO=()
@@ -163,7 +176,9 @@ model="${DISPATCH_BG_MODEL:-haiku}"
 args=(--bg --model "$model" --allowedTools "$ALLOWED_TOOLS" --name "mythos:$thread")
 backend=bg
 settings=''
-if [ -n "$hard" ]; then
+if [ -n "$hb" ]; then
+  backend=hermes
+elif [ -n "$hard" ]; then
   settings="$WORKER_DIR/.claude/hard.json"
   [ -f "$settings" ] || { echo "找不到 $settings" >&2; exit 1; }
   args+=(--settings "$settings")
@@ -171,7 +186,7 @@ if [ -n "$hard" ]; then
 fi
 # 11-06 瘦身：非 hard worker 不載入 skill 清單（實測少約 8K 新輸入）；DISPATCH_BG_KEEP_SKILLS=1 關閉。
 # 復原：cp state/backups-20261106-slim/dispatch-bg.bak-20261106-slim bin/dispatch-bg
-[ -z "$hard" ] && [ -z "${DISPATCH_BG_KEEP_SKILLS:-}" ] && args+=(--disable-slash-commands)
+[ -z "$hb" ] && [ -z "$hard" ] && [ -z "${DISPATCH_BG_KEEP_SKILLS:-}" ] && args+=(--disable-slash-commands)
 [ -n "$resume" ] && args+=(--resume "$resume")
 # 11-07（bg-97f17c4d）：本輪專用結果檔由這裡指定，不讓 worker 自己猜短 id；續派 worker 才不會把結果寫回上一輪的檔。
 # watch 從 <sid>.rkey 找 r-<rk>.result。本輪專用路徑也寫進給 worker 的 prompt 開頭。
@@ -219,6 +234,15 @@ $ledger"
 fi
 args+=("$body")
 "${NODE_BIN:-node}" "$ROOT_DIR/bin/lib-request.mjs" log "$MYTHOS_DIR" queued "$prompt" "" 9>&- || echo "request 紀錄寫入失敗（不擋派工）" >&2
+if [ -n "$hb" ]; then
+  # hermes -z 一次跑完印結果，沒有 session 短 id 可續派、可 stop：id 用隨機 8 碼，靠 <sid>.pid 判存活。
+  # 續派＝新開一輪（同 thread，「同 thread 還在跑」在上面一律排信箱）。stdout 直接寫 result 檔，檔案一定存在。
+  # ponytail: hermes 停不掉（寫 ledger 失敗只能殺這個 pid 這一支）；續派不帶前情。
+  : > "$rfbody" || { echo "result 檔開不了：$rfbody" >&2; exit 1; }
+  sid="$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+  ( cd "$WORKER_DIR" && "$HERMES" -p mythos-worker -z "$body" </dev/null >"$rfbody" 2>&1 9>&- ) &
+  hpid=$!
+else
 # 9>&-：claude 會活過本行程，不能繼承 ledger 鎖
 out="$(cd "$WORKER_DIR" && "$CLAUDE" "${args[@]}" 2>&1 9>&-)"
 rc=$?
@@ -231,6 +255,7 @@ if [ "$rc" != 0 ] || [ -z "$sid" ]; then
   echo "claude --bg 沒印出短 id（exit ${rc}），未登錄" >&2
   exit 1
 fi
+fi
 
 id="bg-$sid"
 # 第 6 欄：只有 --hard 記目標 repo（dispatch-retry 拿它重派 worktree）；非 hard 留 worker 目錄
@@ -238,6 +263,9 @@ id="bg-$sid"
 row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$id" "$([ -n "$hard" ] && echo hard || echo mid)" "$prompt" "$(date +%s)" pending "${tcwd:-$WORKER_DIR}" "$thread" "$backend")"
 # F2：登錄失敗要收掉已啟動的 worker，不然 Router fallback 再派一次就有兩個 worker
 stop_worker() { # 原因
+  if [ -n "$hb" ]; then
+    kill "$hpid" 2>/dev/null; echo "${1}；已停止 worker ${sid}（hermes）" >&2; return
+  fi
   if "$CLAUDE" stop "$sid" </dev/null 9>&- >/dev/null 2>&1; then
     echo "${1}；已停止 worker ${sid}" >&2
   else
@@ -249,6 +277,7 @@ if ! printf '%s\n' "$row" >> "$MYTHOS_DIR/state/dispatch-jobs.tsv"; then
 fi
 # 11-07 續派：ledger 寫成後才留 rkey，dispatch-watch 從它找本輪結果檔
 printf '%s\n' "$rk" > "$MYTHOS_DIR/state/bg/$sid.rkey" || echo "rkey 寫入失敗：$sid" >&2
+[ -n "$hb" ] && { printf '%s\n' "$hpid" > "$MYTHOS_DIR/state/bg/$sid.pid" || echo "pid 寫入失敗：$sid" >&2; }
 "${NODE_BIN:-node}" "$ROOT_DIR/bin/lib-request.mjs" log "$MYTHOS_DIR" worker-start "$prompt" "$id" 9>&- || echo "worker 已登錄，但 request 紀錄寫入失敗" >&2
 rm -f "$reserve"; reserve=''
 ledger_unlock
