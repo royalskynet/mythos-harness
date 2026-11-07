@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""worker-latency — 記每個 mythos-worker session 的首回延遲（第一則 user → 第一則 assistant），零 token。
+
+11-08：worker 一次首回等了 148s（同 prompt 重跑 9–16s），查不到是哪邊慢；先記帳，同樣情況再出現才加逾時。
+由 bin/dispatch-watch 每輪呼叫（已在 watch 鎖內，不會兩輪重複寫）。
+- 帳：state/worker-latency.tsv（session_id、開始時間 UTC+8、首回秒數、模型），已記過的 session 不重記。
+- 首回 ≥ WORKER_LAT_ALERT_SEC（預設 90）：寫一行 ⚠ 到 brief-lines，由 fleet-alerts 每小時轉 Scribe；附 7 天內第幾次。
+ponytail: 只記「已回」的 session；卡住一直沒回的不在這裡抓（那是 dispatch-watch 的 STALL）。
+"""
+import os
+import sqlite3
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+
+TPE = timezone(timedelta(hours=8))
+MYTHOS = os.environ.get("MYTHOS_DIR", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DB = os.environ.get("MYTHOS_WORKER_DB", os.path.expanduser("~/.hermes/profiles/mythos-worker/state.db"))
+LEDGER = os.path.join(MYTHOS, "state", "worker-latency.tsv")
+ALERT = os.path.join(os.environ.get("BRIEF_LINES_DIR", os.path.expanduser("~/.cache/brief-lines")), "mythos-worker-latency.tsv")
+THRESH = float(os.environ.get("WORKER_LAT_ALERT_SEC", "90"))
+LOOKBACK = 2 * 86400  # 只看兩天內開始的 session
+
+
+def main() -> int:
+    if not os.path.exists(DB):
+        return 0
+    seen = set()
+    rows = []
+    if os.path.exists(LEDGER):
+        with open(LEDGER, encoding="utf-8") as f:
+            rows = [l.rstrip("\n").split("\t") for l in f if l.strip()]
+        seen = {r[0] for r in rows}
+    con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True, timeout=2)
+    try:
+        q = con.execute(
+            "SELECT u.session_id, u.t0, (SELECT MIN(timestamp) FROM messages a WHERE a.session_id=u.session_id"
+            " AND a.role='assistant' AND a.timestamp>=u.t0),"
+            " (SELECT model FROM session_model_usage m WHERE m.session_id=u.session_id ORDER BY input_tokens DESC LIMIT 1)"
+            " FROM (SELECT session_id, MIN(timestamp) t0 FROM messages WHERE role='user' GROUP BY session_id) u"
+            " WHERE u.t0>=? ORDER BY u.t0", (time.time() - LOOKBACK,)).fetchall()
+    finally:
+        con.close()
+    new = [(sid, t0, t1, model or "") for sid, t0, t1, model in q if t1 is not None and sid not in seen]
+    if not new:
+        return 0
+    os.makedirs(os.path.dirname(LEDGER), exist_ok=True)
+    with open(LEDGER, "a", encoding="utf-8") as f:
+        for sid, t0, t1, model in new:
+            lat = round(t1 - t0, 1)
+            when = datetime.fromtimestamp(t0, TPE).strftime("%Y-%m-%d %H:%M:%S")
+            f.write(f"{sid}\t{when}\t{lat}\t{model}\n")
+            rows.append([sid, when, str(lat), model])
+            if lat >= THRESH:
+                week = (datetime.now(TPE) - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+                n = sum(1 for r in rows if len(r) > 2 and r[1] >= week and float(r[2]) >= THRESH)
+                os.makedirs(os.path.dirname(ALERT), exist_ok=True)
+                with open(ALERT, "a", encoding="utf-8") as a:
+                    a.write(f"{when[:10]}\tMythos worker 首回慢：⚠ {lat:.0f}s（{model}，{when[11:16]}，7 天內第 {n} 次）\n")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as e:  # 記帳失敗不擋 dispatch-watch
+        print(f"worker-latency: {type(e).__name__}: {e}", file=sys.stderr)
+        sys.exit(0)

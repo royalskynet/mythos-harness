@@ -20,6 +20,7 @@
 !/bin/dispatch-retry
 !/bin/dispatch-close
 !/bin/dispatch-watch
+!/bin/worker-latency
 !/bin/lib-ledger.sh
 !/bin/ledger-status
 !/bin/lib-events.mjs
@@ -70,6 +71,7 @@
 !/tests/test-dispatch-hermes-rc.sh
 !/tests/test-dispatch-cancel-hermes.sh
 !/tests/test-dispatch-latency.sh
+!/tests/test-worker-latency.sh
 !/tests/test-dispatch-bg-hermes.sh
 !/tests/test-dispatch-hard-head.sh
 !/tests/test-cutover-dryrun.sh

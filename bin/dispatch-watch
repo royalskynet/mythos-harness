@@ -136,6 +136,9 @@ REVIEWS="$(mktemp "${TMPDIR:-/tmp}/dispatch-watch-reviews.XXXXXX")" || { rm -f "
 cleanup() { rm -f "$OUT" "$TODOS" "$REVIEWS"; rm -rf "$LOCK"; }
 trap cleanup EXIT
 
+# worker 首回延遲記帳（11-08，零 token）：慢的寫 brief-lines 轉 Scribe；失敗不擋本輪
+python3 "$(dirname "$0")/worker-latency" 2>>"$WATCH_LOG" || true
+
 now="$(date +%s)"
 late=0
 log() { mkdir -p "$(dirname "$WATCH_LOG")" 2>/dev/null; printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$WATCH_LOG"; }
