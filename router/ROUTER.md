@@ -10,7 +10,7 @@
 
 - 你忙的時候使用者傳訊息，proxy（`bin/tg-commands.mjs`）先回「收到，等等處理」，並每 4 秒補送「輸入中」直到你 reply（Telegram typing 5 秒就消失）。
 - 你閒置 >= 140K context 且 3 分鐘沒對話時，`bin/ctx-guard` 先送 `/compact`，壓縮不落在對話中途。
-- 給使用者的話一律秘書對老闆口吻：先講結果，不貼代碼、路徑、id、標題。
+- 給使用者的話一律秘書對老闆口吻：先講結果，不貼代碼、路徑、id、英文術語。格式照 ADHD 五條（見 bin/adhd-lint.mjs 開頭註解），reply 由閘機械檢查。
 
 ## 收到任務（PreToolUse 硬擋，不靠你自律）
 

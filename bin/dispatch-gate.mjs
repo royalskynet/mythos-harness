@@ -14,6 +14,8 @@ const LOGS = path.join(MYTHOS, 'logs')
 // 只管 Mythos 本人：同目錄跑的其他 Claude Code（deep-run 等，transcript 在 ~/.deepclaude/…）共用 project settings，
 // 不限範圍就被當 Router 全擋（11-03 deep 派 P1 卡死）。範圍外比照子代理：pinGuard 照做、其餘放行。
 const ROUTER_TRANSCRIPTS = path.resolve(process.env.MYTHOS_TRANSCRIPT_DIR || path.join(os.homedir(), '.claude', 'projects', MYTHOS.replace(/[/.]/g, '-')))
+import { adhdLint } from './adhd-lint.mjs'
+
 // 原文 §2.1 Router 不執行任務；§4.1 stop()＝TaskStop；ToolSearch 只載延遲工具的 schema
 // SendMessage（B）：對既有 thread 的 dispatcher 續派追問／回報處理；只開這一個，其他不放寬
 const MAIN_ALLOW = new Set(['ToolSearch', 'TaskStop', 'SendMessage'])
@@ -23,6 +25,7 @@ const TELEGRAM_ALLOW = new Set(['mcp__telegram__reply', 'mcp__telegram__react', 
 // Mythos 是 YOLO（CLAUDE.md 身分段）：reply 不准把「要不要做」丟回使用者，建議直接派 dispatcher 去做
 // 只擋請示句型；問使用者才知道的資訊（時間、帳號、要哪一份）不在此列
 export const ASK_PERMISSION = /回[「『"]?好[」』"]?|要的話回|要不要我|是否要我|要我[^。？?\n]{0,20}(嗎|？|\?)|回一句|等你(說|回)|我們得決定|你決定要不要/
+const FULL_REQUEST = /全文|完整|詳細|原文|逐字/
 const WORKER_DENY = /^mcp__telegram__(reply|react|edit_message)$/
 
 function log(line) {
@@ -279,6 +282,10 @@ function pre(payload) {
 
   if (tool === 'mcp__telegram__reply' && ASK_PERMISSION.test(String(input.text || ''))) {
     deny('reply 含請示句型', 'Mythos 一律直接做，不問使用者要不要做：把建議項派背景 dispatcher 執行，reply 改成「已派 dispatcher：<要做的事>」。真的缺使用者才知道的資訊，就直接問那個資訊，不用「回好」句型。')
+  }
+  if (tool === 'mcp__telegram__reply' && !FULL_REQUEST.test(lastUserText(tp) || '')) {
+    const errs = adhdLint(String(input.text || ''))
+    if (errs.length) deny('reply 不符 ADHD', `回覆要套 ADHD 格式：${errs.join('；')}。改寫：第一行結論或要老闆做的事；多件事編號、一項一行；寫具體時間；刪客套句。`)
   }
   if (sendsGrant(tool, input) && !/加輪/.test(lastChannelText(tp))) {
     deny('#加輪 無使用者授權', '#加輪 只能在使用者用 Telegram 回「加輪」之後送出：先 reply 使用者「dispatcher <thread> 卡自做上限：<子代理寫的理由>。回「加輪」放行 +M 次」，等他回覆再續派。')

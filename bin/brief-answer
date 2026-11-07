@@ -15,22 +15,25 @@ import json, os, shutil, signal, subprocess, sys, tempfile, time, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL = os.environ.get("BRIEF_MODEL", "claude-haiku-5-5")
-CLAUDE = os.environ.get("BRIEF_CLAUDE") or os.environ.get("CLAUDE_BIN") or shutil.which("claude")
-FREE_ASK = os.environ.get("BRIEF_FREE_ASK") or os.path.join(HERE, "oc-free-ask")
-FREE_MODELS = os.environ.get("BRIEF_FREE_MODELS") or os.path.join(HERE, "free-models")
-FREE_MAX = int(os.environ.get("BRIEF_FREE_MAX") or 2)
 SCRUB = os.environ.get("BRIEF_SCRUB") or os.environ.get("OC_FREE_ASK_SCRUB") or "http://127.0.0.1:4102/scrub"
 # 測試沙箱（lib-test-guard）：runner 不在沙箱裡就不用，免得測試打到真模型
 SANDBOX = os.environ.get("MYTHOS_TEST_SANDBOX")
 def _in_box(p):
     return not SANDBOX or bool(p and os.path.abspath(p).startswith(os.path.abspath(SANDBOX) + os.sep))
-if not _in_box(CLAUDE):
-    CLAUDE = None
-if not (_in_box(FREE_ASK) and _in_box(FREE_MODELS)):
-    FREE_MAX = 0
+
+def _cfg():
+    claude = os.environ.get("BRIEF_CLAUDE") or os.environ.get("CLAUDE_BIN") or shutil.which("claude")
+    free_ask = os.environ.get("BRIEF_FREE_ASK") or os.path.join(HERE, "oc-free-ask")
+    free_models = os.environ.get("BRIEF_FREE_MODELS") or os.path.join(HERE, "free-models")
+    free_max = int(os.environ.get("BRIEF_FREE_MAX") or 2)
+    if not _in_box(claude): claude = None
+    if not (_in_box(free_ask) and _in_box(free_models)): free_max = 0
+    return claude, free_ask, free_models, free_max
+
+CLAUDE, FREE_ASK, FREE_MODELS, FREE_MAX = _cfg()
 SYSTEM = """你是老闆的秘書，用 Telegram 口頭回報。根據使用者訊息裡的「資料」回答「問題」。
-繁體中文、台灣口語，像人講話：先講答案，再補一兩句老闆會想知道的細節，最多 6 句。
-不寫標題、條列符號、編號、id、指令、檔案路徑、雜湊、程式碼、模型名稱；除非問題問的就是那個名稱或數字。
+繁體中文、台灣口語，格式照 ADHD 五條：第一行結論；兩件以上用編號一項一行，最多 3 項、全文 220 字內；進行中寫具體時間；做完的事寫「已完成」放前面；不寫安撫、預告、客套句。
+不寫 id、指令、檔案路徑、雜湊、程式碼、模型名稱；除非問題問的就是那個名稱或數字。
 資料沒寫的不講，不推測；資料顯示查不到就直說查不到。"""
 NOT_FOUND = "這件事我翻過以前的紀錄，沒找到相關的內容。要的話跟我說換個說法再查。"
 
@@ -67,6 +70,27 @@ def run_to(cmd, data, timeout):
     return out if p.returncode == 0 and out else None
 
 
+def adhd_lint(text):
+    try:
+        r = subprocess.run([os.environ.get("ADHD_LINT_BIN") or os.path.join(HERE, "adhd-lint.mjs")],
+                           input=text, capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            return []
+        return [l for l in r.stderr.strip().split("\n") if l.strip()]
+    except Exception:
+        return []
+
+
+def _ask_and_lint(run):
+    out = run()
+    if not out:
+        return None, None
+    errs = adhd_lint(out)
+    if not errs:
+        return out, None
+    return out, errs
+
+
 def rewrite(q, material):
     deadline = time.time() + int(os.environ.get("BRIEF_TIMEOUT") or 90)
     clean = scrub([q, material[:12000]])
@@ -74,6 +98,8 @@ def rewrite(q, material):
         print("brief-answer: scrub 不通，不送 LLM，推原文", file=sys.stderr)
         return None
     user = f"問題：{clean[0]}\n\n資料：\n{clean[1]}"
+    bad = None
+    bad_errs = None
     if FREE_MAX > 0:
         try:
             ms = subprocess.run([FREE_MODELS], capture_output=True, text=True, timeout=30).stdout.split()
@@ -81,14 +107,36 @@ def rewrite(q, material):
             ms = []
         for m in ms[:FREE_MAX]:
             # 每個免費模型最多分到剩餘時間的一半，留時間給 haiku 墊底
-            out = run_to([FREE_ASK, m], f"{SYSTEM}\n\n{user}", min(45, (deadline - time.time()) / 2))
-            if out:
+            out, errs = _ask_and_lint(lambda m=m: run_to([FREE_ASK, m], f"{SYSTEM}\n\n{user}", min(45, (deadline - time.time()) / 2)))
+            if out and not errs:
                 return out
-    if not CLAUDE:
-        return None
-    return run_to([CLAUDE, "-p", "--setting-sources", "local", "--strict-mcp-config", "--model", MODEL,
-                   "--no-session-persistence", "--tools", "", "--system-prompt", SYSTEM],
-                  user, deadline - time.time())
+            if out and errs:
+                user2 = f"{user}\n\n上次回覆違規，請改寫：{'；'.join(errs)}"
+                out2, errs2 = _ask_and_lint(lambda m=m, user2=user2: run_to([FREE_ASK, m], f"{SYSTEM}\n\n{user2}", min(30, (deadline - time.time()) / 2)))
+                if out2 and not errs2:
+                    return out2
+                bad = out2 or out
+                bad_errs = errs2 or errs
+                # 兩次都不過，若有 haiku 就交給 haiku；沒有就試下一個免費模型
+                if CLAUDE:
+                    break
+    claude_cmd = lambda u: [CLAUDE, "-p", "--setting-sources", "local", "--strict-mcp-config", "--model", MODEL,
+                            "--no-session-persistence", "--tools", "", "--system-prompt", SYSTEM]
+    if CLAUDE:
+        out, errs = _ask_and_lint(lambda: run_to(claude_cmd(user), user, deadline - time.time()))
+        if out and not errs:
+            return out
+        if out and errs:
+            user2 = f"{user}\n\n上次回覆違規，請改寫：{'；'.join(errs)}"
+            out2, errs2 = _ask_and_lint(lambda: run_to(claude_cmd(user2), user2, deadline - time.time()))
+            if out2 and not errs2:
+                return out2
+            bad = out2 or out
+            bad_errs = errs2 or errs
+    if bad is not None:
+        print(f"brief-answer: adhd-lint 仍不過 {'；'.join(bad_errs or [])}", file=sys.stderr)
+        return bad
+    return None
 
 
 def main(argv):
