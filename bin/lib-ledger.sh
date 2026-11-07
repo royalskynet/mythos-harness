@@ -63,3 +63,13 @@ ledger_fields() {
     print
   }'
 }
+
+# 11-07：claude 會在 transcript 尾端追加不帶 timestamp 的中繼列（last-prompt、cost-state），
+# mtime 一直被刷新，真卡死判不出來。從檔尾 400 列找最後一筆帶 timestamp 的 JSON 列轉 epoch；
+# 取不到就 rc=1、不輸出（呼叫端退回 transcript mtime）。watchdog 與 dispatch-watch 都 source 這份。
+last_ts_epoch() { # transcript
+  local draw
+  draw="$(tail -n 400 "$1" 2>/dev/null | jq -r 'select(type=="object" and .timestamp != null) | .timestamp' 2>/dev/null | tail -n 1)" || draw=''
+  [ -n "$draw" ] || return 1
+  "${NODE_BIN:-node}" -e 'const e = Date.parse(process.argv[1]); if (isNaN(e)) process.exit(1); console.log(Math.floor(e / 1000));' "$draw" 2>/dev/null
+}
