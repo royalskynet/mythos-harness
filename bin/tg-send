@@ -7,6 +7,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { adhdLint } from './adhd-lint.mjs'
 import { record, jobIds, envIds } from './lib-request.mjs'
 
 const ROOT = process.env.MYTHOS_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -14,7 +15,48 @@ const STATE_DIR = process.env.TELEGRAM_STATE_DIR || path.join(process.env.HOME, 
 const BASE = process.env.TG_API_BASE || 'https://api.telegram.org'
 const TIMEOUT_MS = Number(process.env.TG_SEND_TIMEOUT_MS) || 15000
 const MAX_CHARS = 3500
+const ADHD_MAX = Number(process.env.ADHD_MAX_CHARS) || 100
 const NOT_SENT = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH'])
+
+function stripCodes(s) {
+  return String(s)
+    .replace(/\bt-[a-z0-9-]+\b/g, '')
+    .replace(/\bwo [^ ）)\n]+/g, '')
+    .replace(/\b[0-9]{10}-[0-9]+-[^ \n]+\b/g, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/^ +| +$/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+function cutFirstLine(line) {
+  if (line.length <= 40) return line
+  const head = line.slice(0, 40)
+  const m = /^(.*[，。；])[^，。；]*$/.exec(head)
+  return (m ? m[1] : head).trim()
+}
+
+function adhdTruncate(raw) {
+  const lines = String(raw).replace(/\r\n?/g, '\n').split('\n').map(l => l.trim()).filter(Boolean)
+  const first = cutFirstLine(lines[0] || '')
+  const numbered = lines.slice(1).filter(l => /^\d+\.\s/.test(l)).slice(0, 3)
+  let out = [first, ...numbered].filter(Boolean).join('\n')
+  const tail = '\n回「詳細」看全文'
+  if ((out + tail).replace(/\s+/g, '').length > ADHD_MAX) {
+    let budget = ADHD_MAX - tail.replace(/\s+/g, '').length - first.replace(/\s+/g, '').length
+    const kept = []
+    for (const n of numbered) {
+      const c = n.replace(/\s+/g, '').length
+      if (budget - c < 0) break
+      budget -= c
+      kept.push(n)
+    }
+    out = [first, ...kept].filter(Boolean).join('\n')
+  }
+  out = (out + tail).trim()
+  if (out.replace(/\s+/g, '').length > ADHD_MAX) out = (first + tail).trim()
+  return out
+}
 
 const die = (code, msg) => {
   process.stderr.write(`tg-send: ${msg}\n`)
@@ -59,7 +101,22 @@ function chatId() {
   }
 }
 
-let text = fs.readFileSync(0, 'utf8')
+let rawText = fs.readFileSync(0, 'utf8')
+let fullMode = rawText.startsWith('#full\n') || rawText.startsWith('#full\r')
+if (fullMode) rawText = rawText.replace(/^#full\r?\n/, '')
+let fullText = stripCodes(rawText)
+let text = fullText
+let fullPath = null
+if (!fullMode && adhdLint(fullText).length) {
+  text = adhdTruncate(fullText)
+  try {
+    fs.mkdirSync(path.join(ROOT, 'state', 'tg-full'), { recursive: true })
+    fullPath = path.join(ROOT, 'state', 'tg-full', `pending-${process.pid}-${Date.now()}.txt`)
+    fs.writeFileSync(fullPath, fullText)
+  } catch {
+    fullPath = null
+  }
+}
 if (text.length > MAX_CHARS) {
   const short = /^bg-([0-9a-f]{8})/.exec(job)?.[1] || job
   const tail = `…（截斷，全文 state/bg/${short}.result）`
@@ -117,6 +174,13 @@ try {
   )
 } catch (e) {
   process.stderr.write(`tg-send: 對照表寫入失敗 ${e?.message || e}\n`)
+}
+if (fullPath) {
+  try {
+    fs.renameSync(fullPath, path.join(ROOT, 'state', 'tg-full', `${mid}.txt`))
+  } catch (e) {
+    process.stderr.write(`tg-send: tg-full 改名失敗 ${e?.message || e}\n`)
+  }
 }
 record(ROOT, 'answer-sent', [...new Set([...jobIds(ROOT, job), ...envIds()])], job)
 process.stdout.write(String(mid) + '\n')

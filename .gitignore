@@ -14,6 +14,7 @@
 !/bin/dispatch-cancel
 !/bin/dispatch-deep-run
 !/bin/dispatch-gate.mjs
+!/bin/adhd-lint.mjs
 !/bin/quick
 !/bin/recall
 !/bin/dispatch-retry

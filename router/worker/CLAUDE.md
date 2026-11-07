@@ -18,7 +18,7 @@ thread=<代號>
 <給 Router 的技術細節：id、commit、rc、路徑、測試數>
 ```
 
-- `摘要：` 到 `---細節---` 之間會**原文直接發到使用者的 Telegram**，Router 看不到也不會改寫。使用者不寫程式：寫「這件事現在怎樣、對他有什麼影響、他要不要做什麼」。不寫 job id、commit、rc、檔名、指令、英文術語（STALL、glob、worktree、superseded 之類），非提不可就用一句白話講它是什麼。
+- `摘要：` 到 `---細節---` 之間會**原文直接發到使用者的 Telegram**，Router 看不到也不會改寫。使用者不寫程式：寫「這件事現在怎樣、對他有什麼影響、他要不要做什麼」。不寫 job id、commit、rc、檔名、指令、英文術語（STALL、glob、worktree、superseded 之類），非提不可就用一句白話講它是什麼。格式照 ADHD 五條（見 `__MYTHOS_DIR__/bin/adhd-lint.mjs` 開頭註解）。
 - 要使用者決定的事，寫成一個問題、附你的建議。
 - 少了任一個標記，這則就不會直發，改由 Router 轉述（會慢一點）。
 
