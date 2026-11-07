@@ -42,7 +42,7 @@ printf 'thread：t-log。\n\n> 幫我把 log 輪替修好\n' > "$P"
 # 1) FAIL → 重派一次，prompt 帶原任務、檔名 -autoretry-，事件 ACK＋direct=retried，不投遞 Router
 row bg-aaaa0001 "$P" t-log; agents aaaa0001 failed
 watch
-grep -q '^dbg t-log .*/state/bg/t-log-autoretry-[0-9]*\.md$' "$CALLS" || fail "1：沒重派：$(cat "$CALLS")"
+grep -q '^dbg t-log .*/state/bg/t-log-autoretry-[0-9]*-aaaa0001\.md$' "$CALLS" || fail "1：沒重派：$(cat "$CALLS")"
 rp="$(sed -n 's/^dbg t-log //p' "$CALLS")"
 grep -q '幫我把 log 輪替修好' "$rp" || fail '1：重派 prompt 沒帶原任務'
 [ "$(ev bg-aaaa0001-FAIL .direct)" = retried ] || fail "1：direct 應 retried：$(ev bg-aaaa0001-FAIL .direct)"

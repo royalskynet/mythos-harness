@@ -17,7 +17,7 @@
 env 覆寫（測試用）：CTX_WARN CTX_LIMIT CTX_WINDOW_MIN CTX_DIRS(:分隔) CTX_ROUTER_DIR CTX_STATE_DIR CTX_LOG
   CTX_DRY=1（不執行 compact／stop）CTX_TSV CTX_CLAUDE_BIN CTX_TMUX_BIN
 """
-import json, os, re, subprocess, sys, time, glob
+import json, os, re, subprocess, sys, time, glob, uuid
 
 HOME = os.path.expanduser("~")
 MYTHOS = os.environ.get("MYTHOS_DIR") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -155,23 +155,94 @@ def add_notice(text):
         f.write(json.dumps({"ts": int(time.time()), "text": text, "shown": False}, ensure_ascii=False) + "\n")
 
 
-def router_idle():
-    try:
-        r = subprocess.run([TMUX, "-L", "mythos", "capture-pane", "-p", "-t", "mythos"],
-                           capture_output=True, text=True, timeout=10)
-    except Exception:
-        return False
-    return r.returncode == 0 and "esc to interrupt" not in "\n".join(r.stdout.splitlines()[-15:])
+COMPACT_LOCK = os.path.join(MYTHOS, "state", "router-compact.lock")
 
 
-def router_compact():
+def pane_input():
+    r = subprocess.run([TMUX, "-L", "mythos", "capture-pane", "-p", "-t", "mythos"],
+                       capture_output=True, text=True, timeout=10)
+    tail = r.stdout.splitlines()[-15:]
+    if r.returncode or any("esc to interrupt" in x for x in tail):
+        return None
+    rows = [x.strip() for x in tail if re.match(r"^\s*[❯>]", x)]
+    return rows[-1] if rows else None
+
+
+def fingerprint(path):
+    st = os.stat(path)
+    return [st.st_mtime_ns, st.st_size]
+
+
+def release_compact(token):
     try:
+        if json.load(open(COMPACT_LOCK)).get("token") == token:
+            os.unlink(COMPACT_LOCK)
+    except (OSError, ValueError):
+        pass
+
+
+def reap_compact():
+    """送鍵後保留 maintenance，等 compact_boundary 與空輸入列；最長 600 秒。"""
+    try:
+        lk = json.load(open(COMPACT_LOCK))
+        if time.time() >= lk["expires"]:
+            release_compact(lk["token"])
+            return
+        if not lk.get("sent") or fingerprint(lk["transcript"]) == lk["before"]:
+            return
+        with open(lk["transcript"], "rb") as f:
+            f.seek(lk["before"][1])
+            done = any(b'"compact_boundary"' in line for line in f)
+        if done and pane_input() in ("", "❯", ">"):
+            release_compact(lk["token"])
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        pass
+
+
+def router_compact(session):
+    token = uuid.uuid4().hex
+    locked = False
+    sent = False
+    try:
+        path = session["path"]
+        before = fingerprint(path)
+        if os.path.getmtime(path) != session["mtime"]:
+            return False
+        initial = pane_input()
+        if initial not in ("", "❯", ">"):
+            return False
+        os.makedirs(os.path.dirname(COMPACT_LOCK), exist_ok=True)
+        lk = {"token": token, "expires": time.time() + 600, "transcript": path, "before": before, "sent": False}
+        # O_EXCL 在 recheck 前保留；proxy 看見存在就只能排隊。
+        fd = os.open(COMPACT_LOCK, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        locked = True
+        with os.fdopen(fd, "w") as f:
+            json.dump(lk, f)
+        checked_input = pane_input()
+        if fingerprint(path) != before or checked_input != initial:
+            return False
         subprocess.run([TMUX, "-L", "mythos", "send-keys", "-t", "mythos", "-l", "/compact"], timeout=10, check=True)
         time.sleep(0.6)
+        after_input = pane_input()
+        if fingerprint(path) != before or after_input not in (initial, "❯ /compact", "> /compact"):
+            # 只清自己仍留在輸入列的指令；不碰別人後來輸入的字。
+            if after_input in ("❯ /compact", "> /compact"):
+                subprocess.run([TMUX, "-L", "mythos", "send-keys", "-t", "mythos", "C-u"], timeout=10)
+            return False
         subprocess.run([TMUX, "-L", "mythos", "send-keys", "-t", "mythos", "Enter"], timeout=10, check=True)
+        sent = True
+        lk["sent"] = True
+        tmp = COMPACT_LOCK + "." + token
+        with open(tmp, "w") as f:
+            json.dump(lk, f)
+        os.replace(tmp, COMPACT_LOCK)
+        reap_compact()
         return True
-    except Exception:
+    except (OSError, ValueError, subprocess.SubprocessError):
         return False
+    finally:
+        if locked and not sent:
+            release_compact(token)
 
 
 def stop_worker(short):
@@ -187,6 +258,7 @@ def k(n):
 
 
 def cmd_scan():
+    reap_compact()
     now = time.time()
     st = load_state()
     bg = pending_bg()
@@ -207,7 +279,7 @@ def cmd_scan():
                 and now - s["mtime"] >= QUIET and now - seen[sid]["actioned"] >= COOLDOWN):
             if DRY:
                 log("DRY router idle compact")
-            elif router_idle() and router_compact():
+            elif router_compact(s):
                 seen[sid]["actioned"] = int(now)
                 log("ACTION router idle /compact sent (tokens=%d)" % tok)
         if level == "ok":
@@ -229,7 +301,7 @@ def cmd_scan():
         if kind == "router":
             if DRY:
                 log("DRY router compact")
-            elif router_idle() and router_compact():
+            elif router_compact(s):
                 seen[sid]["actioned"] = int(now)
                 log("ACTION router /compact sent (tokens=%d)" % tok)
                 add_notice("Router context %s 已自動送 /compact" % k(tok))

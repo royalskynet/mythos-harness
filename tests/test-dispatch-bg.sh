@@ -69,7 +69,7 @@ echo '(1) ok'
 grep -q "ALLOWED_TOOLS='Bash Read Write Edit Glob Grep'" "$ROOT/bin/dispatch-bg" || fail '工具白名單不是 Bash Read Write Edit Glob Grep'
 
 # 3) --thread 續派：--resume 要帶完整 sessionId（短 id 會讓 claude 起一個不跑的 copy，11-04 實測）
-printf '[{"id":"0491f0d0","sessionId":"0491f0d0-1111-2222-3333-444455556666"},{"id":"7a7a7a7a","sessionId":"7a7a7a7a-0000-0000-0000-000000000000"}]\n' > "$FAKE_AGENTS"
+printf '[{"id":"0491f0d0","state":"done","sessionId":"0491f0d0-1111-2222-3333-444455556666"},{"id":"7a7a7a7a","state":"done","sessionId":"7a7a7a7a-0000-0000-0000-000000000000"}]\n' > "$FAKE_AGENTS"
 echo 7a7a7a7a-0000-0000-0000-000000000000 > "$FAKE_ID"
 : > "$CLAUDE_LOG"
 id2="$(bash "$ROOT/bin/dispatch-bg" --thread t-a "$TMP/p.md")"
@@ -84,6 +84,8 @@ grep -q -- '--resume' "$CLAUDE_LOG" && fail "新 thread 竟然帶 --resume：$(c
 bash "$ROOT/bin/dispatch-bg" --thread t-a "$TMP/p.md" >/dev/null
 grep -q -- '--resume 7a7a7a7a-0000-0000-0000-000000000000 ' "$CLAUDE_LOG" || fail "同 thread 沒取最新 session：$(cat "$CLAUDE_LOG")"
 # claude agents 列不到 → 不硬續短 id，改新開並在 stderr 說明
+# agents 查不到、但 ledger 明確已完成，才可新開；未知的 pending 交 mailbox 測試。
+awk -F'\t' 'BEGIN{OFS="\t"} {$5="notified-PASS";print}' "$TSV" > "$TSV.tmp" && mv "$TSV.tmp" "$TSV"
 echo '[]' > "$FAKE_AGENTS"
 : > "$CLAUDE_LOG"
 bash "$ROOT/bin/dispatch-bg" --thread t-a "$TMP/p.md" >/dev/null 2> "$TMP/e3"
@@ -96,6 +98,8 @@ rm -f "$FAKE_NOTE"
 [ "$id3" = bg-5e5e5e5e ] || fail "note 行的原 id 被當成新 id：$id3"
 echo '(3) ok'
 
+# 前幾輪 stub 均代表已完成，下一輪才能啟動（running 則應排信箱）。
+awk -F'\t' 'BEGIN{OFS="\t"} {$5="notified-PASS";print}' "$TSV" > "$TSV.tmp" && mv "$TSV.tmp" "$TSV"
 # 4) --hard（換一個唯一短 id，免撞前面同 thread 的列）
 echo deadbeef-0000-0000-0000-000000000000 > "$FAKE_ID"
 : > "$CLAUDE_LOG"
@@ -127,6 +131,7 @@ echo '(6) ok'
 
 # 7) bin/dispatch hard 預設走 bg-hard：新開 session（同 thread 已有列也不續派到呼叫端自己）、
 #    prompt 第一行要求在 cwd 開 git worktree、不進 C3 repo 佇列（ledger 沒有 deep／queued 列）
+awk -F'\t' 'BEGIN{OFS="\t"} {$5="notified-PASS";print}' "$TSV" > "$TSV.tmp" && mv "$TSV.tmp" "$TSV"
 echo cafe0007-0000-0000-0000-000000000000 > "$FAKE_ID"
 : > "$CLAUDE_LOG"
 mkdir -p "$TMP/repo"
@@ -174,7 +179,7 @@ rc=0; MYTHOS_WORKER_DIR="$TMP/my/worker" MYTHOS_DIR="$TMP/my" bash "$ROOT/router
 [ "$rc" = 2 ] || fail "10：worker 目錄在 Mythos 底下應 exit 2，得 $rc"
 echo '(10) ok'
 
-# 11) F2a：拿鎖失敗 → 停掉已啟動的 worker（只有這一個 worker、ledger 零列）
+# 11) F2a：拿鎖失敗 → 事前拒絕，沒有啟動 worker、ledger 不變
 echo f2a00001-0000-0000-0000-000000000000 > "$FAKE_ID"
 : > "$CLAUDE_LOG"
 cp "$TSV" "$TMP/before11"
@@ -189,8 +194,8 @@ LEDGER_LOCK_TRIES=1 bash "$ROOT/bin/dispatch-bg" t-f2a "$TMP/p.md" >"$TMP/o11" 2
 unlock
 [ "$rc" != 0 ] || fail '11：拿不到鎖卻 exit 0'
 cmp -s "$TSV" "$TMP/before11" || fail '11：拿不到鎖卻寫了 ledger'
-grep -q 'stop f2a00001' "$CLAUDE_LOG" || fail "11：沒停掉已啟動的 worker：$(cat "$CLAUDE_LOG")"
-grep -q '已停止 worker' "$TMP/e11" || fail "11：stderr 沒有已停止 worker：$(cat "$TMP/e11")"
+[ ! -s "$CLAUDE_LOG" ] || fail "11：拿鎖前竟然啟動 worker：$(cat "$CLAUDE_LOG")"
+grep -q '未啟動 worker' "$TMP/e11" || fail "11：stderr 沒有事前拒絕：$(cat "$TMP/e11")"
 echo '(11) ok'
 
 # 12) F2b：append 失敗 → 同樣停掉 worker；ledger 內容不變
@@ -214,6 +219,7 @@ echo f3000013-0000-0000-0000-000000000000 > "$FAKE_ID"
 id13="$(bash "$ROOT/bin/dispatch-bg" --hard --cwd "$REPO_A" t-f3 "$TMP/f3-retry.md")"
 [ "$(field "$id13" 6)" = "$REPO_A" ] || fail "13：bg-hard 第 6 欄不是 --cwd 的 repo：$(grep "$id13" "$TSV")"
 : > "$CLAUDE_LOG"
+printf '[{"sessionId":"f3000013-0000-0000-0000-000000000000","state":"failed"}]\n' > "$FAKE_AGENTS"
 DISPATCH_BG_BIN="$ROOT/bin/dispatch-bg" DISPATCH_HARD_BACKEND=bg DISPATCH_THREAD=- bash "$ROOT/bin/dispatch-retry" "$id13" '追加' \
   2>"$TMP/e13" || { cat "$TMP/e13" >&2; fail '13：dispatch-retry 非零'; }
 grep -qF "git -C '$REPO_A' worktree add" "$CLAUDE_LOG" || fail "13：重派 worktree 沒指向 repoA：$(cat "$CLAUDE_LOG")"

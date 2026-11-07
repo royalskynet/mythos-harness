@@ -90,14 +90,46 @@ WORKER_DIR="${MYTHOS_WORKER_DIR:-$HOME/bots/mythos-worker}"
 [ -d "$WORKER_DIR" ] || { echo "worker 目錄不存在：${WORKER_DIR}（跑 run.sh 會從 router/worker 同步）" >&2; exit 1; }
 mkdir -p "$MYTHOS_DIR/state/bg"
 
-# 11-06 去重：同 thread 已有未收尾（pending）的非 hard bg worker 時，新開改成續派，不再平行多開一個 Sonnet
-# （11-05 實測 t-dsh 1 分鐘內開 3 個、e2e-resume／t-binance-relogin 各 2 個）。DISPATCH_BG_NODEDUP=1 關閉；
-# 復原：cp bin/dispatch-bg.bak-20261106-dedup bin/dispatch-bg
-if [ -z "$thflag" ] && [ -z "$hard" ] && [ "$thread" != - ] && [ -z "${DISPATCH_BG_NODEDUP:-}" ] && [ -f "$MYTHOS_DIR/state/dispatch-jobs.tsv" ]; then
-  if awk -F'\t' -v th="$thread" -v now="$(date +%s)" '($7 == th && $8 == "bg" && $5 == "pending" && now - $4 < 1800) { f = 1 } END { exit !f }' "$MYTHOS_DIR/state/dispatch-jobs.tsv"; then
-    thflag=1
-    echo "去重：thread ${thread} 已有進行中的 worker，改續派" >&2
+# 11-07：保留、信箱與 launcher 交接共用 ledger 鎖；啟動期間也持鎖，另一呼叫不能搶開。
+# worker 不繼承 fd 9。鎖失敗時尚未啟動任何 worker。
+ledger_lock || { echo "拿不到 ledger 鎖，未啟動 worker" >&2; exit 1; }
+reserve="$MYTHOS_DIR/state/bg/.reserve-$thread"
+cleanup_bg() { [ -z "$reserve" ] || rm -f "$reserve"; ledger_unlock; }
+trap cleanup_bg EXIT
+trap 'exit 143' TERM HUP INT
+printf '%s\n' "$$" > "$reserve" || exit 1
+# 自癒／信箱重送都帶穩定 eid；先查相同 prompt 的已登錄列，跨 crash 不再起第二個。
+eid="${DISPATCH_BG_EID:-}"
+case "$eid" in .*|*[!A-Za-z0-9_.-]*) echo "不合法的重派 eid" >&2; exit 2 ;; esac
+if [ -n "$eid" ] && [ -f "$MYTHOS_DIR/state/dispatch-jobs.tsv" ]; then
+  prior="$(awk -F'\t' -v th="$thread" -v p="$prompt" '$7==th && $3==p && ($8=="bg" || $8=="bg-hard") {id=$1} END{print id}' "$MYTHOS_DIR/state/dispatch-jobs.tsv")"
+  if [ -n "$prior" ]; then echo "$prior"; exit 0; fi
+fi
+if [ "$thread" != - ] && [ -f "$MYTHOS_DIR/state/dispatch-jobs.tsv" ]; then
+  active="$(awk -F'\t' -v th="$thread" '$7==th && ($8=="bg" || $8=="bg-hard") {id=$1; st=$5} END{if(st=="pending") print id}' "$MYTHOS_DIR/state/dispatch-jobs.tsv")"
+  if [ -n "$active" ] && ! jq -e --arg id "$active" 'select(.job_id==$id and (.status=="PASS" or .status=="FAIL" or .status=="TIMEOUT"))' "$MYTHOS_DIR/state/events.jsonl" >/dev/null 2>&1; then
+    # ledger 尚未收尾時，以 agents 確認終態；查不到一律先排隊，避免未知狀態又開一個。
+    if command -v timeout >/dev/null 2>&1; then CHECK_TO=(timeout -k 5 20)
+    elif command -v gtimeout >/dev/null 2>&1; then CHECK_TO=(gtimeout -k 5 20)
+    else CHECK_TO=()
+    fi
+    ast="$(${CHECK_TO[@]+"${CHECK_TO[@]}"} "$CLAUDE" agents --json --all </dev/null 9>&- 2>/dev/null | jq -r --arg s "${active#bg-}" '[.[]? | select((.sessionId // .id // "") | startswith($s)) | .state][0] // "unknown"' 2>/dev/null)"
+    case "$ast" in done|completed|exited|stopped|failed|error|killed) ;;
+      *)
+        mb="$MYTHOS_DIR/state/mailbox/$thread"
+        mkdir -p "$mb" || exit 1
+        if [ -n "$eid" ] && [ -f "$mb/$eid.md" ]; then echo "$active"; exit 0; fi
+        tmp="$(mktemp "$mb/.incoming.XXXXXX")" || exit 1
+        cat "$prompt" > "$tmp" || { rm -f "$tmp"; exit 1; }
+        dest="$mb/${eid:-${tmp##*.}}.md"
+        mv "$tmp" "$dest" || exit 1
+        "${NODE_BIN:-node}" "$ROOT_DIR/bin/lib-request.mjs" log "$MYTHOS_DIR" queued "$prompt" "$active" 9>&- || echo "信箱已存，但 request 紀錄寫入失敗" >&2
+        echo "thread ${thread} 已有 worker，訊息已存信箱" >&2
+        echo "$active"; exit 0 ;;
+    esac
   fi
+  # ledger 還掛 pending 但 worker 已終止：照 11-06 去重改續派；最新一張已收尾就照 Router 的選擇新開（續接會讓 context 越滾越大）。
+  [ -n "$active" ] && [ -z "$hard" ] && thflag=1
 fi
 
 resume=''
@@ -166,6 +198,7 @@ if [ -n "$hard" ]; then
 $body"
 fi
 args+=("$body")
+"${NODE_BIN:-node}" "$ROOT_DIR/bin/lib-request.mjs" log "$MYTHOS_DIR" queued "$prompt" "" 9>&- || echo "request 紀錄寫入失敗（不擋派工）" >&2
 # 9>&-：claude 會活過本行程，不能繼承 ledger 鎖
 out="$(cd "$WORKER_DIR" && "$CLAUDE" "${args[@]}" 2>&1 9>&-)"
 rc=$?
@@ -191,9 +224,10 @@ stop_worker() { # 原因
     echo "${1}；停止 worker 失敗 ${sid}" >&2
   fi
 }
-if ! ledger_lock; then stop_worker "拿不到 ledger 鎖，未登錄：${id}"; exit 1; fi
 if ! printf '%s\n' "$row" >> "$MYTHOS_DIR/state/dispatch-jobs.tsv"; then
-  ledger_unlock; stop_worker "寫 ledger 失敗：${id}"; exit 1
+  stop_worker "寫 ledger 失敗：${id}"; exit 1
 fi
+"${NODE_BIN:-node}" "$ROOT_DIR/bin/lib-request.mjs" log "$MYTHOS_DIR" worker-start "$prompt" "$id" 9>&- || echo "worker 已登錄，但 request 紀錄寫入失敗" >&2
+rm -f "$reserve"; reserve=''
 ledger_unlock
 echo "$id"

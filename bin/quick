@@ -3,7 +3,7 @@
 用法：bin/quick <cwd 絕對路徑> <問題…>   （問題也可從 stdin）
 - 模型＝bin/free-models（dcq 免費 opencode 層，跟每日 probe／go-sync 同步），依序試，失敗換下一個。
   只走免費層（bin/free-models，隨每日 probe 換；11-07 起不墊訂閱）；要付費墊底才設 QUICK_PAID=<模型>（訂閱＝花錢）。
-- opencode plan agent、--dir <cwd>：讀不到 cwd 以外的檔（external_directory 是 ask，run 模式自動拒）。
+- macOS sandbox-exec 事前限制寫入與敏感路徑讀取；無此工具的系統警告降級，保留事後稽核。
 - 機械稽核 JSON 事件：用了 write／edit／patch 或改狀態的 bash → 整個答案作廢（exit 3）。
 - 問題含 PII（錢包／交易雜湊／email／台灣手機／卡號）→ 不出機，exit 4，呼叫端自己查。
 - 答案要求每個結論附上跑的指令與原始輸出；呼叫端挑關鍵一條重跑對照，對不上就當沒查到。
@@ -11,7 +11,7 @@
 用法加 --push（bin/quick --push <cwd> '<問題>'）：答案交 bin/brief-answer 直送，stdout 只回「已直送」。
 exit：0 有答案（stdout）｜2 用法｜3 越界｜4 PII｜5 全部模型失敗｜6 沒裝 opencode（呼叫端改派 dispatcher）
 """
-import json, os, re, shutil, subprocess, sys
+import json, os, re, shutil, subprocess, sys, tempfile
 
 OC = os.environ.get("QUICK_OC") or "opencode"
 TIMEOUT = int(os.environ.get("QUICK_TIMEOUT") or 180)
@@ -64,12 +64,78 @@ def answer(events):
     return "".join((e.get("part") or {}).get("text") or "" for e in events if e.get("type") == "text").strip()
 
 
-def run(model, cwd, q):
+def denied_paths():
+    home = os.path.expanduser("~")
+    return [os.path.realpath(os.path.expanduser(p)) for p in
+            [os.path.join(home, d) for d in (".creds", ".ssh", ".aws", ".gnupg")]
+            + os.environ.get("QUICK_DENY_READ", "").split(":") if p]
+
+
+def sensitive_cwd(cwd):
+    paths = {os.path.abspath(cwd), os.path.realpath(cwd)}
+    return any(c == p or c.startswith(p + os.sep) for c in paths for p in denied_paths()) or any(
+        part.startswith(".env") for c in paths for part in c.split(os.sep))
+
+
+def sandbox_prefix(cwd):
+    """平台原生 Seatbelt；有安裝但套用失敗時不退回無沙箱執行。"""
+    sb = "/usr/bin/sandbox-exec"
+    if not os.path.isfile(sb):
+        print("quick: 警告：沒有 sandbox-exec，降級為事後 JSON 稽核，沒有事前沙箱", file=sys.stderr)
+        return []
+    home = os.path.expanduser("~")
+    writable = [os.path.join(os.environ.get("XDG_DATA_HOME", os.path.join(home, ".local/share")), "opencode"),
+                os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.join(home, ".cache")), "opencode"),
+                os.environ.get("TMPDIR") or "/tmp"]
+    quote = lambda p: json.dumps(os.path.realpath(p), ensure_ascii=False)
+    rules = ['(version 1)', '(allow default)', '(deny file-write*)']
+    rules += ['(allow file-write* (subpath %s))' % quote(writable[-1]),
+              '(deny file-write* (subpath %s))' % quote(cwd)]
+    rules += ['(allow file-write* (subpath %s))' % quote(p) for p in writable[:-1]]
+    rules += ['(allow file-write* (literal "/dev/null"))']
+    rules += ['(deny file-read* (subpath %s))' % quote(p) for p in denied_paths()]
+    # SBPL 的 #"…" 不再解跳脫；用 json.dumps 會變成 \\. 對不到 .env（11-07 沙箱外實測）
+    rules += ['(deny file-read* (regex #"(^|/)\.env[^/]*(/|$)"))']
+    return [sb, "-p", "\n".join(rules)]
+
+
+def request_stage(stage):
+    if re.fullmatch(r"tg:-?\d+:\d+", os.environ.get("MYTHOS_REQUEST_ID", "")):
+        here = os.path.dirname(os.path.abspath(__file__))
+        try:  # 量測寫入失敗不擋主流程
+            subprocess.run([os.environ.get("NODE_BIN", "node"), os.path.join(here, "lib-request.mjs"), "env-log",
+                            os.environ.get("MYTHOS_DIR", os.path.dirname(here)), stage], timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
+def clean_config_env():
+    """沙箱擋憑證目錄後，opencode 讀到引用檔案的金鑰欄位會整個起不來（11-07 實測）。
+    複製一份去掉引用檔案的 provider 與 mcp 的設定，用 XDG_CONFIG_HOME 指過去；免費模型不靠這些金鑰。
+    ponytail: 只處理純 JSON 的 opencode.json（plugin、opencode.jsonc 不帶）；要帶再擴充。"""
+    src = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "opencode", "opencode.json")
     try:
-        p = subprocess.run([OC, "run", "-m", model, "--agent", "plan", "--dir", cwd, "--format", "json", ASK.format(q=q)],
-                           capture_output=True, text=True, timeout=TIMEOUT, stdin=subprocess.DEVNULL)
+        cfg = json.load(open(src))
+    except (OSError, ValueError):
+        return None
+    cfg.pop("mcp", None)
+    cfg["provider"] = {k: v for k, v in (cfg.get("provider") or {}).items() if "{file:" not in json.dumps(v)}
+    home = tempfile.mkdtemp(prefix="quick-cfg-")
+    os.makedirs(os.path.join(home, "opencode"))
+    with open(os.path.join(home, "opencode", "opencode.json"), "w") as f:
+        json.dump(cfg, f)
+    return dict(os.environ, XDG_CONFIG_HOME=home)
+
+
+def run(model, cwd, q, prefix, env=None):
+    try:
+        p = subprocess.run(prefix + [OC, "run", "-m", model, "--agent", "plan", "--dir", cwd, "--format", "json", ASK.format(q=q)],
+                           capture_output=True, text=True, timeout=TIMEOUT, stdin=subprocess.DEVNULL, env=env)
     except subprocess.TimeoutExpired:
         return None, "timeout"
+    if p.returncode != 0:
+        print("quick: runner 失敗：" + p.stderr.strip()[:500], file=sys.stderr)
+        return None, f"rc={p.returncode}"
     ev = []
     for ln in p.stdout.splitlines():
         try:
@@ -105,18 +171,29 @@ def main(argv):
     if not q:
         print("沒有問題內容", file=sys.stderr)
         return 2
+    if sensitive_cwd(cwd):
+        print("quick: cwd 位於敏感路徑，不送外部模型", file=sys.stderr)
+        return 4
     if PII.search(q):
         print("問題含 PII，不送外部模型；呼叫端自己查", file=sys.stderr)
         return 4
     if not shutil.which(OC):
         print(f"quick: 找不到 {OC}（opencode 沒裝），改派 dispatcher", file=sys.stderr)
         return 6
+    if os.environ.get("MYTHOS_TEST_SANDBOX") and not os.path.realpath(shutil.which(OC)).startswith(
+            os.path.realpath(os.environ["MYTHOS_TEST_SANDBOX"]) + os.sep):
+        print("測試模式拒跑真 runner", file=sys.stderr)
+        return 97
+    prefix = sandbox_prefix(cwd)
+    env = clean_config_env() if prefix else None
     ms = models()
     if not ms:
         print("quick: 取不到免費模型清單（bin/free-models 失敗），不送出", file=sys.stderr)
         return 5
+    request_stage("queued")
+    request_stage("worker-start")
     for m in ms:
-        ev, why = run(m, cwd, q)
+        ev, why = run(m, cwd, q, prefix, env)
         if ev is None:
             print(f"quick: {m} {why}，換下一個", file=sys.stderr)
             continue

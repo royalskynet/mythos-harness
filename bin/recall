@@ -97,6 +97,13 @@ def memdir_search(q):
 
 
 def main(argv):
+    if re.fullmatch(r"tg:-?\d+:\d+", os.environ.get("MYTHOS_REQUEST_ID", "")):
+        for stage in ("queued", "worker-start"):
+            try:  # 量測寫入失敗不擋主流程
+                subprocess.run([os.environ.get("NODE_BIN", "node"), os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib-request.mjs"),
+                                "env-log", os.environ.get("MYTHOS_DIR", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), stage], timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                pass
     ok = available()
     if len(argv) == 2 and argv[0] in ("--obs", "--fix") and argv[1].isdigit() and \
             {"--obs": "mem", "--fix": "fix"}[argv[0]] not in ok:

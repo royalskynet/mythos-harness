@@ -21,6 +21,9 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
+import { requestId, record } from './lib-request.mjs'
+import { compactLocked } from './lib-maintenance.mjs'
+import { createHash } from 'node:crypto'
 
 const HOME = os.homedir()
 // launchd 起的行程 PATH 常沒有 Homebrew：先試常見位置，都沒有才靠 PATH
@@ -136,9 +139,19 @@ function startTyping(chat) {
   typing.set(chat, timer)
   void api('sendChatAction', { chat_id: chat, action: 'typing' })
 }
-async function onUserMessage(chat) {
+const busyAcks = new Set()
+async function ackBusy(chat, rid) {
+  if (rid && busyAcks.has(rid)) return
+  if (rid) busyAcks.add(rid)
+  if (busyAcks.size > 4096) busyAcks.delete(busyAcks.values().next().value)
+  if (await send(chat, ACK_BUSY)) record(MYTHOS_ROOT, 'ack', rid ? [rid] : [])
+  else if (rid) busyAcks.delete(rid)
+}
+async function onUserMessage(chat, rid) {
   if (!chat) return
-  if (await isBusy()) void send(chat, ACK_BUSY)
+  if (compactLocked(MYTHOS_ROOT) || await isBusy()) {
+    await ackBusy(chat, rid)
+  }
   startTyping(chat)
 }
 // claude → plugin 的 tools/call：Router 對某 chat 送出 reply 就停那個 chat 的 typing
@@ -322,16 +335,17 @@ function replyTag(params) {
 // 續派失敗 → 退回舊標註，由 Router 判斷。測試模式（TG_COMMANDS_CHILD）沒給 DISPATCH_BG_BIN 時不直送，免得叫到真 claude。
 const DISPATCH_BG_BIN =
   process.env.DISPATCH_BG_BIN || (process.env.TG_COMMANDS_CHILD ? '' : path.join(MYTHOS_ROOT, 'bin/dispatch-bg'))
-function directFollowup(th, job, text) {
+function directFollowup(th, job, text, rid) {
   return new Promise(resolve => {
     if (!DISPATCH_BG_BIN || process.env.DIRECT_FOLLOWUP === '0') return resolve(null)
     let file
     try {
-      file = path.join(MYTHOS_ROOT, 'state/bg', `${th}-followup-${Date.now()}.md`)
+      const key = createHash('sha256').update(rid || text).digest('hex')
+      file = path.join(MYTHOS_ROOT, 'state/bg', `${th}-followup-${key}.md`)
       fs.mkdirSync(path.dirname(file), { recursive: true })
       fs.writeFileSync(
         file,
-        `thread=${th}\n使用者回覆了你上一則結果（${job}），原話在最下面。\n` +
+        (rid ? `request_id=${rid}\n` : '') + `thread=${th}\n使用者回覆了你上一則結果（${job}），原話在最下面。\n` +
           '是同一件事的追問、補充或改方向 → 照做，最後照樣寫 result（摘要＋細節）。\n' +
           '跟這件事無關 → 不做；result 不寫「摘要：」段，只寫「交回 Router：這是新的事」加原話，Router 會另開。\n\n' +
           `原話：\n${text}\n`,
@@ -340,7 +354,7 @@ function directFollowup(th, job, text) {
       log(`followup ${th}: 寫 prompt 失敗 ${e.message}`)
       return resolve(null)
     }
-    execFile(DISPATCH_BG_BIN, ['--thread', th, th, file], { timeout: 60_000, env: { ...process.env, MYTHOS_DIR: MYTHOS_ROOT } }, (err, stdout, stderr) => {
+    execFile(DISPATCH_BG_BIN, ['--thread', th, th, file], { timeout: 60_000, env: { ...process.env, MYTHOS_DIR: MYTHOS_ROOT, DISPATCH_BG_EID: path.basename(file, '.md') } }, (err, stdout, stderr) => {
       const id = /^bg-[0-9a-f]{8}$/m.exec(stdout || '')?.[0]
       if (err || !id) {
         log(`followup ${th}: dispatch-bg 失敗 ${err?.message ?? ''} ${String(stderr || '').slice(0, 300)}`)
@@ -353,15 +367,21 @@ function directFollowup(th, job, text) {
 
 async function handleChannel(msg, line) {
   const orig = msg.params?.content
-  if (intercept(msg.params)) return
+  if (compactLocked(MYTHOS_ROOT)) { queueMaintenance(msg, line); return false }
+  if (intercept(msg.params)) return true
   const hit = replyTag(msg.params)
   // /fix、/wheel 展開會改 content：改過就送改過的（11-04 前送的是原始 line，展開內容被丟掉）；沒改才原樣轉發
-  if (!hit) return process.stdout.write((msg.params?.content === orig ? line : JSON.stringify(msg)) + '\n')
-  const id = await directFollowup(hit.th, hit.job, msg.params.content)
+  if (!hit) {
+    process.stdout.write((msg.params?.content === orig ? line : JSON.stringify(msg)) + '\n')
+    return true
+  }
+  const id = await directFollowup(hit.th, hit.job, msg.params.content, requestId(msg.params))
   log(`reply hit thread=${hit.th} job=${hit.job} → ${id ? `直送 ${id}` : '交 Router 判斷'}`)
   msg.params.content =
     (id ? `[已直送 worker thread=${hit.th} job=${id}] ` : `[回覆 bg thread=${hit.th} job=${hit.job}] `) + msg.params.content
+  if (compactLocked(MYTHOS_ROOT)) { queueMaintenance(msg, JSON.stringify(msg)); return false }
   process.stdout.write(JSON.stringify(msg) + '\n')
+  return true
 }
 
 // 回傳 true＝這則訊息被我吃掉，不要轉發給 claude。
@@ -450,7 +470,10 @@ const child = spawn(argv[0], argv.slice(1), {
 // 逐行轉給 plugin（JSON-RPC 一行一則），順便看 Router 何時 reply 好停 typing
 createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line', line => {
   const chat = replyChat(line)
-  if (chat) stopTyping(chat)
+  if (chat) {
+    stopTyping(chat)
+    try { const m = JSON.parse(line); replyRequests.set(String(m.id), latestRequest.get(chat)) } catch {}
+  }
   child.stdin.write(line + '\n')
 })
 // claude 死掉 → stdin 關 → 收掉子行程再退，否則 server.ts 變孤兒繼續搶 getUpdates。
@@ -482,6 +505,39 @@ child.on('exit', (code, sig) => {
 // 只有 channel 通知排同一條鏈（直送續派要等 dispatch-bg，使用者訊息之間不能插隊）；
 // 工具 RPC 回應等其他行立刻透傳，輸入中／忙碌先回在排隊前就做（11-07 Codex：原本一則續派能把 reply 回應卡 60 秒）
 let chain = Promise.resolve()
+const latestRequest = new Map(), replyRequests = new Map()
+const maintenanceDir = path.join(MYTHOS_ROOT, 'state/router-mailbox')
+function queueMaintenance(msg, line) {
+  fs.mkdirSync(maintenanceDir, { recursive: true })
+  const key = createHash('sha256').update(requestId(msg.params) || line).digest('hex')
+  const file = path.join(maintenanceDir, `${key}.json`)
+  void ackBusy(msg.params?.meta?.chat_id, requestId(msg.params)).catch(e => log(`maintenance ack: ${e.message}`))
+  if (fs.existsSync(file)) return
+  const tmp = `${file}.tmp.${process.pid}`
+  fs.writeFileSync(tmp, JSON.stringify({ msg, line, received: Date.now() }))
+  fs.renameSync(tmp, file)
+  const rid = requestId(msg.params)
+  record(MYTHOS_ROOT, 'queued', rid ? [rid] : [])
+}
+// 磁碟佇列可跨 proxy 重開續接；只排 channel，RPC 不等 maintenance。
+let replaying = false
+setInterval(() => {
+  if (replaying || compactLocked(MYTHOS_ROOT)) return
+  let files
+  try { files = fs.readdirSync(maintenanceDir).filter(f => f.endsWith('.json')).map(f => {
+    const file = path.join(maintenanceDir, f)
+    return { file, ...JSON.parse(fs.readFileSync(file, 'utf8')) }
+  }).sort((a, b) => a.received - b.received) } catch { return }
+  if (!files.length) return
+  replaying = true
+  chain = chain.then(async () => {
+    for (const item of files) {
+      if (compactLocked(MYTHOS_ROOT)) break
+      if (await handleChannel(item.msg, item.line) === false) break
+      fs.unlinkSync(item.file)
+    }
+  }).catch(e => log(`maintenance replay: ${e.message}`)).finally(() => { replaying = false })
+}, 250).unref()
 createInterface({ input: child.stdout }).on('line', line => {
   let msg
   try {
@@ -489,9 +545,21 @@ createInterface({ input: child.stdout }).on('line', line => {
   } catch {
     return process.stdout.write(line + '\n') // 非 JSON（bun 的雜訊）照原樣轉發
   }
-  if (msg?.method !== 'notifications/claude/channel') return process.stdout.write(line + '\n')
+  if (msg?.method !== 'notifications/claude/channel') {
+    const rid = replyRequests.get(String(msg?.id))
+    if (rid && !msg.error && !msg.result?.isError) {
+      record(MYTHOS_ROOT, 'ack', [rid])
+      record(MYTHOS_ROOT, 'answer-sent', [rid], '', 'router')
+    }
+    replyRequests.delete(String(msg?.id))
+    return process.stdout.write(line + '\n')
+  }
+  const rid = requestId(msg.params)
+  record(MYTHOS_ROOT, 'received', rid ? [rid] : [])
+  if (rid) latestRequest.set(String(msg.params.meta.chat_id), rid)
   const c = msg.params?.content
-  if (!(typeof c === 'string' && c.trim().startsWith('/'))) onUserMessage(msg.params?.meta?.chat_id).catch(e => log(`ack: ${e.message}`))
+  if (!(typeof c === 'string' && c.trim().startsWith('/'))) onUserMessage(msg.params?.meta?.chat_id, rid).catch(e => log(`ack: ${e.message}`))
+  if (compactLocked(MYTHOS_ROOT)) return queueMaintenance(msg, line)
   chain = chain.then(() => handleChannel(msg, line)).catch(e => log(`line handler: ${e.message}`))
 })
 

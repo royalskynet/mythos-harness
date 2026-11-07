@@ -18,7 +18,11 @@ export function items(lines) {
       const c = e.message?.content
       const raw = typeof c === 'string' ? c : Array.isArray(c) ? c.filter(x => x?.type === 'text').map(x => x.text).join('') : ''
       const text = raw.replace(/<channel\b[^>]*>\n?/g, '').replace(/\n?<\/channel>/g, '').trim()
-      if (text) out.push({ who: 'user', text })
+      if (text) {
+        const tag = /<channel\b[^>]*>/.exec(raw)?.[0] || ''
+        const chat = /\bchat_id="(-?\d+)"/.exec(tag)?.[1], mid = /\bmessage_id="(\d+)"/.exec(tag)?.[1]
+        out.push({ who: 'user', text, ...(chat && mid ? { request_id: `tg:${chat}:${mid}` } : {}) })
+      }
     } else if (e?.type === 'assistant') {
       for (const c of e.message?.content ?? []) {
         if (c?.type === 'tool_use' && c.name === 'mcp__telegram__reply' && c.input?.text) out.push({ who: 'router', text: String(c.input.text).trim() })
@@ -45,6 +49,7 @@ export function build(list, thread, note = '') {
   const clip = s => (s.length > CLIP ? s.slice(0, CLIP) + '…' : s)
   const ctx = list.slice(Math.max(0, k - CONTEXT_N), k).map(x => `${x.who === 'user' ? '老闆' : 'Router'}：${clip(x.text)}`)
   return [
+    ...list.slice(k).filter(x => x.request_id).map(x => `request_id=${x.request_id}`),
     `thread：${thread}。老闆經 Telegram 交辦，原話如下（照原話做，判難度自己做或派工）：`,
     '', ...ask.map(t => `> ${t.replace(/\n/g, '\n> ')}`), '',
     ...(note ? [`Router 補充：${note}`, ''] : []),

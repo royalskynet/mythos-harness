@@ -7,6 +7,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { record, jobIds, envIds } from './lib-request.mjs'
 
 const ROOT = process.env.MYTHOS_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR || path.join(process.env.HOME, '.mythos/telegram')
@@ -117,4 +118,5 @@ try {
 } catch (e) {
   process.stderr.write(`tg-send: 對照表寫入失敗 ${e?.message || e}\n`)
 }
+record(ROOT, 'answer-sent', [...new Set([...jobIds(ROOT, job), ...envIds()])], job)
 process.stdout.write(String(mid) + '\n')
