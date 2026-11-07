@@ -38,7 +38,10 @@ run mid;         grep -q 'order=default tier=mid' "$TMP/dcq.log" || fail "mid �
 DISPATCH_MID_ORDER=free run mid; grep -q 'order=free tier=mid' "$TMP/dcq.log" || fail "不訂閱：DISPATCH_MID_ORDER=free 時 mid 應走 free"
 [ "$(tail -1 "$TMP/m/state/dispatch-jobs.tsv" | cut -f6)" = "$TMP" ] || fail "O 列要記 cwd（第 6 欄），dispatch-retry 才重派得了"
 [ -s "$TMP/deep.log" ] && fail "mid 不該叫 deep"
-run hard;        [ -s "$TMP/deep.log" ] || fail "hard 應走 deep"
+# 11-07：派 dcq 的單帶 billing-quiet 標記（dc 只落帳不發付費告警），重派不重複加
+[ "$(grep -cx '<!-- dc:billing-quiet -->' "$TMP/task.md")" = 1 ] || fail "dcq 工單應帶剛好一行 billing-quiet 標記：$(cat "$TMP/task.md")"
+[ "$(head -1 "$TMP/task.md")" = '# t' ] || fail "標記不可佔第一行（then-run 標記在第一行）"
+run hard;      [ -s "$TMP/deep.log" ] || fail "hard 應走 deep"
 [ -s "$TMP/dcq.log" ] && fail "hard 不該進 dcq"
 run mid urgent;  grep -q 'order=default tier=mid' "$TMP/dcq.log" || fail "舊第四參數 urgent 應被忽略"
 run hard later;  [ -s "$TMP/deep.log" ] || fail "舊第四參數 later 應被忽略"

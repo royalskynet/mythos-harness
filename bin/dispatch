@@ -127,6 +127,8 @@ if [ -n "${MYTHOS_TEST_SANDBOX:-}" ]; then
   case "$DCQ" in "$MYTHOS_TEST_SANDBOX"/*) ;; *) echo "測試模式拒跑真 runner" >&2; exit 97 ;; esac
 fi
 # dcq 的 id 由 dcq add 回傳：持鎖期間呼叫 dcq add 並寫列（dcq add 是秒級）
+# 11-07 使用者：Mythos 派的單是付費告警例外。dc 看到這行只落帳不發 TG；寫在檔尾，第一行留給 then-run 標記
+grep -qx '<!-- dc:billing-quiet -->' "$task" || printf '\n<!-- dc:billing-quiet -->\n' >> "$task"
 ledger_lock || nolock
 id="$("$DCQ" add "$task" "$cwd" "$tier" 9>&-)" || {
   rc=$?
