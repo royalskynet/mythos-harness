@@ -1,0 +1,63 @@
+#!/bin/sh
+# 等 Mythos 閒下來才重開 claude 行程（零 token）。用途：plugin update 後要重開才生效，但不能砍掉跑到一半的背景 agent。
+# 閒置＝pane 沒有「esc to interrupt」、最新 transcript 與它的 subagents/*.jsonl 都 ≥ IDLE_MIN 分鐘沒動，連續兩次檢查都成立。
+# 不看狀態列「← N agents」：它在沒有背景 agent 時也常駐（10-20 掛著 2 agents 12h 都判忙，fix 見 fixindex）。
+# 重開＝tmux kill-session（同 tg-commands /restart；launchd ai.mythos.telegram KeepAlive 拉回 run.sh）。
+# 重開後等新行程起來，刪掉 CLEANUP_LINK（plugin update 留的舊版 cache symlink，fix 11101）。逾時 MAX_H 小時就放棄、不重開。
+# 用法：nohup bin/restart-when-idle >> logs/restart-when-idle.log 2>&1 &
+TMUX=${TMUX_BIN:-/opt/homebrew/bin/tmux}
+PROJ=${PROJ:-$HOME/.claude/projects/-Users-51mini-bots-mythos}
+IDLE_MIN=${IDLE_MIN:-3}
+MAX_H=${MAX_H:-12}
+CLEANUP_LINK=${CLEANUP_LINK:-$HOME/.claude/plugins/cache/genie-harness/genie-harness/0.4.4}
+log() { echo "$(date '+%F %T') $*"; }
+notify() {
+  # 固定事件 key；正常重開與觀察事件只留 debug，不入 digest／任何 bot。
+  debug="${MYTHOS_DEBUG_LOG:-$HOME/bots/mythos/logs/restart-debug.log}"
+  mkdir -p "$(dirname "$debug")"
+  printf '%s [mythos-restart] %s\n' "$(date '+%F %T')" "$1" >> "$debug"
+}
+
+idle() {
+  pane=$($TMUX -L mythos capture-pane -p -t mythos 2>/dev/null) || return 1
+  echo "$pane" | grep -q 'esc to interrupt' && return 1
+  T=$(ls -t "$PROJ"/*.jsonl 2>/dev/null | head -1)
+  [ -n "$T" ] || return 1
+  # 背景 agent 跑著就會寫自己的 transcript；ponytail: 單一工具呼叫靜默超過 IDLE_MIN 會被誤判閒置，要更準改讀 claude 的 task 狀態
+  for f in "$T" "${T%.jsonl}"/subagents/*.jsonl; do
+    [ -f "$f" ] || continue
+    [ $(( ($(date +%s) - $(stat -f %m "$f")) / 60 )) -ge "$IDLE_MIN" ] || return 1
+  done
+}
+[ -n "$RWI_LIB" ] && return 0 2>/dev/null
+
+deadline=$(( $(date +%s) + MAX_H * 3600 ))
+log "start: waiting for idle (IDLE_MIN=$IDLE_MIN MAX_H=$MAX_H)"
+while :; do
+  if [ "$(date +%s)" -ge "$deadline" ]; then
+    log "timeout ${MAX_H}h, not restarted"; notify "Mythos 等 ${MAX_H}h 仍不閒，未重開（logs/restart-when-idle.log）"; exit 1
+  fi
+  if idle; then
+    sleep 60
+    idle && break
+  fi
+  sleep 60
+done
+
+old=$($TMUX -L mythos list-panes -t mythos -F '#{pane_pid}' 2>/dev/null)
+log "idle, kill-session (old pane pid $old)"
+$TMUX -L mythos kill-session -t mythos
+i=0
+while [ $i -lt 30 ]; do
+  sleep 5; i=$((i + 1))
+  new=$($TMUX -L mythos list-panes -t mythos -F '#{pane_pid}' 2>/dev/null)
+  [ -n "$new" ] && [ "$new" != "$old" ] && break
+done
+if [ -z "$new" ] || [ "$new" = "$old" ]; then
+  log "FAIL: no new mythos session after 150s"; notify "Mythos 重開失敗：150 秒內沒拉回（logs/restart-when-idle.log）"; exit 1
+fi
+log "restarted, new pane pid $new"
+sleep 30
+if [ -L "$CLEANUP_LINK" ]; then rm "$CLEANUP_LINK" && log "removed symlink $CLEANUP_LINK"; fi
+notify "Mythos 已閒置重開（pid ${new}），plugin 更新生效"
+log "done"
