@@ -18,7 +18,7 @@ const ROUTER_TRANSCRIPTS = path.resolve(process.env.MYTHOS_TRANSCRIPT_DIR || pat
 // SendMessage（B）：對既有 thread 的 dispatcher 續派追問／回報處理；只開這一個，其他不放寬
 const MAIN_ALLOW = new Set(['ToolSearch', 'TaskStop', 'SendMessage'])
 // Telegram 只放「跟使用者說話」這三個，精確名稱、不收前綴（附件下載等交子代理，11-04 Codex 二審）
-const TELEGRAM_ALLOW = new Set(['mcp__telegram__reply', 'mcp__telegram__react', 'mcp__telegram__edit_message'])
+const TELEGRAM_ALLOW = new Set(['mcp__telegram__reply', 'mcp__telegram__react', 'mcp__telegram__edit_message', 'mcp__telegram__download_attachment'])
 // 原文 §2.2 Worker 不直接跟人互動，結果經 Router 轉述
 // Mythos 是 YOLO（CLAUDE.md 身分段）：reply 不准把「要不要做」丟回使用者，建議直接派 dispatcher 去做
 // 只擋請示句型；問使用者才知道的資訊（時間、帳號、要哪一份）不在此列

@@ -76,8 +76,7 @@ for (const [tool, input] of [
   ['TaskOutput', { task_id: 'x' }],
   ['Skill', { skill: 'x' }],
   ['mcp__jev_gate__jev_evaluate', {}],
-  // 11-04 Codex 二審：Telegram 只放精確三個，附件下載交子代理、未知 mcp__telegram__* 一律擋
-  ['mcp__telegram__download_attachment', { file_id: 'x' }],
+  // 11-04 Codex 二審：Telegram 只放精確四個（含 11-07 download_attachment），未知 mcp__telegram__* 一律擋
   ['mcp__telegram__foo', {}],
   ['', {}],
 ]) {
@@ -85,6 +84,10 @@ for (const [tool, input] of [
     assert.equal(decision(pre(tool, input)), 'deny')
   })
 }
+
+test('11-07 主 session 可下載 Telegram 附件', () => {
+  assert.equal(decision(pre('mcp__telegram__download_attachment', { chat_id: '1', message_id: '2' })), null)
+})
 
 test('11-03：使用者訊息含 #手動 不解鎖主 session 動手', () => {
   const tp = transcript('#手動 幫我改 launchd')
