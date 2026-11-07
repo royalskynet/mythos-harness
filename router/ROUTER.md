@@ -20,7 +20,7 @@
 - fallback：`bin/dispatch-bg` exit 非 0 才用 Agent 派背景 `dispatcher`（`run_in_background` 不設或 true），prompt 帶使用者原話＋你知道的脈絡。
 - 派 dispatcher 時 prompt 第一行寫 `thread=<代號>`（英數＋連字號，例 `t-wakepy`），並用 Agent 工具回傳的 agent id 記住 thread→agent。
 - `bin/dispatch-gate.mjs`（matcher `*`，整份白名單）擋主 session：只放行 Telegram 工具、`ToolSearch`、`TaskStop`、`SendMessage`、背景 `dispatcher`，外加完全符合格式的 `bin/dispatch-bg <代號> state/bg/<檔>.md`／`bin/dispatch-bg --from-chat <代號>`、`bin/quick <絕對路徑> '<問題>'`、`bin/recall '<關鍵字>' --ask '<問題>'`／`--obs|--fix <數字>` 與 `state/bg/` 的 Write（quick／recall／from-chat 由閘用 `updatedInput` 改寫）；其他 Bash、讀寫檔、Web、Skill、TaskOutput 與其他 MCP 全擋，閘出錯也擋。worker（transcript 在 worker 目錄的 slug 下）走 worker 模式：pinGuard 照擋、不准回 Telegram。子代理的工具呼叫帶 `agent_id`，閘放行，但不准直接回 Telegram。
-- dispatcher 判難度（重派、取消用 `bin/dispatch-retry`／`bin/dispatch-cancel`，也是它跑）：easy 自己做；mid 寫工單（`## 驗收` 一條會失敗的指令）→ `bin/dispatch <task.md> <cwd> mid`（`DCQ_ORDER=sub`：訂閱層首棒，花錢換改東西的品質；不訂閱就設 `DISPATCH_MID_ORDER=free`）；hard 寫完整計畫 → `bin/dispatch <task.md> <cwd> hard`（11-07 起預設派 O：`DCQ_ORDER=default`，免費先、全敗升訂閱；`DISPATCH_HARD_BACKEND=bg` 才走付費的 bg-hard（sonnet＋Opus advisor、worktree），`=deep` 走背景 `deep-run`）。
+- dispatcher 判難度（重派、取消用 `bin/dispatch-retry`／`bin/dispatch-cancel`，也是它跑）：easy 自己做；mid 寫工單（`## 驗收` 一條會失敗的指令）→ `bin/dispatch <task.md> <cwd> mid`（`DCQ_ORDER=default`：免費先、全敗升訂閱，11-07 改回免費優先；只用免費設 `DISPATCH_MID_ORDER=free`）；hard 寫完整計畫 → `bin/dispatch <task.md> <cwd> hard`（11-07 起預設派 O：`DCQ_ORDER=default`，免費先、全敗升訂閱；`DISPATCH_HARD_BACKEND=bg` 才走付費的 bg-hard（sonnet＋Opus advisor、worktree），`=deep` 走背景 `deep-run`）。
 
 ## 派完之後
 

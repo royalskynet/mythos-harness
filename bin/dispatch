@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 派工入口：寫好工單後呼叫。路由只看難度，不分急緩（11-02 使用者定）：
 #   easy → dcq 派of（DCQ_ORDER=free，只走免費層，全敗就 FAIL 回報）
-#   mid  → dcq 派os（DCQ_ORDER=sub，不訂閱設 DISPATCH_MID_ORDER=free；Go 訂閱 deepseek-v4.1-flash 首棒；訂閱＝花錢換改東西的品質，11-06 使用者定）
+#   mid  → dcq 派o（DCQ_ORDER=default：免費先、全敗升訂閱，11-07 使用者定改回免費優先；要訂閱首棒設 DISPATCH_MID_ORDER=sub，只用免費設 =free）
 #   hard → dcq 派o（DCQ_ORDER=default：免費先、全敗升訂閱，11-07 使用者定：不派 Claude 付費子代理）；
 #          DISPATCH_HARD_BACKEND=bg 回 bg-hard（claude --bg，sonnet＋Opus advisor）、=deep 回舊的 deep-run
 # 用法：bin/dispatch <task.md 絕對路徑> <cwd 絕對路徑> <easy|mid|hard>
@@ -55,7 +55,7 @@ fi
 case "$tier:$hard_backend" in
   hard:deep) route=deep ;;
   hard:*) route=dcq; export DCQ_ORDER="${DISPATCH_HARD_ORDER:-default}" ;;
-  mid:*) route=dcq; export DCQ_ORDER="${DISPATCH_MID_ORDER:-sub}" ;;
+  mid:*) route=dcq; export DCQ_ORDER="${DISPATCH_MID_ORDER:-default}" ;;
   *) route=dcq; export DCQ_ORDER=free ;;
 esac
 # 規劃單（bin/plan-ticket 產，第一行 then-run 標記）派 dcq 不可進 worktree、不可防空轉
