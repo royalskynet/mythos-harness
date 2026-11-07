@@ -365,7 +365,31 @@ function directFollowup(th, job, text, rid) {
   })
 }
 
+const attachmentPromises = new Map()
 async function handleChannel(msg, line) {
+  // 附件自動下載（借鏡 plugin）：channel 通知帶 attachment_file_id 時 proxy 自己向 plugin server 呼叫 download_attachment，把路徑寫進訊息
+  const _meta = msg?.params?.meta
+  const _fid = _meta?.attachment_file_id
+  const _content = msg?.params?.content
+  if (_fid && typeof _content === 'string' && !_content.includes('[附件已存 ')) {
+    const _key = `${_meta?.chat_id}:${_meta?.message_id}`
+    if (!attachmentPromises.has(_key)) {
+      const _size = _meta?.attachment_size
+      const _p = (Number(_size) > 20971520)
+        ? Promise.resolve({ error: '檔案超過 20MB 上限' })
+        : downloadAttachment(_fid)
+      attachmentPromises.set(_key, _p)
+    }
+    const _res = await attachmentPromises.get(_key)
+    if (_res?.path) {
+      msg.params.content = _content + `\n[附件已存 ${_res.path}]`
+      if (msg.params.meta) msg.params.meta.attachment_path = _res.path
+      try { fs.chmodSync(_res.path, 0o600) } catch {}
+    } else {
+      msg.params.content = _content + `\n[附件下載失敗：${_res?.error ?? 'unknown'}]`
+    }
+    line = JSON.stringify(msg)
+  }
   const orig = msg.params?.content
   if (compactLocked(MYTHOS_ROOT)) { queueMaintenance(msg, line); return false }
   if (intercept(msg.params)) return true
@@ -457,6 +481,18 @@ const MENU = [
   { command: 'status', description: 'Check your pairing status' },
 ]
 
+// 啟動時把 inbox 目錄與檔案權限鎖緊（失敗只記 log）
+try {
+  const inboxDir = path.join(HOME, '.mythos', 'telegram', 'inbox')
+  fs.mkdirSync(inboxDir, { recursive: true, mode: 0o700 })
+  fs.chmodSync(inboxDir, 0o700)
+  for (const f of fs.readdirSync(inboxDir)) {
+    try {
+      const full = path.join(inboxDir, f)
+      if (fs.statSync(full).isFile()) fs.chmodSync(full, 0o600)
+    } catch {}
+  }
+} catch (e) { log(`inbox chmod: ${e.message}`) }
 // TG_COMMANDS_CHILD 只給測試用：換掉子行程，就能在不碰真 bot 輪詢的情況下灌假通知。
 const argv = process.env.TG_COMMANDS_CHILD
   ? process.env.TG_COMMANDS_CHILD.split(' ')
@@ -538,6 +574,25 @@ setInterval(() => {
     }
   }).catch(e => log(`maintenance replay: ${e.message}`)).finally(() => { replaying = false })
 }, 250).unref()
+const dlPending = new Map()
+let dlSeq = 0
+function downloadAttachment(fileId) {
+  const id = `tgproxy-dl-${++dlSeq}`
+  return new Promise(resolve => {
+    const timer = setTimeout(() => {
+      dlPending.delete(id)
+      resolve({ error: 'timeout' })
+    }, Number(process.env.TG_DL_TIMEOUT_MS) || 60000)
+    dlPending.set(id, { resolve, timer })
+    try {
+      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'download_attachment', arguments: { file_id: fileId } } }) + '\n')
+    } catch (e) {
+      clearTimeout(timer)
+      dlPending.delete(id)
+      resolve({ error: e.message })
+    }
+  })
+}
 createInterface({ input: child.stdout }).on('line', line => {
   let msg
   try {
@@ -546,6 +601,33 @@ createInterface({ input: child.stdout }).on('line', line => {
     return process.stdout.write(line + '\n') // 非 JSON（bun 的雜訊）照原樣轉發
   }
   if (msg?.method !== 'notifications/claude/channel') {
+    if (typeof msg?.id === 'string' && msg.id.startsWith('tgproxy-dl-')) {
+      const p = dlPending.get(msg.id)
+      if (p) {
+        clearTimeout(p.timer)
+        dlPending.delete(msg.id)
+        const isError = !!(msg?.error || msg?.result?.isError)
+        let found = null
+        const contents = msg?.result?.content
+        if (Array.isArray(contents)) {
+          outer: for (const c of contents) {
+            if (c && typeof c.text === 'string') {
+              for (const ln of c.text.split('\n')) {
+                const t = ln.trim()
+                if (t.startsWith('/')) { found = t; break outer }
+              }
+            }
+          }
+        }
+        if (isError || !found) {
+          const reason = msg?.error?.message || (Array.isArray(contents) ? contents.map(c => c?.text).filter(Boolean).join(' ') : '') || 'download failed'
+          p.resolve({ error: String(reason).trim() || 'download failed' })
+        } else {
+          p.resolve({ path: found })
+        }
+      }
+      return
+    }
     const rid = replyRequests.get(String(msg?.id))
     if (rid && !msg.error && !msg.result?.isError) {
       record(MYTHOS_ROOT, 'ack', [rid])
