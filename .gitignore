@@ -36,6 +36,7 @@
 !/bin/brief-answer
 !/bin/chat-prompt.mjs
 !/bin/tg-progress.mjs
+!/bin/opus-plan
 !/bin/ctx-guard
 /tests/*
 !/tests/test-tg-send.sh
@@ -56,6 +57,7 @@
 !/tests/test-watch-knobs.sh
 !/tests/test-dispatch-gate-handson.sh
 !/tests/mk-path.sh
+!/tests/test-opus-plan.sh
 !/tests/test-knob-timing.sh
 !/tests/test-latency-report.sh
 !/tests/test-repo-queue.sh

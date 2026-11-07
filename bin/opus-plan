@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# 大腦：只讀 brief，用 Claude 訂閱 CLI 的 Opus 寫一張可執行工單（不接 API key）。
+# 用法：bin/opus-plan <brief.md> <out.md>；exit 2 用法／brief 過長，exit 1 claude 失敗或 out 缺 `## 驗收`。
+set -u
+brief="${1:-}" out="${2:-}"
+[ -f "$brief" ] && [ -n "$out" ] && [ $# -eq 2 ] || { echo "用法：bin/opus-plan <brief.md> <out.md>" >&2; exit 2; }
+[ "$(wc -l < "$brief")" -le 60 ] || { echo "brief 超過 60 行，先精簡：$brief" >&2; exit 2; }
+CLAUDE="${OPUS_PLAN_CLAUDE_BIN:-$(command -v claude || true)}"
+[ -n "$CLAUDE" ] && [ -x "$CLAUDE" ] || { echo "找不到 claude（設 OPUS_PLAN_CLAUDE_BIN）" >&2; exit 1; }
+
+prompt="你是規劃者：只讀下面這份說明，寫一張可執行工單，寫到 ${out#"$PWD"/}，不要在 stdout 輸出其他東西。
+工單格式（依序）：第一行 \`# <標題>\`、第二行 \`工作目錄：<絕對路徑>\`、\`## 背景\`、\`## 步驟\`（編號）、\`## 驗收\`（一個 bash 區塊：開工前失敗、完工後會過的斷言，不可只有 echo／true、不可 \`|| true\`），區塊外一行 \`預期：\` 說明過了代表什麼。
+
+說明：
+$(cat "$brief")"
+"$CLAUDE" -p --model opus "$prompt" </dev/null || { echo "claude 失敗（exit $?）" >&2; exit 1; }
+[ -f "$out" ] || { echo "claude 沒寫出 $out" >&2; exit 1; }
+grep -q '^## 驗收' "$out" || { echo "$out 缺 '## 驗收'" >&2; exit 1; }
