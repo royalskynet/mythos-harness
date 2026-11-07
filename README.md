@@ -8,6 +8,41 @@
 A Claude Code implementation of the two-layer (Router / Worker) super-agent pattern:
 chat with Sonnet; every request goes to a background haiku worker that triages and delegates real work to free models first.
 
+> 2026-11-08 起 Telegram 前台改跑 Hermes，見下節〈現行架構〉；再往下是 Claude Code TUI 版，`bin/cutover-hermes` 可切回。
+> Since 2026-11-08 the Telegram front end runs on Hermes (see *Current architecture* below). Everything after it describes the Claude Code TUI version, which `bin/cutover-hermes` can roll back to.
+
+## 現行架構：Hermes / Current architecture (2026-11-08)
+
+**一個 Mythos。** 你在 Telegram 對話的這一段，和替你動手做事的每個 session，都是同一個 Mythos。給你看的話不提派工、工單、代號、別人：Mythos 自己去做，做完自己告訴你。`bin/adhd-lint.mjs` 會擋這類斷裂用語，出口把含這些詞的句子刪掉。
+
+```
+你 ──Telegram──▶ Hermes gateway（profile mythos，beam-free；/model 可換 deepseek-v4.1-flash）
+                   │  這段對話只有三個工具：mythos_dispatch、mythos_recall、mythos_full_text
+                   │  （platform_toolsets 只給 mythos、不掛 MCP、關 tool_search；router-guard 的 pre_tool_call 白名單再擋一次）
+                   ├─ 問以前的事 ─▶ mythos_recall（一輪最多一次，查不到才動手）
+                   └─ 要做事 ─▶ mythos_dispatch ─▶ bin/dispatch-bg（DISPATCH_BG_WORKER=hermes，Laya 先判難度）
+                                     └─▶ hermes -p mythos-worker -z（detached；claude-mem 只掛在這裡）
+                                           結束：stdout／stderr／結束碼分檔，rc≠0 或空輸出判 FAIL
+                                           結束當下觸發 bin/dispatch-watch（launchd 每 120 秒補漏）
+                                           └─▶ 收件匣 ─▶ 外掛每秒注入同一段對話，Mythos 用自己的口吻講結果
+```
+
+- **追問、取消、改方向**：`mythos_dispatch` 的 `mode` 有 queue（預設，補充排隊）、cancel（停掉整個行程樹，結果不再送回）、interrupt（停掉後帶原需求＋新指示重做）。
+- **送達確認**：注入後查對話紀錄確認真的落地；逾時沒落地就直接發 Telegram。
+- **多 profile 共用 gateway**：外掛由自己所在的目錄推 profile 的 `state.db`，不看 `HERMES_HOME`（gateway 行程裡它指向主機 profile）。
+- profile 端的 SOUL 與外掛（mythos-tools、router-guard、adhd-outlet）放在 Hermes profile 目錄，不在本 repo。
+- **已知問題**：Telegram 回合裡還沒觀察到出口外掛被呼叫（oneshot 正常），追查中；一次實測 worker 第一次模型回應等了 150 秒（單獨跑同題 13 秒），原因未明。
+
+**One Mythos.** The Telegram conversation and every session that does work for you are the same Mythos. User-facing text never mentions dispatching, tickets, ids or anyone else; `bin/adhd-lint.mjs` rejects such wording and the outlet drops those sentences.
+
+- The conversation gets exactly three tools: `mythos_dispatch`, `mythos_recall` (at most once per turn) and `mythos_full_text`. `platform_toolsets` exposes only the mythos toolset with no MCP, `tool_search` is off, and router-guard's `pre_tool_call` allowlist blocks anything else.
+- `mythos_dispatch` → `bin/dispatch-bg` with `DISPATCH_BG_WORKER=hermes` (Laya pre-classifies difficulty) → detached `hermes -p mythos-worker -z`. claude-mem is attached to the worker profile only. stdout, stderr and the exit code are stored separately; a non-zero exit or empty output is a FAIL. The worker triggers `bin/dispatch-watch` as soon as it exits (launchd every 120 s is the backstop), and the result goes through an inbox the plugin injects into the same conversation every second.
+- `mode`: queue (default), cancel (kills the whole process tree; the result is never delivered), interrupt (kills it and redoes the original request plus the new instruction).
+- Delivery is confirmed against the conversation log; if the injected message never lands it is sent to Telegram directly.
+- Plugins locate `state.db` from their own directory, not `HERMES_HOME`, because the shared multi-profile gateway process points that at the host profile.
+- The profile's SOUL and plugins live in the Hermes profile directory, not in this repo.
+- **Known issues:** the outlet plugin has not yet been observed running on Telegram turns (it works in one-shot runs); under investigation. In one live run the worker's first model response took 150 s versus 13 s when run alone; cause unknown.
+
 ```
 你 ──Telegram──▶ Router：Sonnet（只聊天、派工、轉述）
                     │  PreToolUse 派工閘：主 session 只能 Telegram／ToolSearch／TaskStop／背景 dispatcher＋一條 bin/dispatch-bg
