@@ -41,6 +41,7 @@
 !/bin/hard-head
 !/bin/cutover-hermes
 !/bin/rollback-mythos
+!/bin/smoke-router-model
 !/bin/ctx-guard
 /tests/*
 !/tests/test-tg-send.sh
@@ -67,6 +68,8 @@
 !/tests/test-dispatch-hard-head.sh
 !/tests/test-cutover-dryrun.sh
 !/tests/test-cutover-real-sandbox.sh
+!/tests/test-smoke-router-model.sh
+!/tests/test-dispatch-watch-inbox.sh
 !/tests/test-claude-mem-hermes-limits.sh
 !/tests/test-knob-timing.sh
 !/tests/test-latency-report.sh

@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# 切換後冒煙：Router 換成任一模型（Telegram /model）都能派工，且能用同一口吻轉述背景結果。
+# 用法：bin/smoke-router-model <model> [provider]   provider 預設 opencode-go
+# 每個 model 只打兩次，不重試。PASS/FAIL 各印一行；任一 FAIL exit 1。不印憑證、不印 dotenv。
+# 判準函式可單獨載入：SMOKE_LIB_ONLY=1 source bin/smoke-router-model
+set -u
+HERMES_BIN="${HERMES_BIN:-~/.local/bin/hermes}"
+MYTHOS_STATE_DB="${MYTHOS_STATE_DB:-~/.hermes/profiles/mythos/state.db}"
+LINT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/adhd-lint.mjs"
+
+# check_dispatch <db> <t0> <model>：找 t0 之後最新 oneshot session，model 相符且跑過 mythos_dispatch。0=PASS
+check_dispatch() {
+  local db="$1" t0="$2" model="$3" row sid
+  [ -r "$db" ] || { echo "找不到 $db" >&2; return 1; }
+  row="$(sqlite3 -readonly "$db" "SELECT id || '|' || COALESCE(model,'') FROM sessions WHERE source='oneshot' AND started_at >= $t0 ORDER BY started_at DESC LIMIT 1" 2>&1)" || { echo "$row" >&2; return 1; }
+  [ -n "$row" ] || { echo "找不到本次 session" >&2; return 1; }
+  sid="${row%%|*}"
+  [ "${row#*|}" = "$model" ] || { echo "model=${row#*|}，要 $model" >&2; return 1; }
+  local n
+  n="$(sqlite3 -readonly "$db" "SELECT count(*) FROM messages WHERE session_id='$sid' AND role='tool' AND tool_name='mythos_dispatch'" 2>&1)" || { echo "$n" >&2; return 1; }
+  [ "$n" -gt 0 ] 2>/dev/null || { echo "session $sid 沒有 mythos_dispatch 呼叫" >&2; return 1; }
+}
+
+# check_relay <text>：同一口吻轉述，不得露內部分工詞。0=PASS
+check_relay() {
+  local re='工單|派工|工作者|worker|背景|代號|t-[a-z0-9]'
+  if [ -z "$(printf '%s' "$1" | tr -d '[:space:]')" ]; then echo "回覆為空" >&2; return 1; fi
+  local hit
+  hit="$(printf '%s' "$1" | grep -oE "$re" | head -1)"
+  [ -z "$hit" ] || { echo "出現內部分工詞：$hit" >&2; return 1; }
+}
+
+[ "${SMOKE_LIB_ONLY:-}" = 1 ] && return 0 2>/dev/null
+
+[ $# -ge 1 ] || { echo "用法：$0 <model> [provider]" >&2; exit 2; }
+model="$1"; provider="${2:-opencode-go}"
+command -v sqlite3 >/dev/null || { echo "沒有 sqlite3" >&2; exit 2; }
+[ -x "$HERMES_BIN" ] || { echo "FAIL $model hermes：找不到 $HERMES_BIN" >&2; exit 1; }
+
+# -z：非互動跑一次，stdout 就是最終回覆
+run_h() { export MYTHOS_DISPATCH_DRYRUN=1; perl -e 'alarm 120; exec @ARGV' "$HERMES_BIN" -p mythos -m "$model" --provider "$provider" -z "$1" 2>/dev/null; }
+
+# (a) 派工
+t0=$(date +%s)
+run_h '幫我看一下 M4 磁碟還剩多少空間' >/dev/null
+if err="$(check_dispatch "$MYTHOS_STATE_DB" "$t0" "$model")"; then echo "PASS $model dispatch"
+else echo "FAIL $model dispatch $err"; fail=1; fi
+
+# (b) 轉述：-z 的 stdout 就是最終回覆
+t0=$(date +%s)
+reply="$(run_h '[背景結果]
+磁碟剩 120GB，主要被 Docker 映像佔掉，清掉沒在用的可以多出 40GB。')"
+if err="$(check_relay "$reply")"; then
+  if lint="$(printf '%s\n' "$reply" | node "$LINT" 2>&1)"; then echo "PASS $model relay"
+  else echo "FAIL $model relay 格式：$lint"; fail=1; fi
+else echo "FAIL $model relay $err"; fail=1; fi
+
+[ -z "${fail:-}" ] || exit 1

@@ -907,7 +907,7 @@ deliver() {
       [ -n "$eid" ] || continue
       th="$(jq -r --arg j "$jid" 'select(.job_id==$j) | .thread // "-"' "$EVENTS_FILE" | head -1)"
       case "$th" in ''|null) th=- ;; *[!A-Za-z0-9-]*) th=- ;; esac
-      text="[派工回報] $st $sum"
+      text="$st $sum"  # 外掛會加 [背景結果]；不帶「派工」字樣，免得 Router 照抄
       if [ -n "$extra" ]; then text="${text}；${extra}"; fi
       if [ -n "$guide" ]; then text="${text}；${guide}"; fi
       if printf '%s\n' "$text" | MYTHOS_DIR="$MYTHOS_DIR" "${NODE_BIN:-node}" "$TG_SEND_BIN" --thread "$th" --job "$jid" 9>&- >/dev/null 2>>"$WATCH_LOG"; then
