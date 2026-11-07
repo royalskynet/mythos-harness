@@ -285,7 +285,7 @@ function pre(payload) {
   }
   if (tool === 'mcp__telegram__reply' && !FULL_REQUEST.test(lastUserText(tp) || '')) {
     const errs = adhdLint(String(input.text || ''))
-    if (errs.length) deny('reply 不符 ADHD', `回覆要套 ADHD 格式：${errs.join('；')}。改寫：第一行結論或要老闆做的事；多件事編號、一項一行；寫具體時間；刪客套句。`)
+    if (errs.length) deny('reply 不符 ADHD', `回覆要套 ADHD 格式：${errs.join('；')}。改寫：第一行結論或要 Ether 做的事；多件事編號、一項一行；寫具體時間；刪客套句。`)
   }
   if (sendsGrant(tool, input) && !/加輪/.test(lastChannelText(tp))) {
     deny('#加輪 無使用者授權', '#加輪 只能在使用者用 Telegram 回「加輪」之後送出：先 reply 使用者「dispatcher <thread> 卡自做上限：<子代理寫的理由>。回「加輪」放行 +M 次」，等他回覆再續派。')

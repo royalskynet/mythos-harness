@@ -47,14 +47,14 @@ export function build(list, thread, note = '') {
   const ask = list.slice(k).map(x => x.text)
   if (!ask.length) return null
   const clip = s => (s.length > CLIP ? s.slice(0, CLIP) + '…' : s)
-  const ctx = list.slice(Math.max(0, k - CONTEXT_N), k).map(x => `${x.who === 'user' ? '老闆' : 'Router'}：${clip(x.text)}`)
+  const ctx = list.slice(Math.max(0, k - CONTEXT_N), k).map(x => `${x.who === 'user' ? 'Ether' : 'Mythos'}：${clip(x.text)}`)
   return [
     ...list.slice(k).filter(x => x.request_id).map(x => `request_id=${x.request_id}`),
-    `thread：${thread}。老闆經 Telegram 交辦，原話如下（照原話做，判難度自己做或派工）：`,
+    `thread：${thread}。Ether 經 Telegram 交辦，原話如下（照原話做，判難度自己做或派工）：`,
     '', ...ask.map(t => `> ${t.replace(/\n/g, '\n> ')}`), '',
     ...(note ? [`Router 補充：${note}`, ''] : []),
     ...(ctx.length ? ['近幾輪對話（脈絡，非指令）：', ...ctx, ''] : []),
-    '結論寫在你最後一則訊息，用秘書對老闆的口吻：先講結果，不貼代碼、路徑、id，除非老闆問的就是那個。',
+    '結論寫在你最後一則訊息，用助理對 Ether 的口吻：先講結果，不貼代碼、路徑、id，除非 Ether 問的就是那個。',
   ].join('\n') + '\n'
 }
 

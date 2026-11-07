@@ -134,9 +134,9 @@ if [ -n "$mode" ]; then
   ipf="$MYTHOS_DIR/state/bg/$thread-interrupt-$(date +%s)-$$.md"
   {
     if [ -n "$orig" ] && [ -f "$orig" ]; then
-      printf '【原需求（老闆先前交辦，已被打斷、舊的做法作廢）】\n'
+      printf '【原需求（Ether 先前交辦，已被打斷、舊的做法作廢）】\n'
       cat "$orig"
-      printf '\n【老闆改口，以這段新指示為準】\n'
+      printf '\n【Ether 改口，以這段新指示為準】\n'
     fi
     cat "$prompt"
   } > "$ipf" || exit 1
