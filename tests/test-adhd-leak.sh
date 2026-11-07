@@ -40,3 +40,51 @@ out="$(printf '%s\n' "$long" | node "$LINT" --truncate)"
 case "$out" in *工單*|*t-abcdef*) fail "過長又含詞：截斷後仍含斷裂詞：$out" ;; esac
 printf '%s\n' "$out" | node "$LINT" || fail "過長又含詞：截斷後要過 lint：$out"
 echo 'ADHD-LEAK PASS'
+
+# #full 也過淨化（--sanitize-only）：斷裂用語／內部代號照刪，不縮短。本機 stub fetch，不連外、不送 TG。
+FULLD="$(mktemp -d "${TMPDIR:-/tmp}/adhd-leak-full.XXXXXX")"
+trap 'rm -f "$ERR"; rm -rf "$FULLD"' EXIT
+printf '{"allowFrom":[123]}' > "$FULLD/access.json"
+printf 'export const adhdLint = () => []\nexport const adhdTruncate = s => s\n' > "$FULLD/adhd-lint-stub.mjs"
+printf 'export const record = () => {}\nexport const jobIds = () => []\nexport const envIds = () => []\n' > "$FULLD/lr.mjs"
+# 探測器：adhd-lint 換成不攔的 stub（不然原樣送出也會過，證明不了淨化）；淨化子行程改跑工作樹那支真的
+# --sanitize-only。路徑由獨立的 python 檔改寫（TMPDIR 可能為空、目錄很淺，別用 sed 塞絕對路徑）。
+sed -e "s#from './adhd-lint.mjs'#from '$FULLD/adhd-lint-stub.mjs'#" \
+    -e "s#from './lib-request.mjs'#from '$FULLD/lr.mjs'#" "$ROOT/bin/tg-send" > "$FULLD/tg-send.mjs"
+cat > "$FULLD/patch.py" <<'PY'
+import sys
+path, real_lint = sys.argv[1], sys.argv[2]
+t = open(path).read()
+old = "path.join(path.dirname(fileURLToPath(import.meta.url)), 'adhd-lint.mjs'), '--sanitize-only'"
+if old not in t:
+    sys.exit('tg-send 的淨化呼叫改過，本段失效')
+open(path, 'w').write(t.replace(old, repr(real_lint) + ", '--sanitize-only'"))
+PY
+python3 "$FULLD/patch.py" "$FULLD/tg-send.mjs" "$ROOT/bin/adhd-lint.mjs" || fail '#full 探測器組不起來（tg-send 的 #full 沒接淨化？）'
+node --check "$FULLD/tg-send.mjs" || fail '#full 探測器組不起來'
+cat > "$FULLD/hook.mjs" <<'JS'
+import fs from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
+globalThis.fetch = async (_u, o) => {
+  fs.writeFileSync(process.env.TG_CAPTURE, JSON.parse(o.body).text)
+  return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true, result: { message_id: 1 } }) }
+}
+syncBuiltinESMExports()  // tg-send 用 `import fs`，換掉的寫入要同步回 tg-send 拿到的同名物件
+JS
+send_full() { # 程式 收檔
+  rm -f "$2"
+  printf '#full\n已完成三件。\n派工 t-abc123 已送回結果。\n第三行照原樣保留，不縮短也不截斷。\n' \
+    | MYTHOS_DIR="$FULLD" TELEGRAM_STATE_DIR="$FULLD" TELEGRAM_BOT_TOKEN=x TG_CAPTURE="$2" MYTHOS_DELIVER=tg \
+      node --import "$FULLD/hook.mjs" "$1" --thread t-x --job j >/dev/null 2>"$FULLD/err.txt"
+}
+send_full "$FULLD/tg-send.mjs" "$FULLD/sent.txt" || fail "#full 送失敗：$(cat "$FULLD/err.txt")"
+out="$(cat "$FULLD/sent.txt" 2>/dev/null || true)"
+case "$out" in *派工*|*t-abc123*) fail "#full 送出內容仍含斷裂用語：$out" ;; esac
+case "$out" in *已完成三件*) ;; *) fail "#full 正文被吃掉：$out" ;; esac
+case "$out" in *不縮短也不截斷*) ;; *) fail "#full 不該縮短：$out" ;; esac
+# 對照組：同一段內容、拿掉 #full 淨化那行 → 必須洩漏（證明上面那幾條擋得住）
+sed 's#^if (fullMode) fullText = sanitizeOnly(fullText)$#// broken#' "$FULLD/tg-send.mjs" > "$FULLD/tg-send-broken.mjs"
+grep -q '// broken' "$FULLD/tg-send-broken.mjs" || fail '複本沒拔掉淨化那行（tg-send 改過），本段失效'
+send_full "$FULLD/tg-send-broken.mjs" "$FULLD/broken.txt" || true
+case "$(cat "$FULLD/broken.txt" 2>/dev/null)" in *派工*) ;; *) fail '對照組沒洩漏（複本失效），本段證明不了淨化' ;; esac
+echo '#full 淨化 ok'

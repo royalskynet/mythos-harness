@@ -44,6 +44,17 @@ export function stripLeakSentences(raw) {
   return res.length ? res.join('\n') : '好，我處理一下。'
 }
 
+// 句子級刪不到的死角（代號夾在沒有句末標點的行裡）：只剃掉代號本身，句子其餘保留。與 stripCodes（tg-send）同一組規則。
+export function stripLeakTokens(raw) {
+  return String(raw)
+    .replace(/\bt-[a-z0-9-]{4,}\b/gi, '')
+    .replace(/\bwo [^ ）)\n]+/g, '')
+    .replace(/\b[0-9]{10}-[0-9]+-[^ \n]+\b/g, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/^ +| +$/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+}
+
 export function adhdLint(text) {
   const t = String(text ?? '').replace(/\r\n?/g, '\n').trim()
   if (!t) return []
@@ -128,10 +139,18 @@ export function adhdTruncate(raw) {
 function main() {
   // --truncate：lint 過就原文、不過就截斷版；兩種都 exit 0，供 Hermes 出口照抄回傳
   const truncate = process.argv.includes('--truncate')
+  // --sanitize-only：只刪斷裂用語（句子級）＋退掉內部代號，不縮短、不截斷（bin/tg-send #full 用）
+  const sanitizeOnly = process.argv.includes('--sanitize-only')
   let buf = ''
   process.stdin.setEncoding('utf8')
   process.stdin.on('data', c => (buf += c))
   process.stdin.on('end', () => {
+    if (sanitizeOnly) {
+      // 句子級刪除（與 --truncate 同一支）後把殘留的站內代號剃掉，只留殘渣的空行不收
+      const kept = stripLeakSentences(buf).split('\n').map(l => stripLeakTokens(l).trim()).filter(Boolean)
+      process.stdout.write(kept.length ? kept.join('\n') : '好，我處理一下。')
+      process.exit(0)
+    }
     if (truncate) {
       // 斷裂用語先處理：句子刪掉後再走原本的 lint／拆行／截斷流程（刪完仍過長也照舊截）
       if (leakErrors(buf).length) buf = stripLeakSentences(buf)

@@ -7,6 +7,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { spawnSync } from 'node:child_process'
 import { adhdLint, adhdTruncate } from './adhd-lint.mjs'
 import { record, jobIds, envIds } from './lib-request.mjs'
 
@@ -26,6 +27,19 @@ function stripCodes(s) {
     .replace(/^ +| +$/gm, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
+}
+
+// 只淨化不縮短：交給 adhd-lint.mjs --sanitize-only；node 失敗就退回自帶的 stripCodes 那組，原文不直送。
+function sanitizeOnly(s) {
+  try {
+    const r = spawnSync(process.execPath, [path.join(path.dirname(fileURLToPath(import.meta.url)), 'adhd-lint.mjs'), '--sanitize-only'], {
+      input: s,
+      encoding: 'utf8',
+      timeout: 5000,
+    })
+    if (r.status === 0 && r.stdout.trim()) return r.stdout.replace(/\n$/, '')
+  } catch {}
+  return stripCodes(s)
 }
 
 const die = (code, msg) => {
@@ -75,6 +89,8 @@ let rawText = fs.readFileSync(0, 'utf8')
 let fullMode = rawText.startsWith('#full\n') || rawText.startsWith('#full\r')
 if (fullMode) rawText = rawText.replace(/^#full\r?\n/, '')
 let fullText = stripCodes(rawText)
+// #full 也過淨化：斷裂用語／內部代號照刪（--sanitize-only），只跳過長度縮短與截斷。
+if (fullMode) fullText = sanitizeOnly(fullText)
 let text = fullText
 let fullPath = null
 if (!fullMode && adhdLint(fullText).length) {

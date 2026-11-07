@@ -79,14 +79,22 @@ fi
 if [ "$backend" = hermes ]; then
   sid="${id#bg-}"
   case "$sid" in ''|*[!0-9a-f]*) echo "id 取不出 hermes sid：$id" >&2; exit 1 ;; esac
+  hp="$(tr -d '[:space:]' < "$MYTHOS_DIR/state/bg/$sid.pid" 2>/dev/null)"
+  case "$hp" in ''|*[!0-9]*) echo "hermes 沒有 pid 檔，ledger 已標 cancelled：$id" >&2; exit 0 ;; esac
+  # 11-08 差距 #6：pid 會被重用，且 pid_start 寫在 ledger 之前——先核身分再標 cancelled，對不上就不殺、不改 ledger。
+  ps_start="$(ps -o lstart= -p "$hp" 2>/dev/null)"
+  ps_start="$(printf '%s' "$ps_start" | sed 's/  */ /g; s/^ //; s/ $//')"
+  rec_start="$(sed 's/  */ /g; s/^ //; s/ $//' "$MYTHOS_DIR/state/bg/$sid.pid_start" 2>/dev/null)"
+  if [ -z "$rec_start" ] || [ -z "$ps_start" ] || [ "$rec_start" != "$ps_start" ]; then
+    echo "cancel_failed：hermes worker 身分不符（pid ${hp}，pid_start 缺或對不上），不殺、ledger 不改：$id" >&2
+    exit 1
+  fi
   mark_cancelled pending
   case $? in
     0) ;;
     2) echo "不是進行中，不用取消：$id" >&2; exit 0 ;;
     *) echo "拿不到 ledger 鎖或寫檔失敗：${id}" >&2; exit 1 ;;
   esac
-  hp="$(tr -d '[:space:]' < "$MYTHOS_DIR/state/bg/$sid.pid" 2>/dev/null)"
-  case "$hp" in ''|*[!0-9]*) echo "hermes 沒有 pid 檔，ledger 已標 cancelled：$id" >&2; exit 0 ;; esac
   tree_pids() { local c; echo "$1"; for c in $(pgrep -P "$1" 2>/dev/null); do tree_pids "$c"; done; }
   all="$(tree_pids "$hp")"
   for p in $all; do kill -TERM "$p" 2>/dev/null; done

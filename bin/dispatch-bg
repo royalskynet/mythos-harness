@@ -344,7 +344,11 @@ if ! printf '%s\n' "$row" >> "$MYTHOS_DIR/state/dispatch-jobs.tsv"; then
 fi
 # 11-07 續派：ledger 寫成後才留 rkey，dispatch-watch 從它找本輪結果檔
 printf '%s\n' "$rk" > "$MYTHOS_DIR/state/bg/$sid.rkey" || echo "rkey 寫入失敗：$sid" >&2
-[ -n "$hb" ] && { printf '%s\n' "$hpid" > "$MYTHOS_DIR/state/bg/$sid.pid" || echo "pid 寫入失敗：$sid" >&2; }
+# 11-08 差距 #6：並記 pid 的開機時間（ps lstart，與 dispatch-cancel deep 分支逐字比對），pid 被重用時取消端才不會殺錯。
+[ -n "$hb" ] && {
+  printf '%s\n' "$hpid" > "$MYTHOS_DIR/state/bg/$sid.pid" || echo "pid 寫入失敗：$sid" >&2
+  printf '%s\n' "$(ps -o lstart= -p "$hpid" 2>/dev/null)" > "$MYTHOS_DIR/state/bg/$sid.pid_start" || echo "pid_start 寫入失敗：$sid" >&2
+}
 "${NODE_BIN:-node}" "$ROOT_DIR/bin/lib-request.mjs" log "$MYTHOS_DIR" worker-start "$prompt" "$id" 9>&- || echo "worker 已登錄，但 request 紀錄寫入失敗" >&2
 rm -f "$reserve"; reserve=''
 ledger_unlock
