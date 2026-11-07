@@ -68,6 +68,7 @@ BRIEF_BIN="${BRIEF_BIN:-$(cd "$(dirname "$0")" && pwd)/brief-answer}"
 BG_AUTOHEAL="${BG_AUTOHEAL:-1}"
 DISPATCH_BG_BIN="${DISPATCH_BG_BIN:-$(cd "$(dirname "$0")" && pwd)/dispatch-bg}"
 DISPATCH_CANCEL_BIN="${DISPATCH_CANCEL_BIN:-$(cd "$(dirname "$0")" && pwd)/dispatch-cancel}"
+DISPATCH_BIN="${DISPATCH_BIN:-$(cd "$(dirname "$0")" && pwd)/dispatch}"  # 規劃單 PASS 後自動派執行單（11-07）
 BRIEF_LINES_DIR="${BRIEF_LINES_DIR:-$HOME/.cache/brief-lines}"
 DIRECT_SENDING_SEC="${DIRECT_SENDING_SEC:-600}"
 # 11-06 未收尾檢查：FAIL／STALL／TIMEOUT 單超過 UNRESOLVED_HOURS 小時沒有收尾記錄就升級（至多 UNRESOLVED_MAX 次，之後寫 brief-lines 一次）。
@@ -640,7 +641,22 @@ while IFS=$'\t' read -r id tier task epoch status cwd thread backend; do
   else
     continue
   fi
-  add_event "$id" "$st" "$task" "" "" >/dev/null
+  extra=''; guide=''
+  # 11-07 規劃單（bin/plan-ticket）：O 寫好的可執行工單已過驗收 → 零 token 自動派出，同 thread／cwd／tier，不經 Claude
+  if [ "$st" = PASS ] && [ -f "$task" ]; then
+    then_run="$(sed -n '1s/^<!-- mythos:then-run \(\/.*\) -->$/\1/p' "$task")"
+    if [ -n "$then_run" ]; then
+      if nid="$(DISPATCH_THREAD="$thread" "$DISPATCH_BIN" "$then_run" "$cwd" "$tier" </dev/null 2>"$OUT.plan-err" 9>&-)"; then
+        extra="計畫已寫好，自動派出執行單 $(printf '%s' "$nid" | tail -1)"
+        guide="不用處理，等執行單回報"
+      else
+        extra="計畫寫好但執行單派不出去：$(tail -2 "$OUT.plan-err" | tr '\t\n' '  ' | cut -c1-200)"
+        guide="bin/dispatch-retry $id \"<補充>\" 重寫計畫，或 bin/dispatch-close $id resolved \"<理由>\""
+      fi
+      rm -f "$OUT.plan-err"
+    fi
+  fi
+  add_event "$id" "$st" "$task" "$extra" "$guide" >/dev/null
 done < <(ledger_fields < "$TSV")
 
 # 2) ACK：transcript 出現 event_id=<id> 的 user 紀錄才算處理完，ledger 才改 notified-*

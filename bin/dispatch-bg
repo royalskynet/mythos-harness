@@ -143,6 +143,19 @@ fi
 [ -n "$resume" ] && args+=(--resume "$resume")
 # 最後一個參數才是 prompt 內容
 body="$(cat "$prompt")"
+# 11-07 判難度前移：haiku worker 只做勝任的事，所以難度由本機 Laya（triage，零 token、約 3 秒）先判好寫進 prompt，
+# worker 只能往上改不能往下改。找不到 triage 一律當 mid（不讓 haiku 自己動手）。
+if [ -z "$hard" ]; then
+  TRIAGE="${DISPATCH_GATE_TRIAGE:-$(command -v triage || echo "$HOME/dev/dispatch-router/bin/triage")}"
+  tier=''
+  [ -x "$TRIAGE" ] && tier="$("$TRIAGE" "$prompt" 2>/dev/null </dev/null 9>&- | tail -1 | tr -d '[:space:]')"
+  case "$tier" in easy|mid|hard) ;; *) tier=mid ;; esac
+  tl="tier=${tier}（本機判定；只能往上改，不能往下改）"
+  case "$body" in
+    thread=*) body="${body%%$'\n'*}"$'\n'"$tl"$'\n'"${body#*$'\n'}" ;;  # 第一行 thread= 照舊留第一行
+    *) body="$tl"$'\n'"$body" ;;
+  esac
+fi
 if [ -n "$hard" ]; then
   # bg-hard 一律在 worktree 跑（計畫第 6 項）：prompt 第一行就要求 git worktree add，不直接改現役 repo
   repo="${tcwd:-<要改的 repo>}"

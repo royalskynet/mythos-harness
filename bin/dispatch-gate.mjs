@@ -122,7 +122,10 @@ function lastUserText(transcriptPath) {
 const WORKER_TRANSCRIPTS = path.resolve(process.env.MYTHOS_WORKER_TRANSCRIPT_DIR || path.join(os.homedir(), '.claude', 'projects',
   (process.env.MYTHOS_WORKER_DIR || path.join(os.homedir(), 'bots', 'mythos-worker')).replace(/[/.]/g, '-')))
 const SELF_CAP = Number(process.env.MYTHOS_SELF_CAP) || 20
-export const DISPATCH_CMD = /\bbin\/dispatch(-bg|-retry|-cancel|-close)?\s/
+export const DISPATCH_CMD = /\bbin\/(dispatch(-bg|-retry|-cancel|-close)?|plan-ticket)\s/
+// 11-07：prompt 標 tier=mid|hard（dispatch-bg 用本機 Laya 判）時 haiku 只負責找 cwd＋交規劃單，自做額度縮到 TIER_CAP
+const TIER_CAP = Number(process.env.MYTHOS_TIER_CAP) || 8
+const TIER_LINE = /^tier=(mid|hard)\b/m
 const CAP_EXEMPT_FILE = process.env.MYTHOS_CAP_EXEMPT_FILE || path.join(MYTHOS, 'state', 'cap-exempt.txt')
 const CAP_EXEMPT_EXTRA = (() => { try { return fs.readFileSync(CAP_EXEMPT_FILE, 'utf8').split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#')) } catch { return [] } })()
 const capExempt = (text) => /worktree add -b bg-hard\//.test(text) || CAP_EXEMPT_EXTRA.some(p => text.includes(p))
@@ -174,6 +177,7 @@ function selfCap(payload, tool, input) {
       const text = textOf(e.message?.content ?? e.content)
       if (typeof text !== 'string') continue
       if (first && capExempt(text)) return
+      if (first && TIER_LINE.test(text)) budget = TIER_CAP
       first = false
       budget += grantOf(text)
       continue
@@ -186,7 +190,7 @@ function selfCap(payload, tool, input) {
     }
   }
   if (n < budget) return
-  deny(`self-cap ${n}/${budget} tool=${tool}`, `你已自己做了 ${n} 次工具呼叫還沒派工（額度 ${budget}）。剩下的活交 O：把目前查到的脈絡寫成工單存 state/workorders/<名>.md（自含上下文、絕對路徑、## 驗收 一條會失敗的指令），再 \`DISPATCH_THREAD=<代號> bin/dispatch <task.md> <cwd> mid\`（真的難才用 hard）。這兩步不受上限限制。真的派不出去（要本段即時上下文、只差幾步就完成）才結束本回合，最後一則訊息第一行寫 \`[加輪請求] 已做 ${n} 次｜還要約 M 次｜為何不能派 O：<一句>\`，主 session 會問使用者，核准後續派你 \`#加輪 +M\`。`)
+  deny(`self-cap ${n}/${budget} tool=${tool}`, `你已自己做了 ${n} 次工具呼叫還沒派工（額度 ${budget}）。剩下的活交 O：\`printf '%s\\n' '<使用者原話＋相關檔案絕對路徑>' | DISPATCH_THREAD=<代號> bin/plan-ticket <mid|hard> <cwd>\`（計畫與驗收由 O 寫），這一步不受上限限制。真的派不出去（要本段即時上下文、只差幾步就完成）才結束本回合，最後一則訊息第一行寫 \`[加輪請求] 已做 ${n} 次｜還要約 M 次｜為何不能派 O：<一句>\`，主 session 會問使用者，核准後續派你 \`#加輪 +M\`。`)
 }
 
 // Router 送出 #加輪（SendMessage／Agent／state/bg prompt）前，使用者最後一則 Telegram 訊息要含「加輪」

@@ -41,5 +41,6 @@ _guard_var DEEP_RUN_BIN
 _guard_var TMUX_BIN
 _guard_var CLAUDE_BIN  # 工單 D：dispatch-bg／dispatch-watch（bg 列）／dispatch-cancel（bg 列）都叫 claude
 _guard_var DCQ_BIN  # 11-07：hard 預設改走 O 後，沒設 DCQ_BIN 的測試會打到真 dcq
+_guard_var DISPATCH_GATE_TRIAGE  # 11-07：dispatch-bg 起 worker 前先跑本機 triage
 unset _guard_v
 unset -f _guard_var
