@@ -33,7 +33,7 @@ exit 64
 STUB
 cat > "$BIN/hermes" <<'STUB'
 #!/bin/sh
-[ "$1 $2" = "gateway restart" ] || exit 64
+[ "$1 $2 $3 $4" = "-p mythos gateway restart" ] || exit 64
 echo "restart" >> "$FAKE/hermes.log"
 # 真 host gateway restart 後 PID 不變（profile 在程序內重載）：這裡也不動 gw.pid
 mkdir -p "$(dirname "$FAKE_GW_LOG")"

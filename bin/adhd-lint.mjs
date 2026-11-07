@@ -61,6 +61,16 @@ export function adhdSplitLong(raw) {
   return out.join('\n')
 }
 
+// 第一行不動，其餘非編號行合併成一行（中文直接相接），再拆過長行；保住提問類尾句不被截斷丟掉。
+export function adhdMergeTail(raw) {
+  const lines = String(raw).replace(/\r\n?/g, '\n').split('\n').map(l => l.trim()).filter(Boolean)
+  if (!lines.length) return ''
+  const rest = lines.slice(1)
+  const numbered = rest.filter(l => /^\d+\.\s/.test(l))
+  const tail = rest.filter(l => !/^\d+\.\s/.test(l)).join('')
+  return adhdSplitLong([lines[0], tail, ...numbered].filter(Boolean).join('\n'))
+}
+
 // 超標時砍成：第一行（結論）＋最多 3 條編號＋「回「詳細」看全文」，總長不超過 ADHD_MAX_CHARS。
 export function adhdTruncate(raw) {
   const lines = String(raw).replace(/\r\n?/g, '\n').split('\n').map(l => l.trim()).filter(Boolean)
@@ -96,7 +106,8 @@ function main() {
   process.stdin.on('end', () => {
     if (truncate) {
       const split = adhdSplitLong(buf)
-      process.stdout.write(!adhdLint(buf).length ? buf : !adhdLint(split).length ? split : adhdTruncate(buf))
+      const merged = adhdSplitLong(adhdMergeTail(buf))
+      process.stdout.write(!adhdLint(buf).length ? buf : !adhdLint(split).length ? split : !adhdLint(merged).length ? merged : adhdTruncate(buf))
       process.exit(0)
     }
     const errs = adhdLint(buf)

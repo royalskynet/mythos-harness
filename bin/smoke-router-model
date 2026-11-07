@@ -51,8 +51,14 @@ t0=$(date +%s)
 reply="$(run_h '[背景結果]
 磁碟剩 120GB，主要被 Docker 映像佔掉，清掉沒在用的可以多出 40GB。')"
 if err="$(check_relay "$reply")"; then
-  if lint="$(printf '%s\n' "$reply" | node "$LINT" 2>&1)"; then echo "PASS $model relay"
-  else echo "FAIL $model relay 格式：$lint"; fail=1; fi
-else echo "FAIL $model relay $err"; fail=1; fi
+  # lint 使用者實際收到的文字（出口 --truncate 後），不是模型原文
+  delivered="$(printf '%s\n' "$reply" | node "$LINT" --truncate)"
+  rawlen="$(printf '%s' "$reply" | tr -d '[:space:]' | wc -m | tr -d ' ')"
+  if ! lint="$(printf '%s\n' "$delivered" | node "$LINT" 2>&1)"; then
+    echo "FAIL $model relay 格式：$lint"; echo "RAW: $reply"; fail=1
+  elif case "$delivered" in *'回「詳細」看全文'*) [ "$rawlen" -le 220 ];; *) false;; esac; then
+    echo "FAIL $model relay 出口截斷丟內容"; echo "RAW: $reply"; fail=1
+  else echo "PASS $model relay"; fi
+else echo "FAIL $model relay $err"; echo "RAW: $reply"; fail=1; fi
 
 [ -z "${fail:-}" ] || exit 1
