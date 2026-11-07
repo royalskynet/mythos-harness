@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 派工回報：dcq 結果 + deep 停滯／抽查。Mythos pane 閒置才打進去。
+# 派工回報：dcq 結果 + deep／head 停滯／抽查。head（WO3g-r2：hard 第一段 dc go flash）全失敗時靜默重派成 O 預設鏈。Mythos pane 閒置才打進去。
 # A（11-03）：終態先落 state/events.jsonl，送進 tmux 不算數，要主 session transcript 出現 event_id=… 才算 ACK；
 #   未 ACK 10 分鐘重送（tries 上限 5，之後交 bin/watchdog）。
 set -u
@@ -107,7 +107,8 @@ CTX_GUARD="${CTX_GUARD_BIN:-$(cd "$(dirname "$0")" && pwd)/ctx-guard}"
 if [ -n "${CTX_GUARD_OFF:-}" ] || [ ! -x "$CTX_GUARD" ]; then CTX_GUARD=/usr/bin/true; fi
 
 # 測試守門（F1／F3）：放在第一次讀寫 $TSV 或 events 之前，任何改動都不會落地
-RUNNER="${DISPATCH_DEEP_RUN_BIN:-$(cd "$(dirname "$0")" && pwd)/dispatch-deep-run}"
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+RUNNER="${DISPATCH_DEEP_RUN_BIN:-$ROOT_DIR/bin/dispatch-deep-run}"
 if [ -n "${MYTHOS_TEST_SANDBOX:-}" ]; then
   for b in "$RUNNER" "$TMUX_BIN" "${CLAUDE_BIN:-claude}"; do
     case "$b" in
@@ -310,7 +311,7 @@ fail_handoff() { # id
 }
 # end fail_handoff
 while IFS=$'\t' read -r id _ task epoch status _ _ backend; do
-  [ "$status" = pending ] && [ "$backend" = deep ] || continue
+  [ "$status" = pending ] && { [ "$backend" = deep ] || [ "$backend" = head ]; } || continue
   [ -f "$MYTHOS_DIR/state/deep/$id.rc" ] && continue
   [ -f "$MYTHOS_DIR/state/deep/$id.handle" ] && continue
   case "$epoch" in ''|*[!0-9]*) continue ;; esac
@@ -598,7 +599,7 @@ if awk -F'\t' '$5=="queued"' "$TSV" 2>/dev/null | grep -q .; then
   QDIR="$(mktemp -d "${TMPDIR:-/tmp}/dispatch-watch-queue.XXXXXX")" || { ledger_unlock; exit 0; }
   : > "$QDIR/promote"; : > "$QDIR/launch"; : > "$QDIR/tops"
   while IFS=$'\t' read -r qid _ qtask _ qst qcwd _ qbackend; do
-    [ "$qst" = queued ] && [ "$qbackend" = deep ] || continue
+    [ "$qst" = queued ] && { [ "$qbackend" = deep ] || [ "$qbackend" = head ]; } || continue
     if [ -f "$MYTHOS_DIR/state/deep/$qid.rc" ]; then
       printf '%s\n' "$qid" >> "$QDIR/promote"
       continue
@@ -607,7 +608,7 @@ if awk -F'\t' '$5=="queued"' "$TSV" 2>/dev/null | grep -q .; then
     grep -qxF -- "$top" "$QDIR/tops" && continue
     busy=0
     while IFS=$'\t' read -r oid _ _ _ ost ocwd _ obackend; do
-      [ "$ost" = pending ] && [ "$obackend" = deep ] || continue
+      [ "$ost" = pending ] && { [ "$obackend" = deep ] || [ "$obackend" = head ]; } || continue
       [ -f "$MYTHOS_DIR/state/deep/$oid.rc" ] && continue
       [ "$(top_of "$ocwd")" = "$top" ] && { busy=1; break; }
     done < <(ledger_fields < "$TSV")
@@ -664,13 +665,18 @@ while IFS=$'\t' read -r id tier task epoch status cwd thread backend; do
   [ -n "$id" ] || continue
   [ "$status" = pending ] || continue
 
-  if [ "$backend" = deep ]; then
+  if [ "$backend" = deep ] || [ "$backend" = head ]; then
     rcfile="$MYTHOS_DIR/state/deep/$id.rc"
     outfile="$MYTHOS_DIR/state/deep/$id.out"
     if [ -f "$rcfile" ]; then
       rc="$(tr -d '[:space:]' < "$rcfile")"
       if [ "$rc" = "0" ]; then
         st=PASS
+      elif [ "$backend" = head ] \
+        && "$ROOT_DIR/bin/dispatch-retry" "$id" "Go flash 兩隻都沒過，改走 O 預設鏈" >/dev/null 2>&1; then
+        # WO3g-r2：head 列全失敗＝靜默交 O 預設鏈（retry 已 quiet close 舊列）；成功就不產生 FAIL 事件、不通知
+        log "head 全失敗，靜默重派 O：$id"
+        continue
       else
         st=FAIL
       fi

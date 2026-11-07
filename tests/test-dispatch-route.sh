@@ -46,7 +46,8 @@ run hard;      [ -s "$TMP/deep.log" ] || fail "hard 應走 deep"
 run mid urgent;  grep -q 'order=default tier=mid' "$TMP/dcq.log" || fail "舊第四參數 urgent 應被忽略"
 run hard later;  [ -s "$TMP/deep.log" ] || fail "舊第四參數 later 應被忽略"
 # 11-07：沒設 DISPATCH_HARD_BACKEND 時 hard 走 O（default 序：免費先、全敗升訂閱），不起 Claude worker
-DISPATCH_HARD_BACKEND= run hard; grep -q 'order=default tier=hard' "$TMP/dcq.log" || fail "hard 預設應走 dcq default：$(cat "$TMP/dcq.log")"
+# WO3g-r2：hard 預設先走 bin/hard-head（DISPATCH_HARD_HEAD= 同時跳過第一段；第一段另由 tests/test-dispatch-hard-head.sh 驗）
+DISPATCH_HARD_BACKEND= DISPATCH_HARD_HEAD= run hard; grep -q 'order=default tier=hard' "$TMP/dcq.log" || fail "hard 預設應走 dcq default：$(cat "$TMP/dcq.log")"
 [ -s "$TMP/deep.log" ] && fail "hard 預設不該叫 deep"
 
 set +e

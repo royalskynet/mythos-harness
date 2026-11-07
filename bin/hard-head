@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# hard 第一段（WO3g-r2，11-07 使用者定）：dc 指定模型依序跑，第一隻 rc=0 就收；全失敗 exit 1（由 dispatch-watch 靜默交 O 預設鏈）。
+# 當 dispatch-deep-run 的 DEEP_RUN_BIN 用：bin/dispatch-deep-run <id> <task> <cwd> → 這裡吃 <task> <cwd>。
+# 不用 dcq 的原因：dcq 的 job 檔不存 DCQ_MODELS，指定模型會漏到同 runner 的別張單。
+# 換下一隻前，工作樹一開就乾淨才 stash 半成品（可回復、不刪）；本來就不乾淨（含前一隻改過）不動。
+set -u
+
+task="${1:-}"
+cwd="${2:-}"
+
+if [ -z "$task" ] || [ -z "$cwd" ]; then
+  echo "用法：bin/hard-head <task> <cwd>" >&2
+  exit 2
+fi
+
+DC_BIN="${HARD_HEAD_DC_BIN:-~/.local/bin/dc}"
+# 測試守門（照 dispatch-deep-run）：sandbox 非空時 dc 必須在 sandbox 內
+if [ -n "${MYTHOS_TEST_SANDBOX:-}" ]; then
+  case "$DC_BIN" in
+    "$MYTHOS_TEST_SANDBOX"/*) ;;
+    *) echo "測試模式拒跑真 dc" >&2; exit 97 ;;
+  esac
+fi
+
+clean_start=''
+if [ -n "$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null 9>&-)" ] \
+  && [ -z "$(git -C "$cwd" status --porcelain 2>/dev/null 9>&-)" ]; then
+  clean_start=1
+fi
+
+# 模型清單先存變數再用 set -f 展開（路徑名不展開）
+models="${HARD_HEAD_MODELS:-opencode-go/deepseek-v4.1-flash opencode-go/glm-5.3-flash}"
+set -f
+for m in $models; do
+  set +f
+  echo "hard-head: 試 $m"
+  "$DC_BIN" "$task" "$cwd" -- -m "$m"
+  rc=$?
+  [ "$rc" = 0 ] && exit 0
+  if [ -n "$clean_start" ]; then
+    stash_msg="hard-head $m 失敗"
+    git -C "$cwd" stash push -u -q -m "$stash_msg" 9>&- || echo "hard-head: stash 失敗（$m）" >&2
+  fi
+  set -f
+done
+exit 1

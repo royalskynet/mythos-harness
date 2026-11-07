@@ -35,7 +35,8 @@ backend="$(printf '%s\n' "$row" | cut -f8)"
 case "$backend:$tier" in
   dcq:easy|dcq:mid) ;;
   dcq:*) tier=mid ;;
-  deep:*) tier=hard; export DISPATCH_HARD_BACKEND=deep ;;  # 工單 D：hard 預設改 bg-hard，deep 票重派仍走 deep
+  deep:*) tier=hard; export DISPATCH_HARD_BACKEND=deep ;;
+  head:*) tier=hard; export DISPATCH_HARD_HEAD= ;;  # WO3g-r2：go flash 失敗的重派走 O 預設鏈  # 工單 D：hard 預設改 bg-hard，deep 票重派仍走 deep
   bg-hard:*) tier=hard; export DISPATCH_HARD_BACKEND=bg ;;
   bg:*) echo "bg 票用 bin/dispatch-bg --thread <thread> <prompt檔> 續派，不走 dispatch-retry：$id" >&2; exit 2 ;;
 esac

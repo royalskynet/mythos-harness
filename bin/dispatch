@@ -4,6 +4,8 @@
 #   mid  → dcq 派o（DCQ_ORDER=default：免費先、全敗升訂閱，11-07 使用者定改回免費優先；要訂閱首棒設 DISPATCH_MID_ORDER=sub，只用免費設 =free）
 #   hard → dcq 派o（DCQ_ORDER=default：免費先、全敗升訂閱，11-07 使用者定：不派 Claude 付費子代理）；
 #          DISPATCH_HARD_BACKEND=bg 回 bg-hard（claude --bg，sonnet＋Opus advisor）、=deep 回舊的 deep-run
+# hard 第一段（WO3g-r2，11-07）：預設先走 deep 同一套流程，但 runner＝bin/hard-head（dc 指定 go flash 兩隻），後端欄記 head；
+#   全失敗由 dispatch-watch 靜默重派成 O 預設鏈。DISPATCH_HARD_HEAD=（空）跳過第一段，照舊走後端。
 # 用法：bin/dispatch <task.md 絕對路徑> <cwd 絕對路徑> <easy|mid|hard>
 # 舊的第四參數（urgent／later）照收不理，免得還沒重開的 Mythos 派工被 exit 2 擋掉。
 # DISPATCH_THREAD=<代號>（B）：同一個 thread 的追問／重派都帶同一個代號；沒給就寫 -。
@@ -47,13 +49,18 @@ fi
 
 # hard 預設走 O（11-07）；DISPATCH_HARD_BACKEND=bg 才走 bg-hard（獨立 claude --bg session），=deep 走舊的 deep-run
 hard_backend="${DISPATCH_HARD_BACKEND:-o}"
+# 11-07（WO3g-r2）：hard 第一段先跑 dc go flash（bin/hard-head）；billing-quiet 要在進 deep 分支前就補
+if [ "$tier" = hard ] && [ "$hard_backend" = o ] && [ "${DISPATCH_HARD_HEAD-1}" != '' ]; then
+  hard_backend=head
+  grep -qx '<!-- dc:billing-quiet -->' "$task" || printf '\n<!-- dc:billing-quiet -->\n' >> "$task"
+fi
 if [ "$tier" = hard ] && [ "$hard_backend" = bg ]; then
   # 新開一個 session（不帶 --thread 續派：呼叫端常是同 thread 的 worker 自己，續派會續到它自己身上）；
   # cwd 交給 dispatch-bg 寫進 prompt 第一行（git worktree add），bg-hard 不進 C3 repo 佇列
   exec "${DISPATCH_BG_BIN:-$ROOT_DIR/bin/dispatch-bg}" --hard --cwd "$cwd" "$thread" "$task"
 fi
 case "$tier:$hard_backend" in
-  hard:deep) route=deep ;;
+  hard:deep|hard:head) route=deep ;;
   hard:*) route=dcq; export DCQ_ORDER="${DISPATCH_HARD_ORDER:-default}" ;;
   mid:*) route=dcq; export DCQ_ORDER="${DISPATCH_MID_ORDER:-default}" ;;
   *) route=dcq; export DCQ_ORDER=free ;;
@@ -77,9 +84,17 @@ if [ "$route" = deep ]; then
   id="deep-${epoch}-$$-${name}"
   # DISPATCH_DEEP_RUN_BIN：測試換 runner 的覆寫點（dispatch-watch 拉起 queued 用同一條）
   runner="${DISPATCH_DEEP_RUN_BIN:-$ROOT_DIR/bin/dispatch-deep-run}"
+  # head：deep 同一套，只換 DEEP_RUN_BIN（dispatch-deep-run 再起 hard-head；測試用 HARD_HEAD_DC_BIN 換 dc）
+  # 舊 deep 路徑照 DISPATCH_DEEP_RUN_BIN 可換；head 固定走真 dispatch-deep-run（hard-head 自己是 runner），守門改看 DEEP_RUN_BIN
+  if [ "$hard_backend" = head ]; then
+    gate="$ROOT_DIR/bin/dispatch-deep-run"
+    export DEEP_RUN_BIN="$ROOT_DIR/bin/hard-head"
+  else
+    gate="$runner"
+  fi
   # 測試守門（F1）：MYTHOS_TEST_SANDBOX 非空時 runner 必須在它底下；不在就先拒跑，ledger 不寫任何列
   if [ -n "${MYTHOS_TEST_SANDBOX:-}" ]; then
-    case "$runner" in
+    case "$gate" in
       "$MYTHOS_TEST_SANDBOX"/*) ;;
       *) echo "測試模式拒跑真 runner" >&2; exit 97 ;;
     esac
@@ -96,14 +111,14 @@ if [ "$route" = deep ]; then
     while IFS=$'\t' read -r oid _ _ _ ost ocwd _ obackend; do
       # F4：queued 也算有人在跑，否則新票插隊、queued 永遠拉不起來
       case "$ost" in pending|queued) ;; *) continue ;; esac
-      [ "$obackend" = deep ] || continue
+      [ "$obackend" = deep ] || [ "$obackend" = head ] || continue
       [ -f "$MYTHOS_DIR/state/deep/$oid.rc" ] && continue
       otop="$(git -C "$ocwd" rev-parse --show-toplevel 2>/dev/null 9>&- || printf %s "$ocwd")"
       [ "$otop" = "$top" ] && { queued="$oid"; break; }
     done < <(ledger_fields < "$MYTHOS_DIR/state/dispatch-jobs.tsv")
   fi
   [ -n "$queued" ] && st=queued
-  row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$id" "$tier" "$task" "$epoch" "$st" "$cwd" "$thread" deep)"
+  row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$id" "$tier" "$task" "$epoch" "$st" "$cwd" "$thread" "$hard_backend")"
   printf '%s\n' "$row" >> "$MYTHOS_DIR/state/dispatch-jobs.tsv" || { ledger_unlock; echo "寫 ledger 失敗，未派出：${task}" >&2; exit 1; }
   ledger_unlock
   if [ -n "$queued" ]; then
