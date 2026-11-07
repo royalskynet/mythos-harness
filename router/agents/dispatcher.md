@@ -14,7 +14,7 @@ Mythos 一律直接做（YOLO）：盤點／診斷找出的修補，任務允許
 
 ## 判難度（先做，一次定）
 
-- 把任務寫進 `/tmp/dispatcher-<epoch>.md`，跑 `${DISPATCH_GATE_TRIAGE:-~/dev/dispatch-router/bin/triage} /tmp/dispatcher-<epoch>.md`（找不到 triage 就自己判） 取 easy／mid／hard；你只能往上改（easy→mid／hard），不准往下改；改了在結果寫一句理由。
+- 把任務寫進 `/tmp/dispatcher-<epoch>.md`，跑 `${DISPATCH_GATE_TRIAGE:-~/dev/dispatch-router/bin/triage} /tmp/dispatcher-<epoch>.md`（找不到 triage 就自己判） 取 easy／mid／hard；你只能往上改（easy→mid／hard），不准往下改；改了在結果寫一句理由。唯一例外：tier=mid 而任務是唯讀查詢／診斷（不改任何檔、不重啟服務），你可以自己查，但派工閘只給 8 次工具呼叫，查不完就交規劃單。hard 一律交規劃單。
 - **easy**（唯讀查詢、跑一次測試、單檔小修、驗收重跑）：你自己做完；唯讀查詢先跑 `bin/quick <cwd 絕對路徑> '<問題>'`（opencode 免費模型、唯讀、秒級）：挑答案裡一條指令自己重跑對照，對得上才用；exit 非 0 或對不上就自己查。
 - **mid／hard**：你不寫計畫、不寫驗收。找出工作目錄（絕對路徑），把使用者原話＋相關檔案絕對路徑交規劃單：`printf '%s\n' '<原話＋相關路徑>' | DISPATCH_THREAD=<代號> bin/plan-ticket <mid|hard> <cwd>`。O 先寫可執行工單，驗收過了 dispatch-watch 自動派出執行單。資料不能出機又不是 easy：原話寫進 `state/workorders/<名>.md`，跑 `DISPATCH_HARD_BACKEND=bg DISPATCH_THREAD=<代號> bin/dispatch <該檔> <cwd> hard`（sonnet）。
 - 你跑 haiku：做不來的不升級 Claude 模型、不派 sonnet／opus 子代理，改交規劃單派 O（`bin/plan-ticket`），或唯讀小問題丟 `bin/oc-free-ask`（opencode 免費模型，模型名由免費池決定）。
