@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# 失敗單收尾（11-06）：FAIL／STALL／TIMEOUT 單處理完留一筆「收尾記錄」，dispatch-watch 的未收尾檢查才會放過它。
+#   bin/dispatch-close [--quiet] <id> <kind> "<備註>"
+#   kind：superseded（作廢，帳本狀態改成 superseded）／retried（已重派，dispatch-retry 會自動記）／
+#         done（問題已解）／informed（已告知使用者）／resolved（其他已處理）
+#   預設會推一行給使用者（tg-send，失敗不影響收尾）；重複殘留單加 --quiet 就只記帳、不推。
+# 收尾記錄＝state/closeouts.tsv（id<TAB>epoch<TAB>kind<TAB>備註），只追加。同時把該票沒 ACK 的事件標 acked，免得再重送。
+# 復原：刪 closeouts.tsv 對應那行；superseded 的帳本狀態用 state/dispatch-jobs.tsv.bak-20261106-closeout 還原。
+set -u
+
+MYTHOS_DIR="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+TSV="$MYTHOS_DIR/state/dispatch-jobs.tsv"
+EVENTS_FILE="$MYTHOS_DIR/state/events.jsonl"
+CLOSEOUTS="$MYTHOS_DIR/state/closeouts.tsv"
+TG_SEND_BIN="${TG_SEND_BIN:-$(cd "$(dirname "$0")" && pwd)/tg-send}"
+NODE_BIN="${NODE_BIN:-node}"
+. "$(cd "$(dirname "$0")" && pwd)/lib-ledger.sh"
+
+quiet=0
+if [ "${1:-}" = --quiet ]; then quiet=1; shift; fi
+id="${1:-}" kind="${2:-}" note="${3:-}"
+case "$kind" in superseded|retried|done|informed|resolved) ;; *) kind='' ;; esac
+if [ -z "$id" ] || [ -z "$kind" ]; then
+  echo '用法：bin/dispatch-close [--quiet] <id> <superseded|retried|done|informed|resolved> "<備註>"' >&2
+  exit 2
+fi
+if ! awk -F'\t' -v i="$id" '$1 == i { f=1 } END { exit !f }' "$TSV" 2>/dev/null; then
+  echo "找不到工單：$id" >&2; exit 1
+fi
+note="$(printf '%s' "$note" | tr '\t\n' '  ' | cut -c1-300)"
+now="$(date +%s)"
+
+ledger_lock || { echo "拿不到 ledger 鎖" >&2; exit 1; }
+printf '%s\t%s\t%s\t%s\n' "$id" "$now" "$kind" "$note" >> "$CLOSEOUTS"
+if [ "$kind" = superseded ]; then
+  tmp="$(mktemp "${TMPDIR:-/tmp}/dispatch-close.XXXXXX")" || { ledger_unlock; exit 1; }
+  awk -F'\t' -v id="$id" 'BEGIN{OFS="\t"} $1==id {$5="superseded"; if (NF<8) NF=8} {print}' "$TSV" > "$tmp" && mv "$tmp" "$TSV" || rm -f "$tmp"
+fi
+if [ -f "$EVENTS_FILE" ]; then
+  while IFS= read -r eid; do
+    [ -n "$eid" ] && ledger_events set "$EVENTS_FILE" "$eid" "{\"acked_at\":$now}" >/dev/null
+  done < <(jq -r --arg j "$id" 'select(.job_id==$j and .acked_at == null) | .event_id' "$EVENTS_FILE" 2>/dev/null)
+fi
+th="$(awk -F'\t' -v i="$id" '$1 == i { NF=8; print $7; exit }' "$TSV")"
+ledger_unlock
+case "$th" in ''|-|*[!A-Za-z0-9-]*) th="$id" ;; esac
+
+echo "已收尾 ${id}（${kind}）"
+if [ "$quiet" = 0 ]; then
+  case "$kind" in
+    superseded) lab=已作廢 ;; retried) lab=已重派 ;; done) lab=已解決 ;; informed) lab=已處理 ;; *) lab=已處理 ;;
+  esac
+  # 正文不帶代號（秘書口吻，11-07）；回覆對應靠 --thread／--job
+  printf '失敗的工作%s：%s\n' "$lab" "${note:-（無備註）}" \
+    | MYTHOS_DIR="$MYTHOS_DIR" "$NODE_BIN" "$TG_SEND_BIN" --thread "$th" --job "$id" 9>&- >/dev/null 2>&1 \
+    || echo "（推給使用者失敗，收尾記錄已寫）" >&2
+fi
+exit 0

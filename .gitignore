@@ -17,6 +17,7 @@
 !/bin/quick
 !/bin/recall
 !/bin/dispatch-retry
+!/bin/dispatch-close
 !/bin/dispatch-watch
 !/bin/lib-ledger.sh
 !/bin/ledger-status
@@ -61,6 +62,7 @@
 !/tests/lib-test-guard.sh
 !/tests/test-test-guard.sh
 !/tests/test-dispatch-bg.sh
+!/tests/test_unresolved_failures.sh
 !/tests/test-dispatch-bg-watch.sh
 !/tests/test-dispatch-watch-deadline.sh
 !/tests/test-dispatch-gate-bg.sh
