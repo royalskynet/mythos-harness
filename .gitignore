@@ -64,6 +64,7 @@
 !/tests/test-dispatch-gate-handson.sh
 !/tests/mk-path.sh
 !/tests/test-opus-plan.sh
+!/tests/test-adhd-split.sh
 !/tests/test-dispatch-bg-hermes.sh
 !/tests/test-dispatch-hard-head.sh
 !/tests/test-cutover-dryrun.sh

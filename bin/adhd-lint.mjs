@@ -46,6 +46,21 @@ function cutFirstLine(line) {
   return (m ? m[1] : head).trim()
 }
 
+// 只有行太長時：在 40 字內最後一個標點處換行，不丟內容；拆完仍不過 lint 才走 adhdTruncate。
+export function adhdSplitLong(raw) {
+  const out = []
+  for (let line of String(raw).replace(/\r\n?/g, '\n').trim().split('\n')) {
+    while (line.length > MAX_LINE_CHARS) {
+      const m = /^(.*[，。；！？])/.exec(line.slice(0, MAX_LINE_CHARS))
+      if (!m) break
+      out.push(m[1].trim())
+      line = line.slice(m[1].length).trim()
+    }
+    out.push(line)
+  }
+  return out.join('\n')
+}
+
 // 超標時砍成：第一行（結論）＋最多 3 條編號＋「回「詳細」看全文」，總長不超過 ADHD_MAX_CHARS。
 export function adhdTruncate(raw) {
   const lines = String(raw).replace(/\r\n?/g, '\n').split('\n').map(l => l.trim()).filter(Boolean)
@@ -80,7 +95,8 @@ function main() {
   process.stdin.on('data', c => (buf += c))
   process.stdin.on('end', () => {
     if (truncate) {
-      process.stdout.write(adhdLint(buf).length ? adhdTruncate(buf) : buf)
+      const split = adhdSplitLong(buf)
+      process.stdout.write(!adhdLint(buf).length ? buf : !adhdLint(split).length ? split : adhdTruncate(buf))
       process.exit(0)
     }
     const errs = adhdLint(buf)
