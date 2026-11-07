@@ -58,6 +58,12 @@ case "$tier:$hard_backend" in
   mid:*) route=dcq; export DCQ_ORDER="${DISPATCH_MID_ORDER:-sub}" ;;
   *) route=dcq; export DCQ_ORDER=free ;;
 esac
+# 規劃單（bin/plan-ticket 產，第一行 then-run 標記）派 dcq 不可進 worktree、不可防空轉
+# （11-07：（1）dcq 暫存 worktree 裡寫的工單，merge 不回來就消失；（2）工作樹沒變化，dcq 420 秒防空轉就殺模型）
+if [ -f "$task" ]; then
+  first="$(head -n 1 "$task" 2>/dev/null)"
+  case "$first" in '<!-- mythos:then-run '*) export DCQ_SPIN_S=0 DCQ_WORKTREE=0 ;; esac
+fi
 mkdir -p "$MYTHOS_DIR/state"
 # 順序（P0，11-04）：持鎖寫 pending 列 → 放鎖 → 才啟動後端。拿不到鎖就什麼都不派，
 # 不再有「後端已在跑、ledger 卻沒持鎖就追加」的路徑。

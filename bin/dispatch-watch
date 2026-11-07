@@ -38,7 +38,7 @@ KNOBS_FILE="$MYTHOS_DIR/state/watchdog-knobs.env"
 if [ -f "$KNOBS_FILE" ]; then
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
-      DEEP_STALL_MIN=*|DEEP_REVIEW_MIN=*|DEEP_HANDOFF_SEC=*|BG_STALL_MIN=*) ;;
+      DEEP_STALL_MIN=*|DEEP_REVIEW_MIN=*|DEEP_HANDOFF_SEC=*|BG_STALL_MIN=*|BG_PERM_MIN=*) ;;
       *) continue ;;
     esac
     k="${line%%=*}" v="${line#*=}"
@@ -53,6 +53,8 @@ DEEP_REVIEW_MIN="${DEEP_REVIEW_MIN:-30}"
 DEEP_HANDOFF_SEC="${DEEP_HANDOFF_SEC:-120}"
 # bg／bg-hard 停在 working 超過它的分鐘數 → STALL 事件（worker 卡在權限提示或卡死）
 BG_STALL_MIN="${BG_STALL_MIN:-60}"
+# 11-07：waitingFor=permission prompt＝背景 worker 沒人能按允許（bg-e328eb79 卡 7 小時），距最近一次真活動超過這分鐘數 → 同 STALL 分支
+BG_PERM_MIN="${BG_PERM_MIN:-5}"
 # 真進度（11-04，借鏡 DeepSeek Super-agent 的 watchdog）：看 worker transcript 有沒有在動，不只看開派多久。
 # 開派超過 BG_NOSTART_MIN 分鐘還沒有 transcript＝沒開工（短 id 續派卡死就是這樣，等了 60 分鐘才發現）；
 # 有 transcript 就以最後寫入時間算停滯，長時間但還在動的 worker 不判 STALL。
@@ -142,6 +144,15 @@ mtime_of() {
 }
 
 slug_of() { printf '%s' "$1" | sed 's/[\/.]/-/g'; }
+
+# 11-07：claude 會在 transcript 尾端追加不帶 timestamp 的中繼列（last-prompt、cost-state、tools-used），
+# mtime 一直被刷新，真卡死永遠不到 BG_STALL_MIN（bg-e328eb79：最後一筆 00:19Z、mtime 卻是 14:18）。
+# 改從檔尾找最後一筆帶 timestamp 的 JSON 列轉 epoch；取不到才回 1（呼叫端退回 mtime）。
+last_ts_epoch() { # transcript
+  draw="$(tail -n 400 "$1" 2>/dev/null | jq -r 'select(type=="object" and .timestamp != null) | .timestamp' 2>/dev/null | tail -n 1)" || draw=''
+  [ -n "$draw" ] || return 1
+  "${NODE_BIN:-node}" -e 'const e = Date.parse(process.argv[1]); if (isNaN(e)) process.exit(1); console.log(Math.floor(e / 1000));' "$draw" 2>/dev/null
+}
 
 # 同一 event_id 只建一次，回 new／existing
 add_event() { # id status task extra guide
@@ -341,6 +352,16 @@ bg_idle() {
   [ -n "$AGENTS_JSON" ] || return 0
   printf '%s' "$AGENTS_JSON" | "$NODE_BIN" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const id=process.argv[1];let a=[];try{a=JSON.parse(s)}catch{return}const hit=a.find(x=>(x.sessionId||"").startsWith(id))||a.find(x=>x.id===id);if(hit && hit.status==="idle" && (hit.waitingFor==null)) process.stdout.write("1")})' "${1#bg-}" 9>&- 2>/dev/null
 }
+# 短 id → 該筆 agent 的 waitingFor（11-07：permission prompt＝背景 worker 卡在允許詢問，沒人可以按）
+bg_waiting() {
+  [ -n "$AGENTS_JSON" ] || return 0
+  printf '%s' "$AGENTS_JSON" | "$NODE_BIN" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const id=process.argv[1];let a=[];try{a=JSON.parse(s)}catch{return}const hit=a.find(x=>(x.sessionId||"").startsWith(id))||a.find(x=>x.id===id);if(hit && hit.waitingFor != null)process.stdout.write(String(hit.waitingFor))})' "${1#bg-}" 9>&- 2>/dev/null
+}
+# 短 id → 該筆 agent 的 pid（沒有 pid 欄＝行程已結束，state 卻還顯示進行中：bg-97f17c4d）
+bg_pid() {
+  [ -n "$AGENTS_JSON" ] || return 0
+  printf '%s' "$AGENTS_JSON" | "$NODE_BIN" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const id=process.argv[1];let a=[];try{a=JSON.parse(s)}catch{return}const hit=a.find(x=>(x.sessionId||"").startsWith(id))||a.find(x=>x.id===id);if(hit && hit.pid != null)process.stdout.write(String(hit.pid))})' "${1#bg-}" 9>&- 2>/dev/null
+}
 # 短 id → 「完整 sessionId<TAB>cwd」（兩個都有才印）
 bg_info() {
   [ -n "$AGENTS_JSON" ] || return 0
@@ -391,6 +412,18 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
         fi
       fi
     fi
+    # 11-07：agents 項目沒有 pid 欄＝行程已結束但 state 沒跟上（bg-97f17c4d 還 blocked）。只剩 result 可判：
+    #        有 result 且過寬限 → 當 done；沒有 → 當 stopped，下面 F4 分支出 FAIL
+    if [ -z "$(bg_pid "$id")" ]; then
+      rf="$MYTHOS_DIR/state/bg/$sid.result"
+      m="$(mtime_of "$rf")"
+      case "$m" in ''|*[!0-9]*) m=0 ;; esac
+      if [ -s "$rf" ] && [ $((now - m)) -ge "$BG_RESULT_GRACE_SEC" ]; then
+        st=done
+      else
+        st=stopped
+      fi
+    fi
     ;;
   esac
   case "$st" in
@@ -425,10 +458,27 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
       case "$epoch" in ''|*[!0-9]*) continue ;; esac
       extra=''
       info="$(bg_info "$id")"
+      tf=''
       if [ -n "$info" ]; then
         tf="$BG_PROJECTS_DIR/$(printf '%s' "${info#*	}" | sed 's/[\/.]/-/g')/${info%%	*}.jsonl"
+      fi
+      # 11-07：waitingFor=permission prompt＝背景 worker 沒人能按允許，會永遠卡（只看 transcript 動不動會漏掉）；
+      #        距 last_ts_epoch（沒 transcript 退 epoch）超過 BG_PERM_MIN → 直接走同一個 STALL 分支
+      wf="$(bg_waiting "$id")"
+      if [ "$wf" = "permission prompt" ]; then
+        base="$epoch"
+        if [ -n "$tf" ] && [ -f "$tf" ]; then
+          ts="$(last_ts_epoch "$tf")"
+          case "$ts" in ''|*[!0-9]*) ;; *) base="$ts" ;; esac
+        fi
+        [ $((now - base)) -ge $((BG_PERM_MIN * 60)) ] || continue
+        extra="卡在權限詢問（背景 worker 無人可按），卡 $(( (now - base) / 60 )) 分鐘"
+      elif [ -n "$info" ]; then
         if [ -f "$tf" ]; then
-          idle=$(( now - $(stat -f %m "$tf" 2>/dev/null || echo "$epoch") ))
+          le="$(last_ts_epoch "$tf")"        # 中繼列會刷 mtime，以最後一筆帶 timestamp 的列為準；取不到才退回 mtime
+          case "$le" in ''|*[!0-9]*) le="$(mtime_of "$tf")" ;; esac
+          case "$le" in ''|0|*[!0-9]*) le="$epoch" ;; esac
+          idle=$(( now - le ))
           [ "$idle" -ge $((BG_STALL_MIN * 60)) ] || continue
           extra="對話紀錄 $((idle / 60)) 分鐘沒動"
         else
