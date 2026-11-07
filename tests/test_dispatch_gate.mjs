@@ -205,6 +205,15 @@ test('自做上限：bg worker transcript 也計；範圍外（deep）不計', (
   try { assert.equal(decision(pre('Bash', { command: 'ls' }, other)), null) } finally { fs.rmSync(other, { force: true }) }
 })
 
+// 11-07：bg worker 不在 --allowedTools 的工具（mcp__omb__*）會跳權限詢問、無人可按卡 STALL → 閘明示 allow
+test('bg worker：未列 allowedTools 的工具明示 allow；Router 與範圍外不變', () => {
+  const w = path.join(WORKER_T, 'w-perm.jsonl')
+  fs.writeFileSync(w, '')
+  assert.equal(decision(pre('mcp__omb__m2_list_bots', {}, w)), 'allow')
+  assert.equal(decision(pre('mcp__telegram__reply', {}, w)), 'deny')
+  assert.equal(decision(pre('mcp__omb__m2_list_bots', {}, path.join(os.tmpdir(), 'deep-x.jsonl'))), null)
+})
+
 test('自做上限：子代理自己的 transcript 找不到就不計', () => {
   assert.equal(decision(pre('Bash', { command: 'ls' }, undefined, { agent_id: 'nope' })), null)
 })
