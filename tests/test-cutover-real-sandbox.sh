@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # WO4h：cutover／rollback 真路徑沙盒測試。全用 tmp 目錄＋假 launchctl／hermes／creds-exec，不碰真 launchd、不重啟真 gateway。
 # (a) 成功 (b) 沒 Connected→exit 4＋自動回滾 byte 相同 (c) 寫 token 那步失敗→回滾＋舊 label 重新 bootstrap (d) 快照保留 (e) Conflict→失敗
+# (g) 真跑會呼叫 tmux -L mythos kill-server (h) gateway PID 不變仍通過（切換＋回滾）
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/cutover-real.XXXXXX")"
@@ -34,11 +35,14 @@ cat > "$BIN/hermes" <<'STUB'
 #!/bin/sh
 [ "$1 $2" = "gateway restart" ] || exit 64
 echo "restart" >> "$FAKE/hermes.log"
-echo $(( $(cat "$FAKE/gw.pid") + 1 )) > "$FAKE/gw.pid"
+# 真 host gateway restart 後 PID 不變（profile 在程序內重載）：這裡也不動 gw.pid
 mkdir -p "$(dirname "$FAKE_GW_LOG")"
 echo "2026-11-07 restart pid $(cat "$FAKE/gw.pid")" >> "$FAKE_GW_LOG"
-[ -z "${FAKE_NO_CONNECT:-}" ] && echo "INFO Connected to Telegram (polling mode)" >> "$FAKE_GW_LOG"
-[ -n "${FAKE_CONFLICT:-}" ] && echo "WARN telegram.error.Conflict: terminated by other getUpdates request" >> "$FAKE_GW_LOG"
+# 只有 profile config 啟用 telegram 時才連 telegram（回滾還原後的 config 沒有 telegram 段）
+if grep -q telegram "$HERMES_PROFILE_DIR/config.yaml" 2>/dev/null; then
+  [ -z "${FAKE_NO_CONNECT:-}" ] && echo "INFO Connected to Telegram (polling mode)" >> "$FAKE_GW_LOG"
+  [ -n "${FAKE_CONFLICT:-}" ] && echo "WARN telegram.error.Conflict: terminated by other getUpdates request" >> "$FAKE_GW_LOG"
+fi
 exit 0
 STUB
 cat > "$BIN/creds-exec" <<'STUB'
@@ -52,6 +56,13 @@ STUB
 cat > "$BIN/claude" <<'STUB'
 #!/bin/sh
 echo '[]'
+STUB
+cat > "$BIN/tmux" <<'STUB'
+#!/bin/sh
+# 假 tmux：參數記到 $FAKE/tmux.log；has-session 一律回非 0（session 已不在）
+echo "$*" >> "$FAKE/tmux.log"
+case "$*" in *has-session*) exit 1 ;; esac
+exit 0
 STUB
 chmod +x "$BIN"/*
 
@@ -74,7 +85,7 @@ cutover() { # 其餘環境變數由呼叫端 env 帶；回傳 rc 放 RC
   env FAKE="$FAKE" FAKE_GW_LOG="$FAKE_GW_LOG" PATH="$BIN:$PATH" \
       LAUNCHCTL_BIN="$BIN/launchctl" HERMES_BIN="$BIN/hermes" CREDS_EXEC_BIN="$BIN/creds-exec" HERMES_PY="$PY" \
       HERMES_PROFILE_DIR="$P" MYTHOS_DIR="$M" MYTHOS_TG_ACCESS_JSON="$S/access.json" \
-      CUTOVER_CLAUDE_BIN="$BIN/claude" CUTOVER_LA_DIR="$LA" MYTHOS_LEDGER="$S/none.tsv" GATEWAY_WAIT_SEC=3 \
+      CUTOVER_CLAUDE_BIN="$BIN/claude" CUTOVER_LA_DIR="$LA" MYTHOS_LEDGER="$S/none.tsv" GATEWAY_WAIT_SEC=3 GATEWAY_SETTLE_SEC=0 TMUX_BIN="$BIN/tmux" \
       "$@" "$ROOT/bin/cutover-hermes" > "$S/out.txt" 2>&1 </dev/null
   RC=$?
   set -e
@@ -130,7 +141,7 @@ cmp "$S/orig/env" "$M/state/cutover-snapshot/env.orig" || fail "(d) 快照不是
 # ---- (a2) 手動回滾精確還原 ----
 set +e
 env FAKE="$FAKE" FAKE_GW_LOG="$FAKE_GW_LOG" LAUNCHCTL_BIN="$BIN/launchctl" HERMES_BIN="$BIN/hermes" CREDS_EXEC_BIN="$BIN/creds-exec" HERMES_PY="$PY" \
-    HERMES_PROFILE_DIR="$P" MYTHOS_DIR="$M" CUTOVER_LA_DIR="$LA" GATEWAY_WAIT_SEC=3 "$ROOT/bin/rollback-mythos" > "$S/rb.txt" 2>&1 </dev/null
+    HERMES_PROFILE_DIR="$P" MYTHOS_DIR="$M" CUTOVER_LA_DIR="$LA" GATEWAY_WAIT_SEC=3 GATEWAY_SETTLE_SEC=0 TMUX_BIN="$BIN/tmux" "$ROOT/bin/rollback-mythos" > "$S/rb.txt" 2>&1 </dev/null
 rc=$?; set -e
 [ "$rc" = 0 ] || fail "(a2) rollback-mythos 應 0，得到 $rc：$(cat "$S/rb.txt")"
 grep -q '回滾完成' "$S/rb.txt" || fail "(a2) 沒印回滾完成"
@@ -165,5 +176,34 @@ cutover FAKE_CREDS_FAIL_ON=1
 grep -q 'bootout' "$FAKE/lc.log" 2>/dev/null && fail "(f) precheck 失敗卻 bootout 了"
 [ ! -e "$M/state/cutover-snapshot" ] || fail "(f) precheck 失敗不該建快照"
 for l in $STOPS; do loaded "$l" || fail "(f) $l 被動到"; done
+
+# ---- (g) 真跑（沙箱 stub）會呼叫 tmux -L mythos kill-server，且在 bootout 之後、hermes restart 之前 ----
+setup g
+cutover
+[ "$RC" = 0 ] || fail "(g) 應 exit 0，得到 $RC：$(cat "$S/out.txt")"
+grep -qx -- '-L mythos kill-server' "$FAKE/tmux.log" || fail "(g) 沒呼叫 tmux -L mythos kill-server：$(cat "$FAKE/tmux.log" 2>/dev/null)"
+grep -q -- '-L mythos has-session -t mythos' "$FAKE/tmux.log" || fail "(g) kill-server 後沒確認 has-session"
+[ "$(head -n1 "$FAKE/tmux.log")" = '-L mythos kill-server' ] || fail "(g) kill-server 不是第一個 tmux 呼叫"
+# 回滾段不碰 tmux：(b) 切換失敗自動回滾，kill-server 只能出現一次
+setup g2
+cutover FAKE_NO_CONNECT=1
+[ "$RC" = 4 ] || fail "(g2) 應 exit 4，得到 $RC"
+[ "$(grep -c 'kill-server' "$FAKE/tmux.log")" = 1 ] || fail "(g2) 回滾不該再碰 tmux kill-server"
+
+# ---- (h) gateway PID 固定不變、log 出現 Connected：切換通過；--rollback 在 PID 不變下也通過 ----
+setup h; keep_snapshot_orig
+cutover
+[ "$RC" = 0 ] || fail "(h) PID 不變時切換應 exit 0，得到 $RC：$(cat "$S/out.txt")"
+[ "$(cat "$FAKE/gw.pid")" = 100 ] || fail "(h) 假 gateway PID 不該變"
+grep -q 'Connected to Telegram' "$P/logs/gateway.log" || fail "(h) log 沒 Connected"
+! grep -q '新 PID' "$S/out.txt" || fail "(h) 輸出還提新 PID"
+set +e
+env FAKE="$FAKE" FAKE_GW_LOG="$FAKE_GW_LOG" LAUNCHCTL_BIN="$BIN/launchctl" HERMES_BIN="$BIN/hermes" HERMES_PY="$PY" \
+    HERMES_PROFILE_DIR="$P" MYTHOS_DIR="$M" CUTOVER_LA_DIR="$LA" GATEWAY_WAIT_SEC=3 GATEWAY_SETTLE_SEC=0 TMUX_BIN="$BIN/tmux" \
+    "$ROOT/bin/cutover-hermes" --rollback > "$S/rb.txt" 2>&1 </dev/null
+rc=$?; set -e
+[ "$rc" = 0 ] || fail "(h) PID 不變時 --rollback 應 0，得到 $rc：$(cat "$S/rb.txt")"
+[ "$(cat "$FAKE/gw.pid")" = 100 ] || fail "(h) 回滾後假 gateway PID 變了"
+assert_restored "(h)"
 
 echo "PASS test-cutover-real-sandbox"

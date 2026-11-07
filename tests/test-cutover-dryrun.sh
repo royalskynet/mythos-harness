@@ -23,7 +23,16 @@ case "$1" in
 esac
 STUB
 chmod +x "$FAKE_LC"
-export LAUNCHCTL_BIN="$FAKE_LC" FAKE
+# 假 tmux：本檔任何地方都不叫真 tmux（現役 bot 在 tmux -L mythos 裡）
+FAKE_TMUX="$TMP/tmux"
+cat > "$FAKE_TMUX" <<'STUB'
+#!/bin/sh
+echo "$*" >> "$FAKE/tmux.log"
+case "$*" in *has-session*) exit 1 ;; esac
+exit 0
+STUB
+chmod +x "$FAKE_TMUX"
+export LAUNCHCTL_BIN="$FAKE_LC" FAKE TMUX_BIN="$FAKE_TMUX" GATEWAY_SETTLE_SEC=0
 state_line() { "$FAKE_LC" print "gui/$UID_/$1" 2>/dev/null | grep -m1 'state =' || echo 'not loaded'; }
 
 export HOME_ORIG="$HOME"
@@ -33,6 +42,9 @@ cfgs="$(sha "$CFG")"; st_tg="$(state_line ai.mythos.telegram)"
 # (1) 兩支 dry-run exit 0、輸出含 ai.mythos.telegram、不 bootout
 "$ROOT/bin/cutover-hermes" --dry-run > "$TMP/cut.out" 2>&1 || fail "cutover --dry-run exit $?：$(cat "$TMP/cut.out")"
 grep -q 'ai.mythos.telegram' "$TMP/cut.out" || fail "cutover dry-run 沒提 ai.mythos.telegram"
+grep -q 'kill-server' "$TMP/cut.out" || fail "cutover dry-run 沒提 tmux kill-server"
+! grep -q '新 PID' "$TMP/cut.out" || fail "cutover dry-run 還提新 PID"
+[ ! -e "$FAKE/tmux.log" ] || fail "dry-run 不該呼叫 tmux"
 "$ROOT/bin/rollback-mythos" --dry-run > "$TMP/rb.out" 2>&1 || fail "rollback --dry-run exit $?：$(cat "$TMP/rb.out")"
 grep -q 'ai.mythos.telegram' "$TMP/rb.out" || fail "rollback dry-run 沒提 ai.mythos.telegram"
 [ ! -e "$HOME/.hermes/profiles/mythos/.env.allowleak" ] || fail "不該有殘檔"
@@ -78,8 +90,9 @@ echo 100 > "$FAKE/gw.pid"
 for l in ai.mythos.telegram ai.mythos.idle-reset ai.mythos.watchdog; do : > "$TMP/la/$l.plist"; : > "$FAKE/lc/loaded.$l"; done
 cat > "$TMP/hermes" <<'STUB'
 #!/bin/sh
-echo $(( $(cat "$FAKE/gw.pid") + 1 )) > "$FAKE/gw.pid"
-mkdir -p "$(dirname "$FAKE_GW_LOG")"; echo "INFO Connected to Telegram (polling mode)" >> "$FAKE_GW_LOG"
+# PID 固定不變；只有 profile config 啟用 telegram 才連
+mkdir -p "$(dirname "$FAKE_GW_LOG")"
+if grep -q telegram "$HERMES_PROFILE_DIR/config.yaml" 2>/dev/null; then echo "INFO Connected to Telegram (polling mode)" >> "$FAKE_GW_LOG"; fi
 STUB
 cat > "$TMP/creds-exec" <<'STUB'
 #!/bin/sh
@@ -102,6 +115,7 @@ grep -q '^other: 1' "$P/config.yaml" || fail "config.yaml 其他鍵被動到"
 grep -q '^FOO=1' "$P/.env" || fail ".env 其他鍵被動到"
 [ -f "$P/config.yaml.bak-cutover" ] || fail "沒備份 config.yaml"
 [ "$(cat "$M/state/deliver-mode")" = hermes ] || fail "deliver-mode 沒寫"
+grep -qx -- '-L mythos kill-server' "$FAKE/tmux.log" || fail "沙盒真跑沒呼叫 tmux -L mythos kill-server"
 python3 -c "import yaml,sys; d=yaml.safe_load(open(sys.argv[1])); assert d['gateway']['platforms']['telegram']['enabled'] is True; assert d['gateway']['platforms']['telegram']['extra']['allow_from']==['1000000001']" "$P/config.yaml" \
   || fail "config.yaml 不是合法 YAML 或 telegram 段不對"
 

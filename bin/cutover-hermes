@@ -4,7 +4,7 @@
 #       bin/cutover-hermes --rollback [--dry-run]   回滾（bin/rollback-mythos 轉呼叫本檔，名單只寫一份）
 # 退出碼：0 成功；1 前置檢查失敗／回滾驗不到；3 有 Claude 背景 worker 在跑／ledger 有未完單；
 #         4 第一個 bootout 之後任何步驟失敗或健康檢查不過（已自動回滾；回滾本身失敗會另外印「需人工」）
-# 可換外部零件（測試用）：LAUNCHCTL_BIN HERMES_BIN CREDS_EXEC_BIN HERMES_PY HERMES_PROFILE_DIR MYTHOS_DIR GATEWAY_WAIT_SEC
+# 可換外部零件（測試用）：LAUNCHCTL_BIN HERMES_BIN CREDS_EXEC_BIN HERMES_PY HERMES_PROFILE_DIR MYTHOS_DIR GATEWAY_WAIT_SEC GATEWAY_SETTLE_SEC TMUX_BIN
 set -euo pipefail
 
 DRY=0; ROLLBACK=0
@@ -32,6 +32,8 @@ HERMES_BIN="${HERMES_BIN:-hermes}"
 LAUNCHCTL_BIN="${LAUNCHCTL_BIN:-launchctl}"
 HERMES_PY="${HERMES_PY:-$HOME/.hermes/hermes-agent/venv/bin/python}"
 GATEWAY_WAIT_SEC="${GATEWAY_WAIT_SEC:-60}"
+GATEWAY_SETTLE_SEC="${GATEWAY_SETTLE_SEC:-35}"
+TMUX_BIN="${TMUX_BIN:-tmux}"
 UID_="$(id -u)"
 GW_LABEL=ai.hermes.gateway
 
@@ -192,25 +194,46 @@ snap_restore_file() { # <name> <path>
   fi
 }
 
-# ---- 等 gateway：新 PID ≠ 舊 PID；need_connect=1 時另要新增 log 行出現 Connected，出現 Conflict 直接失敗 ----
-wait_gateway() { # <old_pid> <first_new_line> <need_connect 0|1>
-  local old="$1" first="$2" need="$3" deadline pid new connected=0
+# ---- 等 gateway ----
+# 所有 profile 共用一個 host gateway（multiplexer）：restart 後 profile 在程序內重載，PID 不變，故不看 PID，只看重啟後新增的 log 行。
+# need_connect=1（切換）：出現 Conflict→失敗；出現 Connected to Telegram (polling mode)→通過；逾時 GATEWAY_WAIT_SEC→失敗。
+# need_connect=0（回滾）：先等 GATEWAY_SETTLE_SEC，再確認新增行沒有 Connected to Telegram（gateway 已放掉 telegram polling）。
+wait_gateway() { # <first_new_line> <need_connect 0|1>
+  local first="$1" need="$2" deadline new
+  if [ "$need" != 1 ]; then
+    sleep "$GATEWAY_SETTLE_SEC"
+    new="$(tail -n "+$first" "$GW_LOG" 2>/dev/null || true)"
+    if printf '%s\n' "$new" | grep -q 'Connected to Telegram'; then
+      log "gateway 重啟後 log 新增行仍有 Connected to Telegram（telegram 沒放掉，等了 ${GATEWAY_SETTLE_SEC}s）"; return 1
+    fi
+    log "gateway 重啟後 ${GATEWAY_SETTLE_SEC}s 內 log 新增行沒有 Connected to Telegram，視為已放掉 telegram"
+    return 0
+  fi
   deadline=$(( $(date +%s) + GATEWAY_WAIT_SEC ))
   while :; do
-    pid="$(gateway_pid)"
-    if [ "$need" = 1 ]; then
-      new="$(tail -n "+$first" "$GW_LOG" 2>/dev/null || true)"
-      if printf '%s\n' "$new" | grep -q 'Conflict'; then log "gateway log 新增行出現 Conflict（Telegram 409）"; return 1; fi
-      if printf '%s\n' "$new" | grep -q 'Connected to Telegram (polling mode)'; then connected=1; fi
-    fi
-    if [ -n "$pid" ] && [ "$pid" != "$old" ] && { [ "$need" != 1 ] || [ "$connected" = 1 ]; }; then
-      log "gateway 重啟驗證通過 pid=${old:-none}->$pid connected=$connected"
-      return 0
+    new="$(tail -n "+$first" "$GW_LOG" 2>/dev/null || true)"
+    if printf '%s\n' "$new" | grep -q 'Conflict'; then log "gateway log 新增行出現 Conflict（Telegram 409）"; return 1; fi
+    if printf '%s\n' "$new" | grep -q 'Connected to Telegram (polling mode)'; then
+      log "gateway 重啟驗證通過：log 新增行出現 Connected to Telegram (polling mode)"; return 0
     fi
     if [ "$(date +%s)" -ge "$deadline" ]; then break; fi
     sleep 1
   done
-  log "gateway 重啟驗證失敗 pid=${old:-none}->${pid:-none} connected=${connected}（${GATEWAY_WAIT_SEC}s）"
+  log "gateway 重啟驗證失敗：${GATEWAY_WAIT_SEC}s 內 log 新增行沒出現 Connected to Telegram (polling mode)"
+  return 1
+}
+
+# Mythos 的 tmux server（-L mythos）會 daemonize 脫離 launchd job：bootout 後 claude＋telegram 外掛仍在輪詢 → 409。
+# 停完 STOP 之後必須 kill-server，並確認 has-session 失敗（最多 15 秒）。回滾段不碰 tmux（bootstrap 時 run.sh 會重建）。
+kill_mythos_tmux() {
+  local i
+  "$TMUX_BIN" -L mythos kill-server </dev/null >/dev/null 2>&1 || log "tmux -L mythos kill-server 回非 0（server 可能本來就不在），改看 has-session"
+  for i in $(seq 1 15); do
+    if ! "$TMUX_BIN" -L mythos has-session -t mythos </dev/null >/dev/null 2>&1; then
+      log "tmux -L mythos 已無 session mythos"; return 0
+    fi
+    sleep 1
+  done
   return 1
 }
 
@@ -224,7 +247,7 @@ wait_unloaded() { # <label> 最多 10 秒等 launchctl print 失敗
 }
 
 do_cutover() {
-  local busy open l allow old_pid first
+  local busy open l allow first
   # ---- 前置檢查（全部過了才停舊服務）----
   busy="$(running_mythos_workers)" || die "claude agents --json 讀不到，不敢切" 1
   if [ -n "$busy" ]; then
@@ -248,6 +271,7 @@ do_cutover() {
 
   if [ "$DRY" = 1 ]; then
     for l in "${STOP[@]}"; do say "launchctl bootout gui/$UID_/$l"; done
+    say "\"$TMUX_BIN\" -L mythos kill-server（bootout 不會殺 daemonize 的 tmux；之後輪詢 has-session -t mythos 直到失敗，最多 15 秒，逾時中止並自動回滾）"
     say "（bootout ai.mythos.telegram 後確認 launchctl print 已失敗才往下；保留 ${KEEP[*]}）"
     say "快照 ${SNAP_DIR}（dotenv、config.yaml、deliver-mode 存在與否＋原內容；STOP 名單切換前載入狀態）"
     say "creds-exec mythos MYTHOS_TG_BOT_TOKEN=TELEGRAM_BOT_TOKEN -- <寫 $HERMES_ENV 的 TELEGRAM_BOT_TOKEN（不印值）>"
@@ -255,7 +279,7 @@ do_cutover() {
     say "render ${CONFIG_YAML}：gateway.platforms.telegram.enabled=true、extra.allow_from 同上"
     say "寫 $DELIVER_MODE = hermes"
     say "hermes gateway restart"
-    say "${GATEWAY_WAIT_SEC} 秒內 gateway 新 PID 且 $GW_LOG 新增行出現 Connected to Telegram (polling mode)（出現 Conflict 即失敗），否則自動回滾，exit 4"
+    say "${GATEWAY_WAIT_SEC} 秒內 $GW_LOG 新增行出現 Connected to Telegram (polling mode)（出現 Conflict 即失敗），否則自動回滾，exit 4"
     return 0
   fi
 
@@ -270,6 +294,7 @@ do_cutover() {
     wait_unloaded "$l" || die "bootout 後 $l 仍然載入，中止" 1
     log "已停 $l"
   done
+  kill_mythos_tmux || die "tmux -L mythos kill-server 後 15 秒內 has-session 仍成功，中止" 1
   write_token_from_creds
   env_put "$HERMES_ENV" TELEGRAM_ALLOWED_USERS "$allow"
   if [ -f "$CONFIG_YAML" ] && [ ! -e "$CONFIG_YAML.bak-cutover" ]; then cp -p "$CONFIG_YAML" "$CONFIG_YAML.bak-cutover"; fi
@@ -277,22 +302,21 @@ do_cutover() {
   mkdir -p "$MYTHOS_DIR/state"
   printf 'hermes\n' > "$DELIVER_MODE"
   # ---- 重啟＋真健康檢查 ----
-  old_pid="$(gateway_pid)"
   first=$(( $(log_lines) + 1 ))
   run "hermes gateway restart" "$HERMES_BIN" gateway restart
-  if ! wait_gateway "$old_pid" "$first" 1; then
+  if ! wait_gateway "$first" 1; then
     printf 'cutover-hermes: gateway 健康檢查不過，自動回滾\n' >&2
     return 4
   fi
   ARMED=0
-  log "完成：gateway 新 PID 且 Connected to Telegram，Telegram 已交給 Hermes"
+  log "完成：gateway log 出現 Connected to Telegram，Telegram 已交給 Hermes"
 }
 
 do_rollback() {
-  local l old_pid first
+  local l first
   if [ "$DRY" = 1 ]; then
     say "照快照 $SNAP_DIR 還原 ${HERMES_ENV}、${CONFIG_YAML}、${DELIVER_MODE}（原本存在→複製回去；原本不存在→刪除）"
-    say "hermes gateway restart，等新 PID"
+    say "hermes gateway restart，等 ${GATEWAY_SETTLE_SEC} 秒後確認 log 新增行沒有 Connected to Telegram（不碰 tmux，bootstrap 時 run.sh 會重建）"
     for l in "${STOP[@]}"; do say "launchctl bootstrap gui/$UID_ $LA_DIR/$l.plist（只在切換前是載入狀態時）"; done
     say "驗 ai.mythos.telegram state = running"
     return 0
@@ -303,10 +327,9 @@ do_rollback() {
   snap_restore_file deliver "$DELIVER_MODE" || { echo "cutover-hermes: 還原 deliver-mode 失敗" >&2; return 1; }
   log "設定已照快照還原"
   # 先讓 gateway 放掉 telegram polling，才把舊 poller 拉起來（避免 409）
-  old_pid="$(gateway_pid)"
   first=$(( $(log_lines) + 1 ))
   "$HERMES_BIN" gateway restart </dev/null || { echo "cutover-hermes: 回滾時 hermes gateway restart 失敗" >&2; return 1; }
-  wait_gateway "$old_pid" "$first" 0 || { echo "cutover-hermes: 回滾時等不到 gateway 新 PID" >&2; return 1; }
+  wait_gateway "$first" 0 || { echo "cutover-hermes: 回滾時 gateway 仍連著 telegram" >&2; return 1; }
   for l in "${STOP[@]}"; do
     if [ "$(cat "$SNAP_DIR/label.$l" 2>/dev/null || echo 1)" = 0 ]; then
       if lc_loaded "$l"; then
