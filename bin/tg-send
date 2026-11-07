@@ -93,6 +93,32 @@ if (text.length > MAX_CHARS) {
   text = text.slice(0, MAX_CHARS - tail.length) + tail
 }
 
+// WO3f 收件匣：MYTHOS_DELIVER=hermes（或 state/deliver-mode 內容 hermes）且非全文模式 → 不碰 Telegram，
+// 寫 state/inbox/<epoch>-<pid>.json 交給 mythos-tools 外掛注入 Router；外掛逾時會帶 MYTHOS_DELIVER=tg 回來直送。
+const deliverMode = () => {
+  const env = process.env.MYTHOS_DELIVER || ''
+  if (env) return env
+  try {
+    return fs.readFileSync(path.join(ROOT, 'state', 'deliver-mode'), 'utf8').trim()
+  } catch {
+    return ''
+  }
+}
+if (!fullMode && deliverMode() === 'hermes') {
+  const now = Date.now()
+  try {
+    const dir = path.join(ROOT, 'state', 'inbox')
+    fs.mkdirSync(dir, { recursive: true })
+    const file = path.join(dir, `${Math.floor(now / 1000)}-${process.pid}.json`)
+    fs.writeFileSync(`${file}.tmp`, JSON.stringify({ thread, job, text, ts: now }))
+    fs.renameSync(`${file}.tmp`, file)
+  } catch (e) {
+    die(2, `收件匣寫入失敗：${e?.message || e}`)
+  }
+  process.stdout.write('inbox\n')
+  process.exit(0)
+}
+
 const token = botToken()
 if (!token) die(1, 'TELEGRAM_BOT_TOKEN 沒有（env 與 .env 都沒有）')
 const chat = chatId()
