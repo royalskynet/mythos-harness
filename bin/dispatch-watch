@@ -156,7 +156,7 @@ add_event() { # id status task extra guide
   # 11-06 ctx-guard：該 job 的 session 接近／超過 context 上限就標在 extra（備份 bin/dispatch-watch.bak-20261106-ctxguard）
   local cn
   cn="$("$CTX_GUARD" note "$id" 2>/dev/null </dev/null 9>&-)" || cn=''
-  [ -n "$cn" ] && extra="${extra:+$extra；}⚠ $cn"
+  [ -n "$cn" ] && extra="${extra:+${extra}；}⚠ $cn"
   local th
   th="$(awk -F'\t' -v j="$1" '$1 == j { NF=8; print $7; exit }' "$TSV")"
   case "$th" in ''|-|*[!A-Za-z0-9-]*) th=- ;; esac
@@ -712,6 +712,12 @@ while IFS=$'\t' read -r id tier task epoch status cwd thread backend; do
   if [ "$st" = PASS ] && [ -f "$task" ]; then
     then_run="$(sed -n '1s/^<!-- mythos:then-run \(\/.*\) -->$/\1/p' "$task")"
     if [ -n "$then_run" ]; then
+      # O 在 dcq 暫存 worktree 裡寫計畫，常把那個路徑寫成工作目錄；收尾後 worktree 就沒了（11-07 實測執行單 FAIL）→ 換回原 cwd
+      if [ -f "$then_run" ]; then
+        mkdir -p "$(dirname "$WATCH_LOG")"  # 沒有 logs 目錄時 2>> 開檔失敗會讓整行 rc=1、python 根本沒跑
+        python3 -I -c 'import sys;p,a,b=sys.argv[1:];s=open(p).read();open(p,"w").write(s.replace(a,b)) if a in s else None' \
+          "$then_run" "$DCQ_HOME/.wt/$id" "$cwd" 2>>"$WATCH_LOG" || log "then-run 路徑改寫失敗 $id rc=$?"
+      fi
       if nid="$(DISPATCH_THREAD="$thread" "$DISPATCH_BIN" "$then_run" "$cwd" "$tier" </dev/null 2>"$OUT.plan-err" 9>&-)"; then
         extra="計畫已寫好，自動派出執行單 $(printf '%s' "$nid" | tail -1)"
         guide="不用處理，等執行單回報"

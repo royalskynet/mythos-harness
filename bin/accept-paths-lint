@@ -107,6 +107,9 @@ def main():
         print('accept-paths-lint: 沒有可檢查的驗收區塊', file=sys.stderr)
         return 2
 
+    # 規劃單第一行宣告的產出檔（bin/plan-ticket 的 then-run）派工前本來就不存在，不算過期（11-07 實測被拒派）
+    with open(wo, encoding='utf-8', errors='replace') as f:
+        outputs = set(re.findall(r'<!-- mythos:then-run (\S+) -->', f.read()))
     stale = []
     cwd = os.getcwd()
     for line in script.splitlines():
@@ -119,7 +122,7 @@ def main():
             cwd = target if os.path.isabs(target) else os.path.normpath(os.path.join(cwd, target))
             toks = toks[2:]
         for t in toks:
-            if skip(t) or not is_path(t):
+            if skip(t) or not is_path(t) or urllib.parse.unquote(t) in outputs:
                 continue
             bad = check(t, cwd)
             if bad:

@@ -36,6 +36,7 @@ case "$run" in "$MYTHOS_DIR"/state/workorders/run-*.md) ;; *) fail "第一行要
 grep -q '修好 foo 的登入 bug' "$plan" || fail "目標沒寫進規劃單"
 grep -q "test -s '$run'" "$plan" || fail "驗收要查執行單存在"
 [ "$(cat "$TMP/dispatch.log")" = "t-p|$plan|$TMP/repo|hard" ] || fail "轉交 dispatch 參數不對：$(cat "$TMP/dispatch.log")"
+"$ROOT/bin/accept-paths-lint" "$plan" >/dev/null 2>&1 || fail "規劃單被 accept-paths-lint 判過期（bin/dispatch 會拒派）"
 if command -v deep-lint >/dev/null; then deep-lint "$plan" >/dev/null 2>&1 || fail "規劃單過不了 deep-lint"; fi
 echo '(1) ok'
 
@@ -44,8 +45,11 @@ echo '(1) ok'
 TSV="$MYTHOS_DIR/state/dispatch-jobs.tsv"
 printf 'job-plan-1\thard\t%s\t%s\tpending\t%s\tt-p\tdcq\n' "$plan" "$(date +%s)" "$TMP/repo" > "$TSV"
 : > "$DCQ_HOME/done/job-plan-1.job"
+printf '# x\n工作目錄：%s\ncd %s/a.sh\n' "$DCQ_HOME/.wt/job-plan-1" "$DCQ_HOME/.wt/job-plan-1" > "$run"  # O 照實寫了暫存 worktree 路徑
 bash "$ROOT/bin/dispatch-watch" >/dev/null 2>&1 || true
 [ "$(cat "$TMP/dispatch.log")" = "t-p|$run|$TMP/repo|hard" ] || fail "應自動派執行單：$(cat "$TMP/dispatch.log")"
+! grep -q "$DCQ_HOME/.wt/" "$run" || fail "執行單還留著規劃單 worktree 路徑：$(cat "$run")"
+grep -qx "工作目錄：$TMP/repo" "$run" || fail "工作目錄沒換回原 cwd"
 grep -q '自動派出執行單 job-run-1' "$MYTHOS_DIR/state/events.jsonl" || fail "事件沒寫自動派出：$(cat "$MYTHOS_DIR/state/events.jsonl")"
 # 沒標記的一般 dcq PASS 不派
 : > "$TMP/dispatch.log"; printf '# 一般工單\n' > "$TMP/plain.md"
