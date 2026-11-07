@@ -136,7 +136,7 @@ grep -q 'DCQ_ORDER=default DCQ_MODELS=unset tier=mid' "$DCQ_LOG" || fail "(e) mi
 
 # (f) hard-head：sandbox 外的 dc → exit 97
 set +e
-MYTHOS_TEST_SANDBOX="$TMP" HARD_HEAD_DC_BIN=~/.local/bin/dc bash "$ROOT/bin/hard-head" "$TMP/t.md" "$TMP/repo" >/dev/null 2>&1
+MYTHOS_TEST_SANDBOX="$TMP" HARD_HEAD_DC_BIN=$HOME/.local/bin/dc bash "$ROOT/bin/hard-head" "$TMP/t.md" "$TMP/repo" >/dev/null 2>&1
 rc=$?
 set -e
 [ "$rc" = 97 ] || fail "(f) sandbox 外 dc 應 exit 97，得到 $rc"

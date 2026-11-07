@@ -16,7 +16,7 @@ for a in "$@"; do
   esac
 done
 
-MYTHOS_DIR="${MYTHOS_DIR:-~/bots/mythos}"
+MYTHOS_DIR="${MYTHOS_DIR:-$HOME/bots/mythos}"
 HERMES_PROFILE_DIR="${HERMES_PROFILE_DIR:-$HOME/.hermes/profiles/mythos}"
 HERMES_ENV="$HERMES_PROFILE_DIR/.env"
 CONFIG_YAML="$HERMES_PROFILE_DIR/config.yaml"
@@ -25,12 +25,12 @@ DELIVER_MODE="$MYTHOS_DIR/state/deliver-mode"
 SNAP_DIR="$MYTHOS_DIR/state/cutover-snapshot"
 ACCESS_JSON="${MYTHOS_TG_ACCESS_JSON:-$HOME/.mythos/telegram/access.json}"
 LA_DIR="${CUTOVER_LA_DIR:-$HOME/Library/LaunchAgents}"
-CREDS_EXEC_BIN="${CREDS_EXEC_BIN:-${CREDS_EXEC:-~/dev/agent-tools/creds-exec}}"
+CREDS_EXEC_BIN="${CREDS_EXEC_BIN:-${CREDS_EXEC:-$HOME/dev/agent-tools/creds-exec}}"
 CLAUDE_BIN="${CUTOVER_CLAUDE_BIN:-claude}"
 LEDGER="${MYTHOS_LEDGER:-$MYTHOS_DIR/state/dispatch-jobs.tsv}"
 HERMES_BIN="${HERMES_BIN:-hermes}"
 LAUNCHCTL_BIN="${LAUNCHCTL_BIN:-launchctl}"
-HERMES_PY="${HERMES_PY:-~/.hermes/hermes-agent/venv/bin/python}"
+HERMES_PY="${HERMES_PY:-$HOME/.hermes/hermes-agent/venv/bin/python}"
 GATEWAY_WAIT_SEC="${GATEWAY_WAIT_SEC:-60}"
 UID_="$(id -u)"
 GW_LABEL=ai.hermes.gateway

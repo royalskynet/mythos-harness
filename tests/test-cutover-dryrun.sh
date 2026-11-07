@@ -45,13 +45,13 @@ grep -q 'ai.mythos.telegram' "$TMP/rb.out" || fail "rollback dry-run 沒提 ai.m
 cat > "$TMP/claude" <<'STUB'
 #!/bin/sh
 [ "$1" = agents ] || exit 9
-echo '[{"pid":4242,"cwd":"~/bots/mythos/router/worker","status":"running"}]'
+echo "[{\"pid\":4242,\"cwd\":\"$HOME/bots/mythos/router/worker\",\"status\":\"running\"}]"
 STUB
 chmod +x "$TMP/claude"
 set +e
 out="$(CUTOVER_CLAUDE_BIN="$TMP/claude" "$ROOT/bin/cutover-hermes" --dry-run 2>&1)"; rc=$?
 set -e
-[ $rc -eq 3 ] || fail "假 claude 有 running worker 應 exit 3，得到 $rc：$out"
+[ $rc -eq 3 ] || fail "假 claude 有 running worker 應 exit 3，得到 ${rc}：$out"
 printf '%s' "$out" | grep -q 4242 || fail "exit 3 訊息沒帶 pid：$out"
 [ "$(sha "$CFG")" = "$cfgs" ] || fail "exit 3 前動了 config.yaml"
 
@@ -87,14 +87,15 @@ while [ "$1" != "--" ]; do shift; done; shift
 TELEGRAM_BOT_TOKEN=FAKE; export TELEGRAM_BOT_TOKEN; exec "$@"
 STUB
 chmod +x "$TMP/hermes" "$TMP/creds-exec"
+REAL_PY="${HERMES_PY:-$HOME/.hermes/hermes-agent/venv/bin/python}"
 set +e
-env FAKE_GW_LOG="$P/logs/gateway.log" HOME="$TMP/home" MYTHOS_DIR="$M" HERMES_PROFILE_DIR="$P" HERMES_BIN="$TMP/hermes" \
+env FAKE_GW_LOG="$P/logs/gateway.log" HERMES_PY="$REAL_PY" HOME="$TMP/home" MYTHOS_DIR="$M" HERMES_PROFILE_DIR="$P" HERMES_BIN="$TMP/hermes" \
     CREDS_EXEC_BIN="$TMP/creds-exec" GATEWAY_WAIT_SEC=3 \
     MYTHOS_TG_ACCESS_JSON="$TMP/access.json" CUTOVER_CLAUDE_BIN="$TMP/claude-idle" CUTOVER_LA_DIR="$TMP/la" \
     "$ROOT/bin/cutover-hermes" > "$TMP/real.out" 2>&1 </dev/null
 rc=$?
 set -e
-[ $rc -eq 0 ] || fail "沙盒真跑 exit $rc：$(cat "$TMP/real.out")"
+[ $rc -eq 0 ] || fail "沙盒真跑 exit ${rc}：$(cat "$TMP/real.out")"
 grep -q 'allow_from:' "$P/config.yaml" && grep -q '1000000001' "$P/config.yaml" || fail "config.yaml 沒寫白名單：$(cat "$P/config.yaml")"
 grep -q 'TELEGRAM_ALLOWED_USERS=1000000001' "$P/.env" || fail ".env 沒寫白名單"
 grep -q '^other: 1' "$P/config.yaml" || fail "config.yaml 其他鍵被動到"
@@ -105,7 +106,7 @@ python3 -c "import yaml,sys; d=yaml.safe_load(open(sys.argv[1])); assert d['gate
   || fail "config.yaml 不是合法 YAML 或 telegram 段不對"
 
 # (4b) 回滾真路徑（沙盒）：照快照還原
-env FAKE_GW_LOG="$P/logs/gateway.log" HOME="$TMP/home" MYTHOS_DIR="$M" HERMES_PROFILE_DIR="$P" HERMES_BIN="$TMP/hermes" \
+env FAKE_GW_LOG="$P/logs/gateway.log" HERMES_PY="$REAL_PY" HOME="$TMP/home" MYTHOS_DIR="$M" HERMES_PROFILE_DIR="$P" HERMES_BIN="$TMP/hermes" \
     GATEWAY_WAIT_SEC=3 CUTOVER_LA_DIR="$TMP/la" \
     "$ROOT/bin/rollback-mythos" > "$TMP/rb2.out" 2>&1 || fail "沙盒 rollback 失敗：$(cat "$TMP/rb2.out")"
 [ ! -e "$M/state/deliver-mode" ] || fail "rollback 沒刪 deliver-mode"

@@ -13,7 +13,7 @@ if [ -z "$task" ] || [ -z "$cwd" ]; then
   exit 2
 fi
 
-DC_BIN="${HARD_HEAD_DC_BIN:-~/.local/bin/dc}"
+DC_BIN="${HARD_HEAD_DC_BIN:-$HOME/.local/bin/dc}"
 # 測試守門（照 dispatch-deep-run）：sandbox 非空時 dc 必須在 sandbox 內
 if [ -n "${MYTHOS_TEST_SANDBOX:-}" ]; then
   case "$DC_BIN" in

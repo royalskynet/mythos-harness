@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/cutover-real.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
-PY=~/.hermes/hermes-agent/venv/bin/python
+PY=$HOME/.hermes/hermes-agent/venv/bin/python
 "$PY" -c 'import yaml' 2>/dev/null || fail "Hermes venv 沒有 PyYAML"
 
 # ---- 假外部指令 ----

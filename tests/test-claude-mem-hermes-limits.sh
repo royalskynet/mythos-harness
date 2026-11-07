@@ -1,7 +1,7 @@
 #!/bin/bash
 # claude-mem plugin honors CLAUDE_MEM_HERMES_* env (local patch 11-07), defaults otherwise.
 set -euo pipefail
-PLUGIN=~/.hermes/plugins/claude-mem
+PLUGIN=$HOME/.hermes/plugins/claude-mem
 PY=/usr/bin/python3
 # Stub agent.memory_provider so the plugin imports without Hermes installed.
 STUB=$(mktemp -d)

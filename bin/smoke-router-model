@@ -4,8 +4,8 @@
 # 每個 model 只打兩次，不重試。PASS/FAIL 各印一行；任一 FAIL exit 1。不印憑證、不印 dotenv。
 # 判準函式可單獨載入：SMOKE_LIB_ONLY=1 source bin/smoke-router-model
 set -u
-HERMES_BIN="${HERMES_BIN:-~/.local/bin/hermes}"
-MYTHOS_STATE_DB="${MYTHOS_STATE_DB:-~/.hermes/profiles/mythos/state.db}"
+HERMES_BIN="${HERMES_BIN:-$HOME/.local/bin/hermes}"
+MYTHOS_STATE_DB="${MYTHOS_STATE_DB:-$HOME/.hermes/profiles/mythos/state.db}"
 LINT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/adhd-lint.mjs"
 
 # check_dispatch <db> <t0> <model>：找 t0 之後最新 oneshot session，model 相符且跑過 mythos_dispatch。0=PASS
