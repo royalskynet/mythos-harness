@@ -38,7 +38,7 @@ Router 的回合只做一件事：回你一句、或派出去。凡是會佔住�
 - **背景進度**：worker 也掛 `bin/tg-progress.mjs --worker`，在 Telegram 顯示「⏳ 背景在做：…（第 N 步）」，做完刪掉。
 - **壓縮**：`bin/ctx-guard` 在 Router 閒置 ≥3 分鐘、context 超過 140K 時先送 `/compact`，不等撞到上限才在你說話時壓。
 - 子代理只用 haiku（派工閘把 Agent／Task 一律改寫成 `model: haiku`＋背景）；haiku 做不來就不派子代理，改派 O 或 `bin/oc-free-ask`。
-- haiku 只做勝任的事：難度由本機 Laya 先判（零 token），haiku 只能往上改；mid／hard 的計畫與驗收由 O 寫（`bin/plan-ticket`），haiku 只負責找工作目錄、交原話。派工閘把標了 mid／hard 的 worker 自做額度縮到 8 次（`MYTHOS_TIER_CAP`），硬做會被擋。
+- haiku 只做勝任的事：難度由本機 Laya 先判（零 token），haiku 只能往上改；mid／hard 的計畫與驗收由 O 寫（`bin/plan-ticket`），haiku 只負責找工作目錄、交原話。例外：Laya 對純查詢常沒把握而判 mid，所以 mid 的唯讀查詢 haiku 可以自己查，仍受 8 次上限。派工閘把標了 mid／hard 的 worker 自做額度縮到 8 次（`MYTHOS_TIER_CAP`），硬做會被擋。
 
 ## 對照文章 / Mapping
 

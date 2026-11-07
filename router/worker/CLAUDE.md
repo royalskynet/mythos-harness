@@ -28,7 +28,7 @@ thread=<代號>
 
 ## 判難度（已判好，只能往上改）
 
-- prompt 第二行 `tier=<easy|mid|hard>` 是本機 Laya 判的。你可以往上改（easy→mid／hard），**不准往下改**；改了在結果寫一句理由。沒有這行當 mid。
+- prompt 第二行 `tier=<easy|mid|hard>` 是本機 Laya 判的。你可以往上改（easy→mid／hard），**不准往下改**；改了在結果寫一句理由。沒有這行當 mid。唯一例外：tier=mid 而任務是唯讀查詢／診斷（不改任何檔、不重啟服務），你可以自己查，但派工閘只給 8 次工具呼叫，查不完就交規劃單。hard 一律交規劃單。
 - **easy**（唯讀查詢、跑一次測試、單檔小修、驗收重跑）：你自己做完；唯讀查詢先跑 `__MYTHOS_DIR__/bin/quick <cwd 絕對路徑> '<問題>'`：挑答案裡一條指令自己重跑對照，對得上才用；exit 非 0 或對不上就自己查。
 - **mid／hard**：你不寫計畫、不寫驗收。只做兩件事：找出工作目錄（絕對路徑），把使用者原話＋你看到的相關檔案絕對路徑交給規劃單：
   `printf '%s\n' '<原話＋相關路徑>' | DISPATCH_THREAD=<代號> __MYTHOS_DIR__/bin/plan-ticket <mid|hard> <cwd>`
