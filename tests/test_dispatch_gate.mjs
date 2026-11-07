@@ -178,6 +178,15 @@ test('自做上限：超過後寫工單與派工照放；派工後重算（不�
   assert.equal(decision(pre('Bash', { command: 'ls' }, subagent('thread=x 查 log', 40, { dispatchAt: 3 }), SUB)), 'deny')
 })
 
+test('11-07 難度上限：tier=mid|hard 時 haiku 只能自做 8 次，交規劃單照放且重算；easy 仍是 20', () => {
+  assert.equal(decision(pre('Bash', { command: 'ls' }, subagent('thread=x\ntier=hard（本機判定）\n重構', 7), SUB)), null)
+  assert.equal(decision(pre('Bash', { command: 'ls' }, subagent('thread=x\ntier=hard（本機判定）\n重構', 8), SUB)), 'deny')
+  assert.equal(decision(pre('Bash', { command: 'ls' }, subagent('thread=x\ntier=mid\n改', 8), SUB)), 'deny')
+  assert.equal(decision(pre('Bash', { command: 'ls' }, subagent('thread=x\ntier=easy\n查', 19), SUB)), null)
+  const tp = subagent('thread=x\ntier=hard\n重構', 12)
+  assert.equal(decision(pre('Bash', { command: "printf '%s\\n' '重構 X' | DISPATCH_THREAD=x /m/bin/plan-ticket hard /r" }, tp, SUB)), null)
+})
+
 test('自做上限豁免：bg-hard、cap-exempt.txt 字串；#手動 不豁免（Router 也打得出來）', () => {
   for (const p of ['第一步：git -C /r worktree add -b bg-hard/x /tmp/x', '[夜班顧問請求 2026-11-06] DIR=/x'])
     assert.equal(decision(pre('Bash', { command: 'ls' }, subagent(p, 50), SUB)), null, p)

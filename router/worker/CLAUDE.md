@@ -26,17 +26,18 @@ thread=<代號>
 
 主 session 派你時 prompt 第一行是 `thread=<代號>`。派 O／deep 一律帶 `DISPATCH_THREAD=<代號> __MYTHOS_DIR__/bin/dispatch …`；你回主 session 的結果第一行也寫 `thread=<代號>`，Router 才接得回同一件事。prompt 沒給就自己起一個英數＋連字號的代號並在結果裡寫出來。
 
-## 判難度（先做，一次定）
+## 判難度（已判好，只能往上改）
 
-- 把任務寫進 `/tmp/dispatcher-<epoch>.md`，跑 `${DISPATCH_GATE_TRIAGE:-~/dev/dispatch-router/bin/triage} /tmp/dispatcher-<epoch>.md`（找不到 triage 就自己判）取 easy／mid／hard；你看完現狀覺得明顯判錯可以改判，在結果裡寫一句理由。
-- **easy**（唯讀查詢、跑一次測試、單檔小修、驗收重跑）：你自己做完；唯讀查詢先跑 `__MYTHOS_DIR__/bin/quick <cwd 絕對路徑> '<問題>'`（opencode 免費模型、唯讀、秒級）：挑答案裡一條指令自己重跑對照，對得上才用；exit 非 0 或對不上就自己查。
-- **mid**：寫工單（自含上下文、絕對路徑、`## 驗收` 一條會失敗的指令）存 `__MYTHOS_DIR__/state/workorders/<名>.md` → `DISPATCH_THREAD=<代號> __MYTHOS_DIR__/bin/dispatch <task.md> <cwd> mid`（派 O 訂閱層，flash 首棒；訂閱＝花錢，只給要改東西的）。
-- **hard**：工單寫成完整計畫 → `DISPATCH_THREAD=<代號> __MYTHOS_DIR__/bin/dispatch <task.md> <cwd> hard`（11-07 起預設派 O：免費先、全敗升訂閱；`DISPATCH_HARD_BACKEND=bg` 才走付費的 bg-hard，`=deep` 走舊的 deep-run）。
-- 派完就結束，不等、不輪詢；`__MYTHOS_DIR__/bin/dispatch-watch` 會把 `[派工回報]` 打回 Router，Router 再派你或新 worker 處理。結果寫「派 O／hard，id <id>」。
+- prompt 第二行 `tier=<easy|mid|hard>` 是本機 Laya 判的。你可以往上改（easy→mid／hard），**不准往下改**；改了在結果寫一句理由。沒有這行當 mid。
+- **easy**（唯讀查詢、跑一次測試、單檔小修、驗收重跑）：你自己做完；唯讀查詢先跑 `__MYTHOS_DIR__/bin/quick <cwd 絕對路徑> '<問題>'`：挑答案裡一條指令自己重跑對照，對得上才用；exit 非 0 或對不上就自己查。
+- **mid／hard**：你不寫計畫、不寫驗收。只做兩件事：找出工作目錄（絕對路徑），把使用者原話＋你看到的相關檔案絕對路徑交給規劃單：
+  `printf '%s\n' '<原話＋相關路徑>' | DISPATCH_THREAD=<代號> __MYTHOS_DIR__/bin/plan-ticket <mid|hard> <cwd>`
+  O 先寫出可執行工單，驗收過了 `dispatch-watch` 會自動派出執行單。結果寫「已交規劃單，id <id>」就結束，不等、不輪詢。
+- **資料不能出機**（見「不能派出去的」）又不是 easy：不派 O，把原話寫進 `__MYTHOS_DIR__/state/workorders/<名>.md`，跑 `DISPATCH_HARD_BACKEND=bg DISPATCH_THREAD=<代號> __MYTHOS_DIR__/bin/dispatch <該檔> <cwd> hard`（sonnet，資料留在 Claude）。
 
 ## 模型與子代理（11-07 使用者定）
 
-- 你跑 haiku。做不來的不升級 Claude 模型、不派 sonnet／opus 子代理：寫工單派 O（`__MYTHOS_DIR__/bin/dispatch … mid|hard`），或唯讀小問題丟 `__MYTHOS_DIR__/bin/oc-free-ask '<問題>'`（opencode 免費模型，模型名由免費池動態決定，不要自己寫死）。
+- 你跑 haiku。做不來的不升級 Claude 模型、不派 sonnet／opus 子代理：交規劃單派 O（`__MYTHOS_DIR__/bin/plan-ticket mid|hard`），或唯讀小問題丟 `__MYTHOS_DIR__/bin/oc-free-ask '<問題>'`（opencode 免費模型，模型名由免費池動態決定，不要自己寫死）。
 - 真要派子代理只派 haiku 勝任的小事（閘會把 Agent 的 model 一律改成 haiku）。
 
 ## advisor（只限 bg-hard）
@@ -50,7 +51,7 @@ bg-hard 單一律在 git worktree 跑：prompt 第一行要求 `git worktree add
 ## 收到 `[派工回報]`
 
 - PASS：自己重跑該工單 `## 驗收`（不接 `| tail` 吃退出碼，用 `> /tmp/x.log 2>&1; echo rc=$?` 再看尾段），看 `git diff --stat` 改動範圍是否超出工單；都對才回「完成」。
-- FAIL／STALL／REVIEW：先唯讀診斷哪條斷言沒過，再決定 `__MYTHOS_DIR__/bin/dispatch-retry <id> "<補充>"`／`__MYTHOS_DIR__/bin/dispatch-cancel <id>`；同一張重派 3 次仍失敗就停，回報使用者。
+- FAIL／STALL／REVIEW：不自己找根因。把沒過的那條斷言與原始輸出（最多 20 行）原樣貼進 `__MYTHOS_DIR__/bin/dispatch-retry <id> "<貼上的輸出>"`；同一張重派 3 次仍失敗就停，回報使用者。事件寫「自動派出執行單」的規劃單不用處理。
 - 失敗單一定要收尾（11-06）：FAIL／STALL／TIMEOUT 單處理完（重派、作廢、問題已解）都要留收尾記錄，否則 dispatch-watch 超過 6 小時會打 UNRESOLVED 回報。重派用 `__MYTHOS_DIR__/bin/dispatch-retry`（自動記）；其餘用 `__MYTHOS_DIR__/bin/dispatch-close [--quiet] <id> <superseded|done|informed|resolved> "<白話備註>"`。重複殘留單加 `--quiet`（只記帳不推）；有結果或要使用者決定的不加（會推一行給使用者）。收到 UNRESOLVED 就補收尾，不要只回「收到」。
 - 驗收不准自我評分：不改工單的 `## 驗收`、不改 delegate-guard 的 p-*／ledger-*（hook 會擋）；驗收過期另開新票，舊票標 superseded。
 

@@ -14,10 +14,11 @@ chat with Sonnet; every request goes to a background haiku worker that triages a
                     ├─ 唯讀小問題 ─▶ bin/quick --push（閘改成背景跑；opencode 免費模型、唯讀稽核）─▶ brief-answer 秘書口吻直送你
                     ├─ 問過去的事 ─▶ bin/recall --ask（閘改成背景跑；claude-mem HTTP＋fixindex＋memory 目錄）─▶ brief-answer 直送你
                     └─ bin/dispatch-bg --from-chat（prompt 由 transcript 自動抓原話；Router 只回「收到」）─▶ claude --bg worker：判難度、驗收、retry／cancel
+                                       │  （難度先由本機 Laya 判好寫進 prompt；haiku 只能往上改）
                                        ├─ easy ─▶ 自己做
-                                       ├─ mid  ─▶ bin/dispatch ─▶ dcq（DCQ_ORDER=sub：Go 訂閱 flash 首棒；訂閱是花錢換品質，只給要改東西的）
+                                       ├─ mid  ─▶ bin/plan-ticket ─▶ O 寫計畫 ─PASS▶ dispatch-watch 自動派執行單 ─▶ dcq（DCQ_ORDER=sub：Go 訂閱 flash 首棒）
                                        │         easy 派工仍走 DCQ_ORDER=free（只用免費層）
-                                       └─ hard ─▶ bin/dispatch ─▶ dcq（DCQ_ORDER=default：免費先、全敗升訂閱；DISPATCH_HARD_BACKEND=bg 走 bg-hard、=deep 走 deep-run）
+                                       └─ hard ─▶ bin/plan-ticket ─▶ 同上，dcq（DCQ_ORDER=default：免費先、全敗升訂閱）；資料不能出機才 DISPATCH_HARD_BACKEND=bg（sonnet）
                                                       ▲
         dispatch-watch（每 2 分、零 token）── 先落 events.jsonl；ACK＝Router 已收到事件，不代表處理完 ──▶ 打回 Router
                        │                 未 ACK 10 分鐘重送、上限 5 次；取消的票不再投遞
@@ -37,6 +38,7 @@ Router 的回合只做一件事：回你一句、或派出去。凡是會佔住�
 - **背景進度**：worker 也掛 `bin/tg-progress.mjs --worker`，在 Telegram 顯示「⏳ 背景在做：…（第 N 步）」，做完刪掉。
 - **壓縮**：`bin/ctx-guard` 在 Router 閒置 ≥3 分鐘、context 超過 140K 時先送 `/compact`，不等撞到上限才在你說話時壓。
 - 子代理只用 haiku（派工閘把 Agent／Task 一律改寫成 `model: haiku`＋背景）；haiku 做不來就不派子代理，改派 O 或 `bin/oc-free-ask`。
+- haiku 只做勝任的事：難度由本機 Laya 先判（零 token），haiku 只能往上改；mid／hard 的計畫與驗收由 O 寫（`bin/plan-ticket`），haiku 只負責找工作目錄、交原話。派工閘把標了 mid／hard 的 worker 自做額度縮到 8 次（`MYTHOS_TIER_CAP`），硬做會被擋。
 
 ## 對照文章 / Mapping
 
@@ -95,6 +97,7 @@ tmux -L mythos attach -t mythos
 | `bin/watchdog` | L0：死鎖、重送用盡、Router 未回（只認成功的 reply 結果）、pending 逾 6 小時、deep transcript 停滯、`claude agents` 背景 worker blocked；L1：log 錯誤行交免費模型判 KNOWN／NEW／NOISE（出機前欄位白名單→scrub 去識別→sensitive-canary 掃去識別後文字，scrub 每日自檢，退路鏈 免費池第 1 名→第 2 名→local-llm→`state/watchdog-known.tsv`）；L2：只提議白名單旋鈕，兩棒不同體系同值才套用；`bin/watchdog ask "<問題>"` |
 | `bin/quick` | 快查線（11-06）：`bin/quick <cwd 絕對路徑> '<問題>'`。模型取 `bin/free-models`（dcq 免費 opencode 層，隨每日 probe 同步），只走免費層；要付費墊底才設 `QUICK_PAID`（預設空）；`opencode run --agent plan --dir <cwd>` 讀不到 cwd 以外；掃 JSON 事件，寫檔或改狀態的 bash 一律作廢（exit 3）；問題含 PII 不出機（exit 4）；答案每個結論附指令＋原始輸出，呼叫端挑一條重跑對照。派工閘只放行 `^bin/quick /abs '<單引號問題>'$` |
 | `bin/brief-answer`、`chat-prompt.mjs` | 秒回（11-07）：前者把快查答案／worker 結論改寫成秘書口吻直送（先過 `:4102/scrub`，再試免費池前 `BRIEF_FREE_MAX`＝2 名，最後 haiku；整個行程群組逾時硬砍；`--not-found` 送固定句不叫模型；exit 7＝確定沒送、8＝送出結果不明，呼叫端不可再轉述）；後者從 Router transcript 抓使用者原話寫 worker prompt（`dispatch-bg --from-chat`），已交背景的工具呼叫會切成邊界，不混進下一題 |
+| `bin/plan-ticket` | 規劃單（11-07）：`printf '<原話>' \| bin/plan-ticket <mid\|hard> <cwd>` 產一張「寫可執行工單」的單交 O；驗收＝執行單存在且過 `deep-lint`。PASS 後 `dispatch-watch` 依第一行 `<!-- mythos:then-run … -->` 零 token 派出執行單（同 thread／cwd／tier），派不出去寫原因 |
 | `bin/free-models` | 印出 dcq 目前的免費 opencode 模型（一行一個）；`quick`、`oc-free-ask`、`watchdog`、`brief-answer` 都從這裡取，模型隨 opencode 政策換掉也不用改程式。取不到就 exit 1 什麼都不印，不退回寫死的名字 |
 | `bin/ctx-guard` | context 守門：Router 超限送 `/compact`；閒置 ≥`CTX_ROUTER_QUIET_SEC`（180）秒且超過 `CTX_ROUTER_IDLE`（140000）先壓，只壓最新 session，`CTX_ROUTER_IDLE=0` 關閉 |
 | `bin/recall` | 記憶快查（11-07）：`bin/recall '<關鍵字>'` 一次查 claude-mem（只打 worker 的 HTTP GET `/api/search`，不載 plugin，Mythos 對話不寫進去）、`fixindex find`（只留內文真含關鍵字的條目）、主 session memory 目錄；`--obs <id>`／`--fix <id>` 展開單筆。零 LLM、不出機。exit 0 有結果／1 三處都沒有 |
@@ -115,7 +118,7 @@ tmux -L mythos attach -t mythos
 
 ```bash
 bash tests/test_router_template.sh     # Router 模板＋派工閘真的接起來
-node --test tests/test_dispatch_gate.mjs   # 48 項，含 Codex 審計的繞過反例與 haiku 改寫
+node --test tests/test_dispatch_gate.mjs   # 49 項，含 Codex 審計的繞過反例、haiku 改寫、難度上限
 bash tests/test-review-judge.sh && bash tests/test-dispatch-route.sh && bash tests/test_idle_reset.sh
 bash tests/test_dispatch_deep.sh && bash tests/test_dispatch_watch.sh
 bash tests/test_launchd_install.sh     # 範本無寫死路徑、換完是合法 plist、ONLY= 只產一份
@@ -125,6 +128,7 @@ bash tests/test-dispatch-bg.sh && bash tests/test-dispatch-bg-watch.sh && bash t
 bash tests/test-tg-send.sh && bash tests/test-tg-plugin-patch.sh && bash tests/test-tg-reply-thread.sh    # 直發至多一次（本機 stub）、plugin patch、回覆標註
 bash tests/test-bg-autoheal.sh && bash tests/test-tg-snappy.sh   # 秒回：失敗自癒重派、秘書口吻直送；輸入中＋忙碌先回
 node --test tests/test_tg_progress.mjs && bash tests/test-ctx-guard.sh   # 進度訊息（含 worker 模式）、閒置先壓縮
+bash tests/test-plan-ticket.sh         # 規劃單、PASS 後自動派執行單、dispatch-bg 寫難度行
 bash tests/test-free-models.sh && bash tests/test-brief-answer.sh && node --test tests/test_chat_prompt.mjs   # 動態免費池（不寫死模型）、免費先＋去識別＋exit 對照、對話邊界
 node tests/test_tg_commands.mjs        # 本機限定：會讀 ~/.claude/commands 的 fix.md／wheel.md
 MYTHOS_E2E=1 bash tests/test-dispatch-bg-e2e.sh   # 真 claude --bg（haiku）；沒設 MYTHOS_E2E 只印 SKIP
@@ -190,7 +194,7 @@ Items left open by the convergence rule (medium or lower, or a fix that would wi
 
 ## English summary
 
-**Architecture.** You chat with a Sonnet **Router** over Telegram. The Router never runs tools itself: a PreToolUse hook (`bin/dispatch-gate.mjs`) allows only Telegram replies, `ToolSearch`, `TaskStop`, `SendMessage`, background `dispatcher` subagents, and a few exact Bash shapes (`bin/dispatch-bg --from-chat <thread>` or `bin/dispatch-bg <thread> state/bg/<file>.md`, `Write` into `state/bg/`, `bin/quick <abs-cwd> '<question>'`, `bin/recall '<keywords>' --ask '<question>'`), so delegation is enforced by code, not by prompt. By default the Router hands each request to an independent `claude --bg` worker (`bin/dispatch-bg`, haiku) that survives Router restarts; the in-process dispatcher subagent is the fallback. The gate rewrites every subagent call to `model: haiku` in the background; work haiku cannot handle goes to O or `bin/oc-free-ask` instead of a bigger Claude model. The worker triages: easy → does it itself; mid → `bin/dispatch` to `dcq` with `DCQ_ORDER=sub` (OpenCode Go subscription, DeepSeek flash first — a subscription is a real cost, spent only on changes that need quality; easy jobs stay on `DCQ_ORDER=free`); hard → `dcq` with `DCQ_ORDER=default` (free models first, the subscription only after all free ones fail; `DISPATCH_HARD_BACKEND=bg` restores Sonnet bg-hard, `=deep` the old `deep-run`).
+**Architecture.** You chat with a Sonnet **Router** over Telegram. The Router never runs tools itself: a PreToolUse hook (`bin/dispatch-gate.mjs`) allows only Telegram replies, `ToolSearch`, `TaskStop`, `SendMessage`, background `dispatcher` subagents, and a few exact Bash shapes (`bin/dispatch-bg --from-chat <thread>` or `bin/dispatch-bg <thread> state/bg/<file>.md`, `Write` into `state/bg/`, `bin/quick <abs-cwd> '<question>'`, `bin/recall '<keywords>' --ask '<question>'`), so delegation is enforced by code, not by prompt. By default the Router hands each request to an independent `claude --bg` worker (`bin/dispatch-bg`, haiku) that survives Router restarts; the in-process dispatcher subagent is the fallback. The gate rewrites every subagent call to `model: haiku` in the background; work haiku cannot handle goes to O or `bin/oc-free-ask` instead of a bigger Claude model. Difficulty is pre-classified by a local ONNX model (Laya, zero tokens) and written into the worker prompt; the haiku worker may only raise it. Haiku never writes plans: for mid/hard it finds the working directory and hands the user's words to `bin/plan-ticket`, which asks O to write an executable work order; once that passes `deep-lint`, `bin/dispatch-watch` dispatches it automatically with zero tokens. The gate caps a mid/hard-tagged worker at 8 own tool calls (`MYTHOS_TIER_CAP`). The worker triages: easy → does it itself; mid → `bin/dispatch` to `dcq` with `DCQ_ORDER=sub` (OpenCode Go subscription, DeepSeek flash first — a subscription is a real cost, spent only on changes that need quality; easy jobs stay on `DCQ_ORDER=free`); hard → `dcq` with `DCQ_ORDER=default` (free models first, the subscription only after all free ones fail; `DISPATCH_HARD_BACKEND=bg` restores Sonnet bg-hard, `=deep` the old `deep-run`).
 
 **Instant replies (2026-11-07).** The Router's turn only ever answers or dispatches. `bin/dispatch-bg --from-chat <thread>` builds the worker prompt from the Router transcript (`bin/chat-prompt.mjs`: the user's own words plus the last 8 messages), so the Router just says "收到" (got it). The gate rewrites `bin/quick` and `bin/recall --ask` through PreToolUse `updatedInput` to run in the background, and `bin/brief-answer` rewrites the answer as a plain secretary-style report sent straight to the user: the text is PII-scrubbed first (scrubber down = no model call, raw text sent), then up to two free models are tried, then haiku. Exit 7 means definitely not sent; exit 8 means the outcome is unknown, so callers must not relay it again. While the Router is busy, the Telegram proxy keeps the "typing…" indicator alive every 4 s and replies "收到，等等處理" (got it, will handle shortly). `bin/dispatch-watch` sends bg PASS results the same way, retries a failed or stalled bg job once on its own, and tells the user directly if the retry fails too. Workers show live progress via `bin/tg-progress.mjs --worker`, and `bin/ctx-guard` compacts the Router while it is idle (≥ 3 min, > 140K tokens) instead of mid-conversation.
 

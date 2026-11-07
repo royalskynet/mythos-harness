@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# 規劃單（11-07 使用者定：派 haiku 的只給 haiku 勝任的事）：mid／hard 的計畫不由 haiku worker 寫，
+# 交 O 先寫一張「可執行工單」；規劃單驗收過（deep-lint 通過）後 dispatch-watch 自動把那張工單派出去，不經 Claude。
+# 用法：echo '<目標原話＋已知的相關路徑>' | DISPATCH_THREAD=<代號> bin/plan-ticket <mid|hard> <cwd 絕對路徑>
+# stdout：規劃單的 job id（bin/dispatch 印的）；exit 2 用法錯，其餘照 bin/dispatch。
+set -u
+MYTHOS_DIR="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+tier="${1:-}"; cwd="${2:-}"
+case "$tier" in mid|hard) ;; *) echo "用法：bin/plan-ticket <mid|hard> <cwd 絕對路徑>（目標從 stdin）" >&2; exit 2 ;; esac
+case "$cwd" in /*) [ -d "$cwd" ] || { echo "cwd 不存在：${cwd}" >&2; exit 2; } ;; *) echo "cwd 要絕對路徑：${cwd}" >&2; exit 2 ;; esac
+goal="$(cat)"
+[ -n "$(printf '%s' "$goal" | tr -d '[:space:]')" ] || { echo "stdin 沒有目標內容" >&2; exit 2; }
+mkdir -p "$MYTHOS_DIR/state/workorders"
+stamp="$(date +%Y%m%d-%H%M%S)-$$"
+plan="$MYTHOS_DIR/state/workorders/plan-$stamp.md"
+run="$MYTHOS_DIR/state/workorders/run-$stamp.md"
+# deep-lint 選用：有就讓驗收真的跑它，沒有只查結構
+DL="${DEEP_LINT_BIN:-$(command -v deep-lint || true)}"
+lint=''; [ -n "$DL" ] && [ -x "$DL" ] && lint=" && '$DL' '$run'"
+{
+  printf '<!-- mythos:then-run %s -->\n' "$run"
+  printf '# 規劃單：只寫一張可執行工單，不改其他檔\n工作目錄：%s\n\n## 目標\n%s\n\n' "$cwd" "$goal"
+  cat <<EOT
+## 要做的事
+1. 讀工作目錄裡跟目標有關的程式與設定（唯讀）。
+2. 寫一張工單到 ${run}（只准建立這個檔），內容依序：
+   - 第一行 \`# <標題>\`，第二行 \`工作目錄：${cwd}\`
+   - \`## 背景\`：現況、相關檔案絕對路徑
+   - \`## 步驟\`：編號、每步一個動作
+   - \`## 驗收\`：一個 bash 區塊，開工前會失敗、完工後會過的斷言（test／grep -q／跑既有測試），不可只有 echo／true、不可 \`|| true\`
+   - 區塊外一行 \`預期：\` 寫驗收過了代表什麼；全檔 40 行內
+   - 驗收用的直譯器寫絕對路徑（\`$(command -v python3 || echo python3)\`），腳本用 \`bash <script>\`；不寫 ${cwd} 以外 checkout 的路徑；可能已完成／冪等的工作加一行 \`NEG-CONTROL: n/a\`
+3. 不改工作目錄裡任何檔案。
+
+## 驗收
+\`\`\`bash
+test -s '${run}' && grep -q '^## 驗收' '${run}' && grep -q '^工作目錄：' '${run}'${lint}
+\`\`\`
+預期：${run} 存在、結構完整且通過派工前檢查。
+EOT
+} > "$plan"
+exec "${PLAN_TICKET_DISPATCH:-$ROOT_DIR/bin/dispatch}" "$plan" "$cwd" "$tier"

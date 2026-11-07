@@ -77,3 +77,5 @@ __pycache__/
 !/tests/test-free-models.sh
 !/tests/test-brief-answer.sh
 !/tests/test_chat_prompt.mjs
+!/bin/plan-ticket
+!/tests/test-plan-ticket.sh
