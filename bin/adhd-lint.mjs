@@ -39,11 +39,50 @@ export function adhdLint(text) {
   return errs
 }
 
+function cutFirstLine(line) {
+  if (line.length <= 40) return line
+  const head = line.slice(0, 40)
+  const m = /^(.*[，。；])[^，。；]*$/.exec(head)
+  return (m ? m[1] : head).trim()
+}
+
+// 超標時砍成：第一行（結論）＋最多 3 條編號＋「回「詳細」看全文」，總長不超過 ADHD_MAX_CHARS。
+export function adhdTruncate(raw) {
+  const lines = String(raw).replace(/\r\n?/g, '\n').split('\n').map(l => l.trim()).filter(Boolean)
+  const first = cutFirstLine(lines[0] || '')
+  const numbered = lines.slice(1).filter(l => /^\d+\.\s/.test(l)).slice(0, 3)
+  let out = [first, ...numbered].filter(Boolean).join('\n')
+  // 只有一行且本就是單一長字串（沒空白可斷）：不切字、不塞「詳細」（沒東西可取回），
+  // 原樣往上丟——「≤220 字」的保證由呼叫端（Hermes 出口）的行數上限負責。
+  if (lines.length === 1 && String(raw).trim().length > MAX_CHARS) return String(raw).trim()
+  const tail = '\n回「詳細」看全文'
+  if ((out + tail).replace(/\s+/g, '').length > MAX_CHARS) {
+    let budget = MAX_CHARS - tail.replace(/\s+/g, '').length - first.replace(/\s+/g, '').length
+    const kept = []
+    for (const n of numbered) {
+      const c = n.replace(/\s+/g, '').length
+      if (budget - c < 0) break
+      budget -= c
+      kept.push(n)
+    }
+    out = [first, ...kept].filter(Boolean).join('\n')
+  }
+  out = (out + tail).trim()
+  if (out.replace(/\s+/g, '').length > MAX_CHARS) out = (first + tail).trim()
+  return out
+}
+
 function main() {
+  // --truncate：lint 過就原文、不過就截斷版；兩種都 exit 0，供 Hermes 出口照抄回傳
+  const truncate = process.argv.includes('--truncate')
   let buf = ''
   process.stdin.setEncoding('utf8')
   process.stdin.on('data', c => (buf += c))
   process.stdin.on('end', () => {
+    if (truncate) {
+      process.stdout.write(adhdLint(buf).length ? adhdTruncate(buf) : buf)
+      process.exit(0)
+    }
     const errs = adhdLint(buf)
     if (errs.length) {
       for (const e of errs) process.stderr.write(e + '\n')
