@@ -22,7 +22,7 @@ const TELEGRAM_ALLOW = new Set(['mcp__telegram__reply', 'mcp__telegram__react', 
 // 原文 §2.2 Worker 不直接跟人互動，結果經 Router 轉述
 // Mythos 是 YOLO（CLAUDE.md 身分段）：reply 不准把「要不要做」丟回使用者，建議直接派 dispatcher 去做
 // 只擋請示句型；問使用者才知道的資訊（時間、帳號、要哪一份）不在此列
-export const ASK_PERMISSION = /回[「『"]?好[」』"]?|要的話回|要不要我|是否要我|需要我[^。？?\n]{0,20}(嗎|？|\?)|等你(說|回)|我們得決定|你決定要不要/
+export const ASK_PERMISSION = /回[「『"]?好[」』"]?|要的話回|要不要我|是否要我|要我[^。？?\n]{0,20}(嗎|？|\?)|回一句|等你(說|回)|我們得決定|你決定要不要/
 const WORKER_DENY = /^mcp__telegram__(reply|react|edit_message)$/
 
 function log(line) {
@@ -320,4 +320,5 @@ function main() {
   deny('pre 沒有結論')
 }
 
-main()
+// 直接執行才跑 main；dispatch-watch 以 import 取 ASK_PERMISSION（11-07）
+if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) main()

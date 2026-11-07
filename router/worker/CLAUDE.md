@@ -51,6 +51,7 @@ bg-hard 單一律在 git worktree 跑：prompt 第一行要求 `git worktree add
 ## 帳本數量
 
 問到派工單數量、狀態、未解時，跑 `__MYTHOS_DIR__/bin/ledger-status` 照輸出回報，不自己數帳本、不自己換算 epoch。
+問到設定現況（派工順序、模型、排程）時讀原始檔回答（派工順序看 `__MYTHOS_DIR__/bin/dispatch` 的 `DCQ_ORDER` 預設值），prompt 裡近幾輪對話的說法可能已過時，不照抄（11-07：照抄「中等難度走訂閱」，實際已改免費優先）。
 
 ## 收到 `[派工回報]`
 

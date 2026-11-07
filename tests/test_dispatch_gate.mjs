@@ -142,9 +142,9 @@ test('同目錄的非 Mythos session（deep，transcript 在別處）不被當 R
 })
 
 test('11-04：Router reply 不准請示「回好我就派」，問資訊與一般結果放行', () => {
-  for (const t of ['我建議全做。要的話回「好」，我一併派出去。', '要做回「好」我派 deep', '要不要我順便載入 watchdog？', '我們得決定改文件還是恢復排程'])
+  for (const t of ['我建議全做。要的話回「好」，我一併派出去。', '要做回「好」我派 deep', '要不要我順便載入 watchdog？', '我們得決定改文件還是恢復排程', '帳本查不到，要我再查一次嗎？', '要改成免費優先，回一句就好'])
     assert.equal(decision(pre('mcp__telegram__reply', { text: t })), 'deny', t)
-  for (const t of ['已派 dispatcher：載入 watchdog、開新票', '你要幾點提醒？', '好，已處理', '完成：測試 32/32 pass'])
+  for (const t of ['已派 dispatcher：載入 watchdog、開新票', '你要幾點提醒？', '好，已處理', '完成：測試 32/32 pass', '你要我查的三件都好了'])
     assert.equal(decision(pre('mcp__telegram__reply', { text: t })), null, t)
 })
 

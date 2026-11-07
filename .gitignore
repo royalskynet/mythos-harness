@@ -63,6 +63,7 @@
 !/tests/test-test-guard.sh
 !/tests/test-dispatch-bg.sh
 !/tests/test_unresolved_failures.sh
+!/tests/test-watch-ask-permission.sh
 !/tests/test-dispatch-bg-watch.sh
 !/tests/test-dispatch-watch-deadline.sh
 !/tests/test-dispatch-gate-bg.sh
