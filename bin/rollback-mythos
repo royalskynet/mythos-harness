@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# WO4 v3 回滾：本體在 bin/cutover-hermes --rollback（停用名單只寫一份）。用法：bin/rollback-mythos [--dry-run]
+set -euo pipefail
+exec "$(cd "$(dirname "$0")" && pwd)/cutover-hermes" --rollback "$@"

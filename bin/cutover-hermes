@@ -1,0 +1,350 @@
+#!/usr/bin/env bash
+# WO4h：Mythos(Claude TUI)→Hermes 切換（補強版）。
+# 用法：bin/cutover-hermes [--dry-run]              切換
+#       bin/cutover-hermes --rollback [--dry-run]   回滾（bin/rollback-mythos 轉呼叫本檔，名單只寫一份）
+# 退出碼：0 成功；1 前置檢查失敗／回滾驗不到；3 有 Claude 背景 worker 在跑／ledger 有未完單；
+#         4 第一個 bootout 之後任何步驟失敗或健康檢查不過（已自動回滾；回滾本身失敗會另外印「需人工」）
+# 可換外部零件（測試用）：LAUNCHCTL_BIN HERMES_BIN CREDS_EXEC_BIN HERMES_PY HERMES_PROFILE_DIR MYTHOS_DIR GATEWAY_WAIT_SEC
+set -euo pipefail
+
+DRY=0; ROLLBACK=0
+for a in "$@"; do
+  case "$a" in
+    --dry-run) DRY=1 ;;
+    --rollback) ROLLBACK=1 ;;
+    *) echo "cutover-hermes: 不認識的參數 ${a}（用法：bin/cutover-hermes [--rollback] [--dry-run]）" >&2; exit 2 ;;
+  esac
+done
+
+MYTHOS_DIR="${MYTHOS_DIR:-~/bots/mythos}"
+HERMES_PROFILE_DIR="${HERMES_PROFILE_DIR:-$HOME/.hermes/profiles/mythos}"
+HERMES_ENV="$HERMES_PROFILE_DIR/.env"
+CONFIG_YAML="$HERMES_PROFILE_DIR/config.yaml"
+GW_LOG="$HERMES_PROFILE_DIR/logs/gateway.log"
+DELIVER_MODE="$MYTHOS_DIR/state/deliver-mode"
+SNAP_DIR="$MYTHOS_DIR/state/cutover-snapshot"
+ACCESS_JSON="${MYTHOS_TG_ACCESS_JSON:-$HOME/.mythos/telegram/access.json}"
+LA_DIR="${CUTOVER_LA_DIR:-$HOME/Library/LaunchAgents}"
+CREDS_EXEC_BIN="${CREDS_EXEC_BIN:-${CREDS_EXEC:-~/dev/agent-tools/creds-exec}}"
+CLAUDE_BIN="${CUTOVER_CLAUDE_BIN:-claude}"
+LEDGER="${MYTHOS_LEDGER:-$MYTHOS_DIR/state/dispatch-jobs.tsv}"
+HERMES_BIN="${HERMES_BIN:-hermes}"
+LAUNCHCTL_BIN="${LAUNCHCTL_BIN:-launchctl}"
+HERMES_PY="${HERMES_PY:-~/.hermes/hermes-agent/venv/bin/python}"
+GATEWAY_WAIT_SEC="${GATEWAY_WAIT_SEC:-60}"
+UID_="$(id -u)"
+GW_LABEL=ai.hermes.gateway
+
+# 分類結果見 state/hermes-cutover-plan.md，名單只寫這一份
+STOP=(ai.mythos.telegram ai.mythos.idle-reset ai.mythos.watchdog)
+KEEP=(ai.mythos.baw-keepalive ai.mythos.dispatch-watch ai.mythos.mem-watch ai.mythos.repo-watch ai.mythos.reminders)
+WORKER_DIRS=("$MYTHOS_DIR/router/worker" "$MYTHOS_DIR/worker")
+
+ARMED=0
+
+log() { printf '[cutover] %s\n' "$*"; }
+say() { if [ "$DRY" = 1 ]; then printf '[dry-run] %s\n' "$*"; else log "$*"; fi; }
+die() { printf 'cutover-hermes: %s\n' "$*" >&2; exit "${2:-1}"; }
+# 真跑模式非 0 就回傳非 0（set -e 讓整支中止，armed 後交給 EXIT trap 回滾）
+run() { local c="$1"; shift; if [ "$DRY" = 1 ]; then say "$c"; else "$@" </dev/null || { log "$c 失敗 rc=$?"; return 1; }; fi; }
+
+lc_loaded() { "$LAUNCHCTL_BIN" print "gui/$UID_/$1" >/dev/null 2>&1 </dev/null; }
+lc_running() {
+  local out
+  out="$("$LAUNCHCTL_BIN" print "gui/$UID_/$1" 2>/dev/null </dev/null)" || return 1
+  printf '%s\n' "$out" | grep -q 'state = running'
+}
+gateway_pid() {
+  "$LAUNCHCTL_BIN" print "gui/$UID_/$GW_LABEL" 2>/dev/null </dev/null | awk '$1 == "pid" && $2 == "=" { print $3; exit }' || true
+}
+log_lines() { if [ -f "$GW_LOG" ]; then wc -l < "$GW_LOG" | tr -d ' '; else echo 0; fi; }
+
+# 讀 dotenv 單鍵（不印值）
+env_get() { [ -f "$1" ] && awk -v k="$2" 'index($0, k "=") == 1 { sub(/\r$/, ""); print substr($0, length(k) + 2); exit }' "$1" || true; }
+# 原子改 dotenv 單鍵；省略 value＝刪鍵。權限 600
+env_put() { # <file> <key> [value]
+  local f="$1" k="$2" v="${3-}" t
+  mkdir -p "$(dirname "$f")"
+  t="$(mktemp "$f.XXXXXX")"
+  if [ -f "$f" ]; then awk -v k="$k" 'index($0, k "=") != 1' "$f" > "$t"; fi   # 別用 a && b > t：條件假就整個命令失敗，set -e 當場退
+  [ $# -ge 3 ] && printf '%s=%s\n' "$k" "$v" >> "$t"
+  chmod 600 "$t"; mv "$t" "$f"
+}
+
+# 平台段照 telegram.md：gateway.platforms.telegram.enabled + extra.allow_from。
+# 用 Hermes venv python＋PyYAML 讀改寫，寫完重新載入驗證；其他鍵保留（註解會丟，原檔在快照）
+render_platform() { # <allow csv>
+  HERMES_CFG="$CONFIG_YAML" HERMES_ALLOW="${1-}" "$HERMES_PY" -c '
+import os, sys, tempfile, yaml
+p = os.environ["HERMES_CFG"]
+allow = [u for u in (os.environ.get("HERMES_ALLOW") or "").split(",") if u]
+if not allow:
+    sys.exit("render_platform: 白名單是空的")
+d = {}
+if os.path.exists(p):
+    d = yaml.safe_load(open(p)) or {}
+if not isinstance(d, dict):
+    sys.exit("render_platform: config.yaml 頂層不是 mapping")
+def sub(m, k):
+    v = m.get(k)
+    if v is None: v = {}; m[k] = v
+    if not isinstance(v, dict): sys.exit("render_platform: %s 不是 mapping" % k)
+    return v
+tg = sub(sub(sub(d, "gateway"), "platforms"), "telegram")
+tg["enabled"] = True
+sub(tg, "extra")["allow_from"] = allow
+os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p) or ".", prefix=".config.yaml.")
+with os.fdopen(fd, "w") as f:
+    yaml.safe_dump(d, f, sort_keys=False, allow_unicode=True, default_flow_style=False)
+if os.path.exists(p): os.chmod(tmp, os.stat(p).st_mode & 0o777)
+os.replace(tmp, p)
+chk = yaml.safe_load(open(p))
+t = chk["gateway"]["platforms"]["telegram"]
+if t.get("enabled") is not True or t["extra"]["allow_from"] != allow:
+    sys.exit("render_platform: 寫完重讀的值不對")
+' </dev/null
+}
+
+creds_precheck() { # 只驗拿得到 token（test -n），不印值
+  "$CREDS_EXEC_BIN" mythos MYTHOS_TG_BOT_TOKEN=TELEGRAM_BOT_TOKEN -- /bin/sh -c 'test -n "${TELEGRAM_BOT_TOKEN:-}"' </dev/null
+}
+
+write_token_from_creds() {
+  # creds-exec 把 MYTHOS_TG_BOT_TOKEN 映射成 TELEGRAM_BOT_TOKEN，同一行程寫進 profile .env，不印值
+  "$CREDS_EXEC_BIN" mythos MYTHOS_TG_BOT_TOKEN=TELEGRAM_BOT_TOKEN -- /bin/bash -c '
+set -eu
+dst="$1"; v="${TELEGRAM_BOT_TOKEN:-}"
+[ -n "$v" ] || { echo "cutover-hermes: creds 沒帶出 TELEGRAM_BOT_TOKEN" >&2; exit 1; }
+mkdir -p "$(dirname "$dst")"
+t="$(mktemp "$dst.XXXXXX")"
+if [ -f "$dst" ]; then awk "index(\$0, \"TELEGRAM_BOT_TOKEN=\") != 1" "$dst" > "$t"; fi
+printf "TELEGRAM_BOT_TOKEN=%s\n" "$v" >> "$t"
+chmod 600 "$t"; mv "$t" "$dst"
+echo "cutover-hermes: TELEGRAM_BOT_TOKEN 已寫入 $(basename "$dst")"
+' _ "$HERMES_ENV" </dev/null
+}
+
+running_mythos_workers() { # 印 running/busy 且 cwd 在 worker 目錄的項；claude 讀不到回 2
+  local js
+  command -v "$CLAUDE_BIN" >/dev/null 2>&1 || return 2
+  # 從 Claude session 內叫 claude 會被當巢狀、印警告不轉發 → 去掉入口變數
+  js="$(env -u CLAUDE_CODE_ENTRYPOINT -u CLAUDECODE -u CLAUDE_CODE_SSE_PORT "$CLAUDE_BIN" agents --json </dev/null 2>/dev/null)" || return 2
+  printf '%s' "$js" | python3 -c '
+import json, sys
+data = sys.stdin.read() or "[]"
+try: items = json.loads(data)
+except Exception: sys.exit(2)
+for d in sys.argv[1:]:
+    d = d.rstrip("/")
+    for a in items if isinstance(items, list) else []:
+        if a.get("status") not in ("running", "busy"): continue
+        c = str(a.get("cwd") or "")
+        if c == d or c.startswith(d + "/"):
+            print("%s %s" % (a.get("pid", "?"), c))
+' "${WORKER_DIRS[@]}"
+}
+
+open_ledger_jobs() { # doing／queued 單的 job_id
+  [ -f "$LEDGER" ] || return 0
+  awk -F'\t' 'NR > 1 && ($0 ~ /(^|\t)(doing|queued)(\t|$)/) { print $1 }' "$LEDGER"
+}
+
+# ---- 快照（只落檔、權限 600；已完成的快照保留，記最初狀態） ----
+file_mode() { stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1"; }
+snap_file() { # <name> <path>
+  if [ -f "$2" ]; then
+    : > "$SNAP_DIR/$1.present"
+    cp "$2" "$SNAP_DIR/$1.orig"
+    file_mode "$2" > "$SNAP_DIR/$1.mode"
+    chmod 600 "$SNAP_DIR/$1.orig"
+  else
+    : > "$SNAP_DIR/$1.absent"
+  fi
+}
+snapshot_take() {
+  local l rc old_umask
+  if [ -f "$SNAP_DIR/complete" ]; then log "快照已存在，保留原快照：$SNAP_DIR"; return 0; fi
+  old_umask="$(umask)"; umask 077
+  rm -rf "$SNAP_DIR"; mkdir -p "$SNAP_DIR"
+  snap_file env "$HERMES_ENV"
+  snap_file config "$CONFIG_YAML"
+  snap_file deliver "$DELIVER_MODE"
+  for l in "${STOP[@]}"; do
+    if lc_loaded "$l"; then rc=0; else rc=1; fi
+    printf '%s\n' "$rc" > "$SNAP_DIR/label.$l"
+  done
+  : > "$SNAP_DIR/complete"
+  chmod -R go-rwx "$SNAP_DIR"
+  umask "$old_umask"
+  log "已建快照：$SNAP_DIR"
+}
+snap_restore_file() { # <name> <path>
+  local n="$1" dst="$2" t m
+  if [ -f "$SNAP_DIR/$n.present" ]; then
+    mkdir -p "$(dirname "$dst")"
+    t="$(mktemp "$dst.XXXXXX")" || return 1
+    cp "$SNAP_DIR/$n.orig" "$t" || return 1
+    m="$(cat "$SNAP_DIR/$n.mode" 2>/dev/null || echo 600)"
+    chmod "$m" "$t" && mv "$t" "$dst" || return 1
+  else
+    rm -f "$dst"
+  fi
+}
+
+# ---- 等 gateway：新 PID ≠ 舊 PID；need_connect=1 時另要新增 log 行出現 Connected，出現 Conflict 直接失敗 ----
+wait_gateway() { # <old_pid> <first_new_line> <need_connect 0|1>
+  local old="$1" first="$2" need="$3" deadline pid new connected=0
+  deadline=$(( $(date +%s) + GATEWAY_WAIT_SEC ))
+  while :; do
+    pid="$(gateway_pid)"
+    if [ "$need" = 1 ]; then
+      new="$(tail -n "+$first" "$GW_LOG" 2>/dev/null || true)"
+      if printf '%s\n' "$new" | grep -q 'Conflict'; then log "gateway log 新增行出現 Conflict（Telegram 409）"; return 1; fi
+      if printf '%s\n' "$new" | grep -q 'Connected to Telegram (polling mode)'; then connected=1; fi
+    fi
+    if [ -n "$pid" ] && [ "$pid" != "$old" ] && { [ "$need" != 1 ] || [ "$connected" = 1 ]; }; then
+      log "gateway 重啟驗證通過 pid=${old:-none}->$pid connected=$connected"
+      return 0
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then break; fi
+    sleep 1
+  done
+  log "gateway 重啟驗證失敗 pid=${old:-none}->${pid:-none} connected=${connected}（${GATEWAY_WAIT_SEC}s）"
+  return 1
+}
+
+wait_unloaded() { # <label> 最多 10 秒等 launchctl print 失敗
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    lc_loaded "$1" || return 0
+    sleep 1
+  done
+  return 1
+}
+
+do_cutover() {
+  local busy open l allow old_pid first
+  # ---- 前置檢查（全部過了才停舊服務）----
+  busy="$(running_mythos_workers)" || die "claude agents --json 讀不到，不敢切" 1
+  if [ -n "$busy" ]; then
+    printf 'cutover-hermes: 還有 Claude 背景 worker 在跑，先等它結束：\n%s\n' "$busy" >&2; return 3
+  fi
+  open="$(open_ledger_jobs)"
+  if [ -n "$open" ]; then
+    printf 'cutover-hermes: ledger 還有未完單，不切：\n%s\n' "$open" >&2; return 3
+  fi
+  # 白名單讀 access.json 的 allowFrom 轉 sender id（純數字，非憑證）
+  allow="$(python3 -c 'import json,sys; print(",".join(str(x) for x in json.load(open(sys.argv[1])).get("allowFrom") or []))' "$ACCESS_JSON")" \
+    || die "讀不到或解析不了 $ACCESS_JSON" 1
+  [ -n "$allow" ] || die "access.json 白名單是空的，不啟用 telegram" 1
+  "$HERMES_PY" -c 'import yaml' </dev/null >/dev/null 2>&1 || die "Hermes venv 不能 import yaml（HERMES_PY=${HERMES_PY}）" 1
+  if [ "$DRY" != 1 ]; then
+    creds_precheck || die "creds-exec 拿不到 mythos token（只驗非空），不切" 1
+    for l in "${STOP[@]}"; do
+      if lc_loaded "$l" && [ ! -f "$LA_DIR/$l.plist" ]; then die "$l 已載入但找不到 $LA_DIR/$l.plist，回滾 bootstrap 不了，不切" 1; fi
+    done
+  fi
+
+  if [ "$DRY" = 1 ]; then
+    for l in "${STOP[@]}"; do say "launchctl bootout gui/$UID_/$l"; done
+    say "（bootout ai.mythos.telegram 後確認 launchctl print 已失敗才往下；保留 ${KEEP[*]}）"
+    say "快照 ${SNAP_DIR}（dotenv、config.yaml、deliver-mode 存在與否＋原內容；STOP 名單切換前載入狀態）"
+    say "creds-exec mythos MYTHOS_TG_BOT_TOKEN=TELEGRAM_BOT_TOKEN -- <寫 $HERMES_ENV 的 TELEGRAM_BOT_TOKEN（不印值）>"
+    say "寫 dotenv TELEGRAM_ALLOWED_USERS 與 allow_from；allow=${allow}；src=${ACCESS_JSON}"
+    say "render ${CONFIG_YAML}：gateway.platforms.telegram.enabled=true、extra.allow_from 同上"
+    say "寫 $DELIVER_MODE = hermes"
+    say "hermes gateway restart"
+    say "${GATEWAY_WAIT_SEC} 秒內 gateway 新 PID 且 $GW_LOG 新增行出現 Connected to Telegram (polling mode)（出現 Conflict 即失敗），否則自動回滾，exit 4"
+    return 0
+  fi
+
+  snapshot_take
+  # ---- 從這裡起任何失敗都自動回滾（EXIT trap）----
+  ARMED=1
+  # telegram 第一（同 token 只能一個 getUpdates 消費者，Telegram 409）；之後確認 launchctl print 已失敗
+  for l in "${STOP[@]}"; do
+    if lc_loaded "$l"; then
+      "$LAUNCHCTL_BIN" bootout "gui/$UID_/$l" </dev/null || log "bootout $l 回非 0，改看 print 是否已卸載"
+    fi
+    wait_unloaded "$l" || die "bootout 後 $l 仍然載入，中止" 1
+    log "已停 $l"
+  done
+  write_token_from_creds
+  env_put "$HERMES_ENV" TELEGRAM_ALLOWED_USERS "$allow"
+  if [ -f "$CONFIG_YAML" ] && [ ! -e "$CONFIG_YAML.bak-cutover" ]; then cp -p "$CONFIG_YAML" "$CONFIG_YAML.bak-cutover"; fi
+  render_platform "$allow"
+  mkdir -p "$MYTHOS_DIR/state"
+  printf 'hermes\n' > "$DELIVER_MODE"
+  # ---- 重啟＋真健康檢查 ----
+  old_pid="$(gateway_pid)"
+  first=$(( $(log_lines) + 1 ))
+  run "hermes gateway restart" "$HERMES_BIN" gateway restart
+  if ! wait_gateway "$old_pid" "$first" 1; then
+    printf 'cutover-hermes: gateway 健康檢查不過，自動回滾\n' >&2
+    return 4
+  fi
+  ARMED=0
+  log "完成：gateway 新 PID 且 Connected to Telegram，Telegram 已交給 Hermes"
+}
+
+do_rollback() {
+  local l old_pid first
+  if [ "$DRY" = 1 ]; then
+    say "照快照 $SNAP_DIR 還原 ${HERMES_ENV}、${CONFIG_YAML}、${DELIVER_MODE}（原本存在→複製回去；原本不存在→刪除）"
+    say "hermes gateway restart，等新 PID"
+    for l in "${STOP[@]}"; do say "launchctl bootstrap gui/$UID_ $LA_DIR/$l.plist（只在切換前是載入狀態時）"; done
+    say "驗 ai.mythos.telegram state = running"
+    return 0
+  fi
+  [ -f "$SNAP_DIR/complete" ] || { printf 'cutover-hermes: 沒有完整快照 %s，無法精確回滾\n' "$SNAP_DIR" >&2; return 1; }
+  snap_restore_file env "$HERMES_ENV" || { echo "cutover-hermes: 還原 dotenv 失敗" >&2; return 1; }
+  snap_restore_file config "$CONFIG_YAML" || { echo "cutover-hermes: 還原 config.yaml 失敗" >&2; return 1; }
+  snap_restore_file deliver "$DELIVER_MODE" || { echo "cutover-hermes: 還原 deliver-mode 失敗" >&2; return 1; }
+  log "設定已照快照還原"
+  # 先讓 gateway 放掉 telegram polling，才把舊 poller 拉起來（避免 409）
+  old_pid="$(gateway_pid)"
+  first=$(( $(log_lines) + 1 ))
+  "$HERMES_BIN" gateway restart </dev/null || { echo "cutover-hermes: 回滾時 hermes gateway restart 失敗" >&2; return 1; }
+  wait_gateway "$old_pid" "$first" 0 || { echo "cutover-hermes: 回滾時等不到 gateway 新 PID" >&2; return 1; }
+  for l in "${STOP[@]}"; do
+    if [ "$(cat "$SNAP_DIR/label.$l" 2>/dev/null || echo 1)" = 0 ]; then
+      if lc_loaded "$l"; then
+        log "$l 已載入，不重複 bootstrap"
+      else
+        "$LAUNCHCTL_BIN" bootstrap "gui/$UID_" "$LA_DIR/$l.plist" </dev/null || { echo "cutover-hermes: bootstrap $l 失敗" >&2; return 1; }
+        log "已 bootstrap $l"
+      fi
+    else
+      log "$l 切換前就沒載入，不 bootstrap"
+    fi
+  done
+  if [ "$(cat "$SNAP_DIR/label.ai.mythos.telegram" 2>/dev/null || echo 1)" = 0 ]; then
+    local i ok=0
+    for i in $(seq 1 "$GATEWAY_WAIT_SEC"); do
+      if lc_running ai.mythos.telegram; then ok=1; break; fi
+      sleep 1
+    done
+    [ "$ok" = 1 ] || { echo "cutover-hermes: 回滾後 ai.mythos.telegram 沒有 state = running，需人工" >&2; return 1; }
+    log "回滾完成（ai.mythos.telegram state = running）"
+  else
+    log "回滾完成（ai.mythos.telegram 切換前未載入，略過 running 驗證）"
+  fi
+}
+
+on_exit() {
+  local rc=$?
+  trap - EXIT
+  if [ "$ARMED" = 1 ] && [ "$rc" != 0 ]; then
+    ARMED=0
+    set +e
+    printf 'cutover-hermes: 切換中途失敗（rc=%s），自動回滾\n' "$rc" >&2
+    if ! do_rollback; then printf 'cutover-hermes: 自動回滾也失敗，需人工\n' >&2; fi
+    exit 4
+  fi
+  exit "$rc"
+}
+trap on_exit EXIT
+trap 'exit 143' INT TERM
+
+if [ "$ROLLBACK" = 1 ]; then do_rollback; else do_cutover; fi

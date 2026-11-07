@@ -39,7 +39,8 @@ for m in $models; do
   [ "$rc" = 0 ] && exit 0
   if [ -n "$clean_start" ]; then
     stash_msg="hard-head $m 失敗"
-    git -C "$cwd" stash push -u -q -m "$stash_msg" 9>&- || echo "hard-head: stash 失敗（$m）" >&2
+    # stash 失敗就停：髒樹上換下一隻模型會疊在半成品上；exit 1 交 watch 走 O 預設鏈
+    git -C "$cwd" stash push -u -q -m "$stash_msg" 9>&- || { echo "hard-head: stash 失敗（${m}），停止換模型" >&2; exit 1; }
   fi
   set -f
 done

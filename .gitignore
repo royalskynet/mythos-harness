@@ -39,6 +39,8 @@
 !/bin/tg-progress.mjs
 !/bin/opus-plan
 !/bin/hard-head
+!/bin/cutover-hermes
+!/bin/rollback-mythos
 !/bin/ctx-guard
 /tests/*
 !/tests/test-tg-send.sh
@@ -63,6 +65,8 @@
 !/tests/test-opus-plan.sh
 !/tests/test-dispatch-bg-hermes.sh
 !/tests/test-dispatch-hard-head.sh
+!/tests/test-cutover-dryrun.sh
+!/tests/test-cutover-real-sandbox.sh
 !/tests/test-claude-mem-hermes-limits.sh
 !/tests/test-knob-timing.sh
 !/tests/test-latency-report.sh
