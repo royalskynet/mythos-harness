@@ -151,6 +151,12 @@ function lastChannelText(transcriptPath) {
   return ''
 }
 
+function requestEnv(tp) {
+  const tag = /<channel\b[^>]*>/.exec(lastChannelText(tp))?.[0] || ''
+  const chat = /\bchat_id="(-?\d+)"/.exec(tag)?.[1], mid = /\bmessage_id="(\d+)"/.exec(tag)?.[1]
+  return chat && mid ? `MYTHOS_REQUEST_ID='tg:${chat}:${mid}' ` : ''
+}
+
 // 子代理的 payload.transcript_path 是主 session 的檔，自己的在 <session>/subagents/agent-<id>.jsonl
 function selfTranscript(payload) {
   const tp = payload.transcript_path
@@ -274,14 +280,17 @@ function pre(payload) {
     if (input.subagent_type !== 'dispatcher') deny(`主 session 只派 dispatcher，不派 ${input.subagent_type || '(未指定)'}`)
     allowWith(input, { model: 'haiku', run_in_background: true })
   }
-  if (tool === 'Bash' && routerBgBash(input.command)) allow()
+  if (tool === 'Bash' && routerBgBash(input.command)) {
+    if (requestEnv(tp)) allowWith(input, { command: requestEnv(tp) + input.command })
+    allow()
+  }
   const cmd = String(input.command ?? '')
   if (tool === 'Bash' && ROUTER_FROM_CHAT.test(cmd)) {
     if (!tp || /['\n\r]/.test(tp)) deny('from-chat 沒有可用的 transcript 路徑')
-    allowWith(input, { command: `${cmd} --transcript '${tp}'`, run_in_background: true })  // 啟動 worker 要數秒，Router 不等；exit 非 0 會以背景完成通知回來
+    allowWith(input, { command: `${requestEnv(tp)}${cmd} --transcript '${tp}'`, run_in_background: true })  // 啟動 worker 要數秒，Router 不等；exit 非 0 會以背景完成通知回來
   }
-  if (tool === 'Bash' && ROUTER_QUICK.test(cmd)) allowWith(input, { command: cmd.replace(/^bin\/quick (--push )?/, 'bin/quick --push '), run_in_background: true })
-  if (tool === 'Bash' && ROUTER_RECALL.test(cmd)) allowWith(input, { run_in_background: true })
+  if (tool === 'Bash' && ROUTER_QUICK.test(cmd)) allowWith(input, { command: requestEnv(tp) + cmd.replace(/^bin\/quick (--push )?/, 'bin/quick --push '), run_in_background: true })
+  if (tool === 'Bash' && ROUTER_RECALL.test(cmd)) allowWith(input, { ...(requestEnv(tp) ? { command: requestEnv(tp) + cmd } : {}), run_in_background: true })
   if (tool === 'Bash' && ROUTER_RECALL_DETAIL.test(cmd)) allow()
   if (tool === 'Bash' && RECALL_BARE.test(cmd)) deny('recall 缺 --ask', "記憶查詢改背景直送：用 bin/recall '<關鍵字>' --ask '<使用者原問題>'，結果會用秘書口吻直接送給使用者；你這回合不用等，也不用 reply 收到。")
   if (tool === 'Write' && routerBgWrite(input.file_path)) allow()

@@ -70,3 +70,17 @@ jobs:
         timeout-minutes: 4
       - run: node --test tests/test_chat_prompt.mjs
         timeout-minutes: 4
+      - run: bash tests/test-quick-readonly.sh
+        timeout-minutes: 4
+      - run: bash tests/test-quick-sensitive.sh
+        timeout-minutes: 4
+      - run: bash tests/test-quick-config.sh
+        timeout-minutes: 2
+      - run: bash tests/test-bg-mailbox.sh
+        timeout-minutes: 4
+      - run: bash tests/test-autoheal-intent.sh
+        timeout-minutes: 4
+      - run: bash tests/test-request-id.sh
+        timeout-minutes: 4
+      - run: bash tests/test-compact-lock.sh
+        timeout-minutes: 4

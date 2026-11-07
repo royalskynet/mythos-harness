@@ -4,6 +4,8 @@ set -u
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 G="${CTX_GUARD_BIN:-$HERE/bin/ctx-guard}"  # 突變測試指向副本，不改現役檔
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
+TMP="$T"
+. "$(dirname "$0")/lib-test-guard.sh" "$TMP"
 fail=0
 ok() { echo "PASS $1"; }
 bad() { echo "FAIL $1"; fail=1; }
@@ -41,15 +43,26 @@ n1="$(wc -l < "$T/log")"; "$G" scan; [ "$(wc -l < "$T/log")" = "$n1" ] && ok "�
 # Router 超限：stub tmux 記錄送鍵（pane 閒置）
 cat > "$T/bin/tmux" <<S
 #!/bin/sh
-case "\$*" in *capture-pane*) echo idle ;; *) echo "\$*" >> $T/tmux.calls ;; esac
+case "\$*" in *capture-pane*) echo '❯' ;; *) echo "\$*" >> $T/tmux.calls ;; esac
 S
 chmod +x "$T/bin/tmux"; export CTX_TMUX_BIN="$T/bin/tmux"
+# 同一測試有多輪獨立 transcript fixture；上一輪的 compact 先明確完成。
+finish_compact() {
+  python3 - <<'PYDONE'
+import json, os
+f=os.path.join(os.environ['MYTHOS_DIR'], 'state', 'router-compact.lock')
+if os.path.exists(f):
+    lk=json.load(open(f))
+    with open(lk['transcript'], 'a') as out: out.write('{"type":"system","subtype":"compact_boundary"}\n')
+PYDONE
+}
 mk "$R/eeeeeeee-0000.jsonl" 4 2000 210000
 "$G" scan
 grep -q -- '-l /compact' "$T/tmux.calls" 2>/dev/null && ok "Router 超限送 /compact" || bad "Router 沒送 compact"
 c1="$(wc -l < "$T/tmux.calls")"; "$G" scan; [ "$(wc -l < "$T/tmux.calls")" = "$c1" ] && ok "冷卻內不重送" || bad "重複送 compact"
 
 # 閒置提早壓縮（11-07）：Router 最新 session 150K、pane 閒、10 分鐘沒動 → 送 /compact；剛動過、或不是最新那個 → 不送
+finish_compact
 R2="$T/proj/-r2"; mkdir -p "$R2"; : > "$T/tmux.calls"
 mk "$R2/ffffffff-0000.jsonl" 4 2000 148000; touch -t "$(date -v-10M +%Y%m%d%H%M)" "$R2/ffffffff-0000.jsonl"
 mk "$R2/99999999-0000.jsonl" 4 2000 160000; touch -t "$(date -v-30M +%Y%m%d%H%M)" "$R2/99999999-0000.jsonl"

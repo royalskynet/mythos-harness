@@ -222,11 +222,11 @@ bg_autoheal() { # id eid thread task extra kind(FAIL|STALL)
   [ "$BG_AUTOHEAL" = 1 ] || return 1
   mkdir -p "$(dirname "$WATCH_LOG")" 2>/dev/null
   case "$th" in ''|-|*[!A-Za-z0-9-]*) return 1 ;; esac
-  if [ "$kind" = STALL ]; then
-    MYTHOS_DIR="$MYTHOS_DIR" bash "$DISPATCH_CANCEL_BIN" "$id" 9>&- >/dev/null 2>>"$WATCH_LOG" || return 1
-  fi
   case "${task##*/}" in
     *-autoretry-*)
+      if [ "$kind" = STALL ]; then
+        MYTHOS_DIR="$MYTHOS_DIR" bash "$DISPATCH_CANCEL_BIN" "$id" 9>&- >/dev/null 2>>"$WATCH_LOG" || return 1
+      fi
       text="$(printf '這件事做到一半%s，自動重試一次也沒成功。狀況：%s\n' "$([ "$kind" = STALL ] && echo 卡住了 || echo 停了)" "$extra" | brief_text fail "$task")"
       [ -n "$(printf '%s' "$text" | tr -d '[:space:]')" ] || text="這件事自動重試一次還是沒做完：${extra}。要再試或換做法，回這則跟我說。"
       printf '%s\n' "$text" | MYTHOS_DIR="$MYTHOS_DIR" "${NODE_BIN:-node}" "$TG_SEND_BIN" --thread "$th" --job "$id" 9>&- >/dev/null 2>>"$WATCH_LOG"
@@ -239,15 +239,40 @@ bg_autoheal() { # id eid thread task extra kind(FAIL|STALL)
       esac
       return 0 ;;
   esac
-  p="$MYTHOS_DIR/state/bg/$th-autoretry-$now.md"
-  { printf '上一位 worker 中途%s（%s）。接續原任務做完：先檢查已完成的部分再沿用，不要整個重做。\n\n' \
-      "$([ "$kind" = STALL ] && echo 卡住被停掉 || echo 停止)" "$extra"
-    if [ -f "$task" ]; then cat "$task"; else printf '%s\n' "$task"; fi; } > "$p" 2>/dev/null || return 1
-  MYTHOS_DIR="$MYTHOS_DIR" bash "$DISPATCH_BG_BIN" "$th" "$p" 9>&- >/dev/null 2>>"$WATCH_LOG" || { log "autoheal 重派失敗 $eid"; return 1; }
-  ledger_events set "$EVENTS_FILE" "$eid" "{\"direct\":\"retried\",\"acked_at\":$now}" >/dev/null
+  local intent="$MYTHOS_DIR/state/bg/autoheal/$eid.json"
+  mkdir -p "$(dirname "$intent")" || return 1
+  if [ -f "$intent" ]; then
+    p="$(jq -r .prompt "$intent")" || return 1
+  else
+    p="$MYTHOS_DIR/state/bg/$th-autoretry-$now-${id#bg-}.md"
+    { printf '上一位 worker 中途%s（%s）。接續原任務做完：先檢查已完成的部分再沿用，不要整個重做。\n\n' \
+        "$([ "$kind" = STALL ] && echo 卡住被停掉 || echo 停止)" "$extra"
+      if [ -f "$task" ]; then cat "$task"; else printf '%s\n' "$task"; fi; } > "$p" 2>/dev/null || return 1
+    jq -cn --arg id "$id" --arg eid "$eid" --arg th "$th" --arg task "$task" --arg extra "$extra" --arg kind "$kind" --arg p "$p" \
+      '{id:$id,eid:$eid,thread:$th,task:$task,extra:$extra,kind:$kind,prompt:$p}' > "$intent.tmp" && mv "$intent.tmp" "$intent" || return 1
+  fi
+  ledger_events set "$EVENTS_FILE" "$eid" '{"direct":"retrying"}' >/dev/null || return 1
+  # intent 與穩定 prompt 都先落地；dispatch-bg 在鎖內查同 prompt，登錄後中斷也不會重開。
+  if ! awk -F'\t' -v p="$p" '$3==p && ($8=="bg" || $8=="bg-hard") {f=1} END{exit !f}' "$TSV"; then
+    # 恢復已登錄的 intent 不再 cancel，避免停到沿用同 session 的新 worker。
+    if [ "$kind" = STALL ] && [ "$(awk -F'\t' -v id="$id" '$1==id {print $5;exit}' "$TSV")" = pending ]; then
+      MYTHOS_DIR="$MYTHOS_DIR" bash "$DISPATCH_CANCEL_BIN" "$id" 9>&- >/dev/null 2>>"$WATCH_LOG" || return 1
+    fi
+    DISPATCH_BG_EID="$eid" MYTHOS_DIR="$MYTHOS_DIR" bash "$DISPATCH_BG_BIN" "$th" "$p" 9>&- >/dev/null 2>>"$WATCH_LOG" || { log "autoheal 重派失敗 $eid"; return 1; }
+  fi
+  ledger_events set "$EVENTS_FILE" "$eid" "{\"direct\":\"retried\",\"acked_at\":$now}" >/dev/null || return 1
+  rm -f "$intent"
   log "autoheal 已重派 $eid → ${p##*/}"
   return 0
 }
+
+# 上輪中斷的重派先收尾；eid、prompt 以 intent 為準，不靠 add_event 回 new。
+for intent in "$MYTHOS_DIR"/state/bg/autoheal/*.json; do
+  [ -f "$intent" ] || continue
+  while IFS=$'\t' read -r ai ae ath at ax ak; do
+    bg_autoheal "$ai" "$ae" "$ath" "$at" "$ax" "$ak" || true
+  done < <(jq -r '[.id,.eid,.thread,.task,.extra,.kind] | @tsv' "$intent")
+done
 
 # 0) 同 repo 佇列（C3）：持鎖把 queued 依 epoch 由舊到新拉起。同一個 top 已有 pending、未寫 rc 的 deep 票就跳過，
 #    每個 top 這輪最多啟一張；啟動跟 bin/dispatch 同一條（DISPATCH_DEEP_RUN_BIN 可換）。
@@ -302,7 +327,7 @@ if [ "$bg_pending" = 1 ]; then
   elif command -v gtimeout >/dev/null 2>&1; then TO=(gtimeout -k 5 20)
   else TO=()
   fi
-  AGENTS_JSON="$("${TO[@]}" "${CLAUDE_BIN:-claude}" agents --json --all </dev/null 9>&- 2>/dev/null)" || AGENTS_JSON=''
+  AGENTS_JSON="$(${TO[@]+"${TO[@]}"} "${CLAUDE_BIN:-claude}" agents --json --all </dev/null 9>&- 2>/dev/null)" || AGENTS_JSON=''
 
   printf '%s' "$AGENTS_JSON" | "$NODE_BIN" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{if(Array.isArray(JSON.parse(s)))process.exit(0)}catch{}process.exit(1)})' 9>&- 2>/dev/null || AGENTS_JSON=''
 fi
@@ -428,6 +453,47 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
       ;;
   esac
 done < <(ledger_fields < "$TSV")
+
+# 同 thread 只派一個信箱批次。先把本輪訊息移到 .batch，新的 incoming 留給下輪；中斷後重用同 prompt。
+for mb in "$MYTHOS_DIR"/state/mailbox/*; do
+  [ -d "$mb" ] || continue
+  th="${mb##*/}"
+  case "$th" in ''|*[!A-Za-z0-9-]*) continue ;; esac
+  ledger_lock || continue
+  active="$(awk -F'\t' -v th="$th" '$7==th && ($8=="bg" || $8=="bg-hard") {id=$1; st=$5} END{if(st=="pending") print id}' "$TSV")"
+  if [ -n "$active" ] && ! jq -e --arg id "$active" 'select(.job_id==$id and (.status=="PASS" or .status=="FAIL" or .status=="TIMEOUT"))' "$EVENTS_FILE" >/dev/null 2>&1; then
+    ledger_unlock; continue
+  fi
+  batch="$mb/.batch"
+  mkdir -p "$batch" || { ledger_unlock; continue; }
+  # 已存在的批次不混入新訊息；先前只移了一半就中斷，也仍保留所有檔。
+  if [ ! -f "$batch/prompt-path" ]; then
+    for msg in "$mb"/*.md; do [ -f "$msg" ] && mv "$msg" "$batch/"; done
+    files=("$batch"/*.md)
+    if [ ! -f "${files[0]}" ]; then ledger_unlock; continue; fi
+    p="$(mktemp "$MYTHOS_DIR/state/bg/$th-mailbox-XXXXXX")" || { ledger_unlock; continue; }
+    printf '%s\n' "$p" > "$batch/prompt-path.tmp" && mv "$batch/prompt-path.tmp" "$batch/prompt-path" || { ledger_unlock; continue; }
+  fi
+  p="$(cat "$batch/prompt-path")"
+  if [ ! -s "$p" ]; then
+    { printf 'thread=%s\n使用者在上個 worker 執行時補充，請接續處理：\n' "$th"
+      for msg in "$batch"/*.md; do [ -f "$msg" ] && { cat "$msg"; printf '\n'; }; done
+    } > "$p.tmp" && mv "$p.tmp" "$p" || { ledger_unlock; continue; }
+  fi
+  next_args=(--thread "$th")
+  last_backend="$(awk -F'\t' -v th="$th" '$7==th && ($8=="bg" || $8=="bg-hard") {b=$8} END{print b}' "$TSV")"
+  if [ "$last_backend" = bg-hard ]; then
+    last_cwd="$(awk -F'\t' -v th="$th" '$7==th && $8=="bg-hard" {c=$6} END{print c}' "$TSV")"
+    next_args=(--hard --cwd "$last_cwd" --thread "$th")
+  fi
+  ledger_unlock
+  if DISPATCH_BG_EID="${p##*/}" MYTHOS_DIR="$MYTHOS_DIR" bash "$DISPATCH_BG_BIN" "${next_args[@]}" "$p" 9>&- >/dev/null 2>>"$WATCH_LOG"; then
+    ledger_lock || continue
+    rm -rf "$batch"
+    ledger_unlock
+    log "mailbox 已續派 $th"
+  fi
+done
 
 # F8：升級只改被拉起的列（補成 8 欄、OFS 用 tab），其餘原樣寫回；抽成函式給 tests/test-repo-queue.sh 做突變。
 # F5：同時把第 4 欄 epoch 改成當下，排隊時間不算進執行時間（watchdog 6 小時、REVIEW 30 分鐘、handoff 都看它）。
@@ -720,7 +786,7 @@ pending_events() {
   # 已取消的票不投遞：ledger 標 cancelled 的 job、cancel 時標 cancelled:true 的事件都排除
   cancelled="$(jq -Rr 'split("\t") | select(.[4]=="cancelled") | .[0]' "$TSV" 2>/dev/null | jq -R . | jq -sc . || echo '[]')"
   jq -rc --argjson now "$now" --argjson resend "$RESEND_SEC" --argjson max "$MAX_TRIES" --argjson cxl "$cancelled" '
-    select(.acked_at == null and .tries < $max and .cancelled != true and .direct != "sending")
+    select(.acked_at == null and .tries < $max and .cancelled != true and .direct != "sending" and .direct != "retrying")
     | select(.job_id as $j | ($cxl | index($j)) == null)
     | select(.delivered_at == null or ($now - .delivered_at) >= $resend)
     | [.event_id, .job_id, .status, .summary, .extra, .guide] | @tsv' "$EVENTS_FILE"

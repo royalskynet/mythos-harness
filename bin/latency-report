@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 回覆延遲量測（C2）：Telegram 訊息進來，到 Router 第一次 mcp__telegram__reply 的時間差。零 token、只讀。
-#   bin/latency-report [--days N] [--json] [--max-detail] [--stages]
+#   bin/latency-report [--days N] [--json] [--max-detail] [--stages] [--by-id]
 # 樣本：type=user 且 content 是字串、含 `<channel source="telegram"` 的行；
 # 終點：`mcp__telegram__reply` 的 tool_use id 對到、is_error 不為 true 的 tool_result（失敗的 reply 不消帳）。
 # 每個 transcript 檔各自配對（檔與檔之間不互相消帳）；同檔連發的多則使用者訊息併成一筆，起點取第一則。
@@ -19,6 +19,7 @@ days=7
 json=0
 detail=0
 stages=0
+by_id=0
 merge_sec="${LATENCY_MERGE_SEC:-300}"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -28,7 +29,8 @@ while [ $# -gt 0 ]; do
     --json) json=1; shift ;;
     --max-detail) detail=1; shift ;;
     --stages) stages=1; shift ;;
-    *) echo "用法：bin/latency-report [--days N] [--json] [--max-detail] [--stages]" >&2; exit 2 ;;
+    --by-id) by_id=1; shift ;;
+    *) echo "用法：bin/latency-report [--days N] [--json] [--max-detail] [--stages] [--by-id]" >&2; exit 2 ;;
   esac
 done
 case "$days" in ''|*[!0-9]*|0) echo "--days 要是正整數：$days" >&2; exit 2 ;; esac
@@ -37,6 +39,17 @@ case "$merge_sec" in ''|*[!0-9]*) echo "LATENCY_MERGE_SEC 要是非負整數：$
 # 目錄不寫死使用者名：~/bots/mythos 的 transcript 目錄＝路徑把非英數字換成 -
 user="$(basename "$HOME")"
 dir="${MYTHOS_TRANSCRIPT_DIR:-$HOME/.claude/projects/$(printf '%s' "$(cd "$(dirname "$0")/.." && pwd)" | sed 's/[^A-Za-z0-9]/-/g')}"
+if [ "$by_id" = 1 ]; then
+  root="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+  ids="$("${NODE_BIN:-node}" "$(cd "$(dirname "$0")" && pwd)/lib-request.mjs" report "$root" "$days")" || exit 1
+  if [ "$json" = 1 ]; then printf '%s\n' "$ids"
+  else
+    printf 'request_id\tack_s\tanswer_s\tcompletion_s\tqueue_s\tstart_s\n'
+    printf '%s\n' "$ids" | jq -r '.[] | [.request_id, .ack_s, .answer_s, .completion_s, .queue_s, .start_s] | map(if .==null then "-" else . end) | @tsv'
+  fi
+  exit 0
+fi
+
 [ -d "$dir" ] || { echo "找不到 transcript 目錄：$dir" >&2; exit 1; }
 
 # ponytail: node 一次載入所有近 N 天的 jsonl；單機 transcript 量級沒問題，再多就改成逐檔流式（已被 node 的 readline 逐行處理）

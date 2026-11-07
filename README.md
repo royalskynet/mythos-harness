@@ -148,6 +148,22 @@ MYTHOS_E2E=1 bash tests/test-dispatch-bg-e2e.sh   # 真 claude --bg（haiku）�
   - **E**：延遲分段（`--stages`）；bg 單的 PASS 由 `bin/tg-send` 直發給使用者，至多一次（`direct`＝sending／sent／failed／unknown，結果不明不重送、改寫告警）；使用者回覆直發訊息時，proxy 加上 `[回覆 bg thread=… job=…]` 交 Router 判斷要不要續派。派工前先做規格審查（11 條，accept 10），之後第 12–13 輪 high 1 → 0。
   - 多對多訂閱表＋fan-out 裁定不做：只有一個使用者、一個 Router。
 - **11-07 省 token 審計**（Codex，主題：少花非免費模型、Router 永遠能聊天）：初判不通過。主 session 逐條裁決後修補：子代理一律 haiku、worker 預設 haiku、hard 改派 O、`brief-answer` 免費先＋去識別、免費模型改由 `bin/free-models` 動態取得、送出結果不明不重複轉述、telegram proxy 的 RPC 不再被頻道佇列卡住、`--from-chat` 參數解析、Router 開場注入只留必要段落（約 6.7KB → 2.3KB）。不採納：mid 預設改免費（訂閱是使用者選的品質換成本，可設 `DISPATCH_MID_ORDER=free`）。
+- **11-07 審計六項修補**（尚未部署）：
+  - `quick` 在 macOS 以 `/usr/bin/sandbox-exec` 事前 deny `file-write*`，只放行 OpenCode 的 XDG 資料／快取子目錄、`$TMPDIR` 與 `/dev/null`；cwd 一般檔仍禁止寫入（OpenCode 自身資料／快取例外）。保留事後 JSON 稽核。Linux／CI 沒有該工具時 stderr 警告降級；有工具卻套用失敗就停止，不會無聲退回。
+  - 同 profile 禁讀 `$HOME/.creds`、`.ssh`、`.aws`、`.gnupg` 與任何 `.env*` 路徑。`QUICK_DENY_READ=/path/a:/path/b` 可追加；cwd（含 symlink 實體路徑）落在敏感目錄時 exit 4。**殘餘風險：一般檔案內容仍原樣送免費模型，沒有逐段 scrub；無 sandbox-exec 的系統只有敏感 cwd 拒絕與事後偵測，不能防止工具讀寫。**
+  - 沙箱擋了憑證目錄後，若 `opencode.json` 有 provider 的金鑰引用那裡的檔案，OpenCode 會整個起不來。所以 `quick` 先寫一份去掉 `mcp` 與「引用檔案的 provider」的暫存設定，用 `XDG_CONFIG_HOME` 指過去；免費模型兩者都用不到（11-07 實測）。
+  - `dispatch-bg` 在既有 ledger 鎖內 reserve，持鎖到 launcher 交接與登錄。thread 已有 running／未知狀態 worker 時，訊息以單檔原子 rename 存入 `state/mailbox/<thread>/`，不再 resume 複製。`dispatch-watch` 看到終態才把一批訊息續派同 thread，成功後清除該批；新訊息留給下一輪。
+  - autoheal 先原子落地含 eid、固定 prompt 路徑的 intent，再重派；watch 下輪優先恢復 intent，已有對應 ledger 列只補 ACK，沒有才補派。launcher 已登錄後中斷不會重派第二次；登錄前完全中斷則依 intent 重做交接。
+  - inbound 以 `tg:<chat_id>:<message_id>` 串起 received／ack／queued／worker-start／answer-sent，紀錄不含訊息內文。`latency-report --by-id [--json]` 輸出 `ack_s`（收件→確認）、`answer_s`（worker 開始→送答）、`completion_s`（收件→送答）、`queue_s`、`start_s`；缺階段印 `-`／null，不猜時間。原本沒有 id 的資料仍走既有 n／p50 與 `--stages`。
+  - `ctx-guard` 在送 `/compact` 前取得 proxy 共用 maintenance lock，送文字前與 Enter 前各重查 transcript mtime／大小和 pane 輸入列。proxy 在鎖期間先確認收到、持久化排隊 channel，RPC 照常透傳；看到新的 `compact_boundary` 且輸入列閒置後釋放，最遲 600 秒過期。**殘餘風險：等待壓縮期間訊息只先確認；看不到完成標記時等到鎖逾期，並非零等待服務。**
+- **2026-11-07 six audit fixes** (not deployed):
+  - On macOS, `quick` wraps OpenCode with `/usr/bin/sandbox-exec`: deny file writes except OpenCode's XDG data/cache directories, `$TMPDIR` and `/dev/null`, while ordinary files in the query cwd stay read-only (OpenCode data/cache remains exempt). JSON event auditing remains. Missing sandbox-exec emits a downgrade warning; failure to apply an installed sandbox stops execution.
+  - The same profile denies reads of `$HOME/.creds`, `.ssh`, `.aws`, `.gnupg` and any `.env*` path. Append colon-separated paths with `QUICK_DENY_READ`; a sensitive cwd, including its resolved symlink target, exits 4 before any model call. **Residual risk: ordinary file contents still go to free models without per-content scrubbing. Without sandbox-exec, only cwd rejection and after-the-fact auditing remain; tool reads/writes cannot be prevented.**
+  - Because the profile blocks the credentials directory, OpenCode would refuse to start when its config points a provider key at a file there. `quick` therefore writes a temporary copy of `opencode.json` without `mcp` and without any provider that references a file, and points `XDG_CONFIG_HOME` at it. Free models need neither (verified live on 2026-11-07).
+  - `dispatch-bg` reserves under the ledger lock and holds it through launch and registration. A running or unknown worker gets one atomic mailbox file per new message instead of another resume. After a terminal event, watch resumes the same thread with a persisted batch, removes that batch after successful handoff, and leaves newer messages for the next round.
+  - Autoheal atomically persists an intent containing the eid and stable prompt before redispatch. The next watch resumes unfinished intents; an existing matching ledger row needs only ACK, otherwise one dispatch is retried. A crash after registration does not launch twice; a crash before registration retries the handoff from the intent.
+  - `tg:<chat_id>:<message_id>` links received, ack, queued, worker-start and answer-sent in a content-free event log. `latency-report --by-id [--json]` reports receipt-to-ack (`ack_s`), worker-start-to-answer (`answer_s`), receipt-to-answer (`completion_s`), plus queue/start delays. Missing stages are `-`/null. Legacy n/p50 and `--stages` still use the existing transcript calculation.
+  - Before `/compact`, ctx-guard takes a maintenance lock shared with the proxy and rechecks transcript mtime/size and pane input both before typing and before Enter. The proxy ACKs and persists channel messages while continuing RPC forwarding. A new `compact_boundary` with idle input releases the lock; expiry is capped at 600 seconds. **Residual risk: queued messages wait for compaction; if no completion marker is visible, they wait for lock expiry. This does not provide zero-wait service.**
 - Each round Codex audits the repo against the article; the main session adjudicates every finding (partial agreement allowed) before fixing. Must-fix P0/P1 went 10 → 9 → 2 → 3 → **0 in round 5 (2026-11-04), VERDICT: PASS**; restart, watchdog install and public push were all cleared.
 - P2 (2026-11-04): all three work orders converged under a "main session rules and writes the spec → executor → Codex audit / post-mortem → per-finding verdicts" loop, capped at 3 rounds each, fixing only reproducible in-scope highs:
   - **C**: behavioural knob-timing tests, Router reply latency measurement (`bin/latency-report`), and a per-repo queue. Codex rounds 6–9: highs 3 → 2 → 1 → 0.
@@ -169,10 +185,6 @@ MYTHOS_E2E=1 bash tests/test-dispatch-bg-e2e.sh   # 真 claude --bg（haiku）�
   - 晚到的舊 assistant 紀錄會把 `first_assistant_ts` 往前改。
   - 訊息內文出現 `message_id="…"` 時，會被誤當成去重鍵。
   - 以上不影響 n／p50 的主要量測。
-- **11-07 審計留下的項目**：
-  - `bin/quick` 的唯讀是事後稽核 JSON 事件，不是事前阻擋；要真擋得靠 OS 層沙箱。
-  - `bin/quick` 讀到的檔案內容會原樣送進免費模型，沒經過 scrub。
-  - bg thread 的訊息信箱與原子去重、autoheal 中途當掉後的接續、帶 request id 的完整延遲量測、ctx-guard 送 `/compact` 與使用者同時說話的競態，都還沒做。
 - **既有問題，不在 P2 範圍**：Telegram 送 `/fix`、`/wheel` 時，proxy 展開的內容沒有被轉發出去。另外 proxy 的 `setMyCommands` 在測試 sandbox 裡沒有守門。
 
 Items left open by the convergence rule (medium or lower, or a fix that would widen scope). The full list is in `state/workorders/p2-backlog.md`.
@@ -186,10 +198,6 @@ Items left open by the convergence rule (medium or lower, or a fix that would wi
   - A late-arriving old assistant record can move `first_assistant_ts` earlier.
   - A `message_id="…"` string inside the message text is mistaken for the dedup key.
   - None of these affect the headline n / p50 numbers.
-- **Left open by the 11-07 audit.**
-  - `bin/quick` enforces read-only by auditing JSON events after the fact, not by blocking up front; real enforcement needs an OS sandbox.
-  - File contents `bin/quick` reads go to the free model unscrubbed.
-  - Not done yet: a per-thread mailbox with atomic dedupe, resuming autoheal after a crash, end-to-end latency with request ids, and the race between ctx-guard's `/compact` and a user message.
 - **Pre-existing, outside P2.** When Telegram sends `/fix` or `/wheel`, the proxy's expanded text is not forwarded. Separately, the proxy's `setMyCommands` call has no guard inside the test sandbox.
 
 ## English summary
@@ -198,7 +206,7 @@ Items left open by the convergence rule (medium or lower, or a fix that would wi
 
 **Instant replies (2026-11-07).** The Router's turn only ever answers or dispatches. `bin/dispatch-bg --from-chat <thread>` builds the worker prompt from the Router transcript (`bin/chat-prompt.mjs`: the user's own words plus the last 8 messages), so the Router just says "收到" (got it). The gate rewrites `bin/quick` and `bin/recall --ask` through PreToolUse `updatedInput` to run in the background, and `bin/brief-answer` rewrites the answer as a plain secretary-style report sent straight to the user: the text is PII-scrubbed first (scrubber down = no model call, raw text sent), then up to two free models are tried, then haiku. Exit 7 means definitely not sent; exit 8 means the outcome is unknown, so callers must not relay it again. While the Router is busy, the Telegram proxy keeps the "typing…" indicator alive every 4 s and replies "收到，等等處理" (got it, will handle shortly). `bin/dispatch-watch` sends bg PASS results the same way, retries a failed or stalled bg job once on its own, and tells the user directly if the retry fails too. Workers show live progress via `bin/tg-progress.mjs --worker`, and `bin/ctx-guard` compacts the Router while it is idle (≥ 3 min, > 140K tokens) instead of mid-conversation.
 
-**Quick lane.** `bin/quick` answers read-only questions with OpenCode free models (`bin/free-models` reads the dcq free tier at run time, so no model name is hard-coded; a paid fallback only if `QUICK_PAID` is set). It runs `opencode run --agent plan --dir <cwd>`, audits the JSON tool events and discards the answer on any write or state-changing shell command, refuses questions containing PII, and requires every claim to quote the command and raw output so the caller can re-run one and compare.
+**Quick lane.** `bin/quick` answers read-only questions with OpenCode free models (`bin/free-models` reads the dcq free tier at run time, so no model name is hard-coded; a paid fallback only if `QUICK_PAID` is set). On macOS it runs `opencode run --agent plan --dir <cwd>` inside sandbox-exec with read/write restrictions (other platforms warn and downgrade), audits the JSON tool events and discards the answer on any write or state-changing shell command, refuses questions containing PII, and requires every claim to quote the command and raw output so the caller can re-run one and compare.
 
 **Memory lane.** `bin/recall '<keywords>'` lets the Router answer "what did we decide before" questions itself, with zero LLM calls: it queries claude-mem over its local HTTP API (read-only; the plugin is not loaded, so Mythos chats are not written into the shared memory), `fixindex find` (keeping only entries whose text actually contains the keywords, since the semantic ranker always returns something), and the main session's memory folder. `--obs <id>` / `--fix <id>` expand one record. The gate allows exactly `bin/recall '<text>'` or `bin/recall --obs|--fix <digits>`.
 
