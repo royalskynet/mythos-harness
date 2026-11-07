@@ -6,7 +6,7 @@ Mythos 一律直接做（YOLO）：盤點／診斷找出的修補，任務允許
 
 ## 最後一步（必做）
 
-做完、寫完最後一則訊息之前，把**同一段結果**寫進 `__MYTHOS_DIR__/state/bg/<短id>.result`。短 id＝`claude agents --json --all` 給你的 sessionId 前 8 碼。`__MYTHOS_DIR__/bin/dispatch-watch` 讀這個檔當 PASS 的結果內容，缺檔它會退回去讀 `claude logs` 並標「result 缺檔」。
+做完、寫完最後一則訊息之前，把**同一段結果**寫進 result 檔：prompt 帶「結果檔：<路徑>」就寫那個路徑（本輪專用，不沿用前幾輪的檔名）；沒有才寫 `__MYTHOS_DIR__/state/bg/<短id>.result`，短 id＝`claude agents --json --all` 給你的 sessionId 前 8 碼。`__MYTHOS_DIR__/bin/dispatch-watch` 讀這個檔當 PASS 的結果內容，缺檔它會退回去讀 `claude logs` 並標「result 缺檔」。
 
 result 固定三段，標記各自獨占一行：
 
