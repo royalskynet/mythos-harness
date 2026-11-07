@@ -31,6 +31,12 @@ exit 0
 STUB
 chmod +x "$CLAUDE_BIN"
 . "$(dirname "$0")/lib-test-guard.sh" "$TMP"  # F1：自己的 stub 設好之後才 source
+cat > "$TMP/tgsend.mjs" <<'STUB'
+process.stdin.resume();
+process.exit(0);
+STUB
+export TG_SEND_BIN="$TMP/tgsend.mjs"
+_guard_var BRIEF_BIN
 
 cat > "$TMUX_BIN" <<'TMUX'
 #!/bin/sh
@@ -191,4 +197,28 @@ printf 'BG_STALL_MIN=600\n' > "$MYTHOS_DIR/state/watchdog-knobs.env"
 GONE_MIN=1 bash "$ROOT/bin/dispatch-watch" 9>&- || fail '9：非零退出'
 jq -e 'select(.job_id=="bg-99990009")' "$MYTHOS_DIR/state/events.jsonl" >/dev/null 2>&1 && fail '9：進行中的 bg 單被建了事件（對帳誤判）'
 echo '(9) ok'
+# case: idle-with-result
+now="$(date +%s)"
+row bg-idle1001 bg "$now"
+printf '摘要：done\n---細節---\nx\n' > "$MYTHOS_DIR/state/bg/idle1001.result"
+touch -t "$(date -r $((now - 600)) +%Y%m%d%H%M.%S)" "$MYTHOS_DIR/state/bg/idle1001.result"
+printf '[{"sessionId":"idle1001-1111-2222-3333-444455556666","kind":"background","state":"working","status":"idle","waitingFor":null}]' > "$FAKE_AGENTS"
+: > "$TMUX_LOG"
+bash "$ROOT/bin/dispatch-watch" 9>&- || fail 'idle-with-result：非零退出'
+[ "$(status_of bg-idle1001)" != pending ] || fail "idle-with-result：ledger 仍是 pending：$(status_of bg-idle1001)"
+jq -e 'select(.job_id=="bg-idle1001" and .status=="PASS")' "$MYTHOS_DIR/state/events.jsonl" >/dev/null || fail "idle-with-result：events 沒有 PASS"
+echo '(idle-with-result) ok'
+
+# case: waiting-permission
+now="$(date +%s)"
+row bg-idle2002 bg "$now"
+printf '摘要：done\n---細節---\nx\n' > "$MYTHOS_DIR/state/bg/idle2002.result"
+touch -t "$(date -r $((now - 600)) +%Y%m%d%H%M.%S)" "$MYTHOS_DIR/state/bg/idle2002.result"
+printf '[{"sessionId":"idle2002-1111-2222-3333-444455556666","kind":"background","state":"working","status":"idle","waitingFor":"permission prompt"}]' > "$FAKE_AGENTS"
+: > "$TMUX_LOG"
+bash "$ROOT/bin/dispatch-watch" 9>&- || fail 'waiting-permission：非零退出'
+[ "$(status_of bg-idle2002)" = pending ] || fail "waiting-permission：ledger 不是 pending：$(status_of bg-idle2002)"
+if jq -e 'select(.job_id=="bg-idle2002" and .status=="PASS")' "$MYTHOS_DIR/state/events.jsonl" >/dev/null 2>&1; then fail 'waiting-permission：誤發 PASS'; fi
+echo '(waiting-permission) ok'
+
 echo 'DISPATCH-BG-WATCH PASS'
