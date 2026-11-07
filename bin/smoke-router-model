@@ -19,6 +19,10 @@ check_dispatch() {
   local n
   n="$(sqlite3 -readonly "$db" "SELECT count(*) FROM messages WHERE session_id='$sid' AND role='tool' AND tool_name='mythos_dispatch'" 2>&1)" || { echo "$n" >&2; return 1; }
   [ "$n" -gt 0 ] 2>/dev/null || { echo "session $sid 沒有 mythos_dispatch 呼叫" >&2; return 1; }
+  # Router 只准兩個工具；呼叫別的（含編造的工具名）＝多一輪、佔住對話
+  local extra
+  extra="$(sqlite3 -readonly "$db" "SELECT group_concat(DISTINCT tool_name) FROM messages WHERE session_id='$sid' AND role='tool' AND tool_name NOT IN ('mythos_dispatch','mythos_full_text')" 2>&1)" || { echo "$extra" >&2; return 1; }
+  [ -z "$extra" ] || { echo "session $sid 呼叫了白名單外工具：$extra" >&2; return 1; }
 }
 
 # check_relay <text>：同一口吻轉述，不得露內部分工詞。0=PASS
