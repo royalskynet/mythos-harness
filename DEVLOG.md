@@ -3,6 +3,16 @@
 開發紀錄，新的在上面。只記做了什麼、為什麼；不含本機路徑、帳號與內部計畫。
 Development log, newest first. It records what changed and why, without local paths, accounts or internal plans.
 
+## 2026-11-08 — P6d 喚醒不遺失 / P6d no lost wake-ups
+
+- dispatch-bg 完成後的單次喚醒若撞上 dispatch-watch 鎖，原本直接退出，持鎖者已掃過的新完成單只能等排程補掃。現在撞鎖先建立鎖旁的持久待掃旗標；持鎖者消費旗標再掃，釋鎖後再檢查並嘗試接手，登記者也再取一次鎖以關閉延遲登記空窗。
+- 每支最多八輪，超限釋鎖且保留旗標，交下次喚醒或排程接手。EXIT／逾時與 watchdog 的 stale lock 清理維持既有鎖目錄契約，旗標獨立保留。固定次數睡眠重試無法涵蓋正常長掃描，且耗盡後仍可能丟失喚醒，因此不採用。
+- brief 改寫案例先等前輪解鎖；離線測試另強制持鎖、注入最後檢查與釋鎖間的完成通知，確認自動接手、TG／brief 各一次，並驗證持續流量的輪數上限。
+
+- A completion wake-up previously exited immediately when dispatch-watch was locked. If the owner had already scanned the ledger, newly completed jobs waited for the scheduled sweep. Contenders now persist a rescan marker beside the lock. The owner consumes it and scans again, then checks after release and attempts to reacquire. Contenders also retry acquisition after registration to close delayed-registration races.
+- Each process runs at most eight scans, releasing the lock and preserving pending work at the limit for the next wake-up or scheduled sweep. EXIT, deadline and watchdog stale-lock cleanup retain the existing lock-directory contract; the marker survives independently. Fixed-count sleep retries cannot cover normal long scans and can still lose wake-ups when exhausted.
+- The brief-rewrite case waits for the prior scan to unlock. Separate offline cases force contention and inject a completion between the final check and lock release, verifying automatic handoff and exactly one TG delivery and brief call. Continuous wake-ups also verify the scan bound.
+
 ## 2026-11-08 — P6c 接 auto 前的加固 / P6c hardening before auto
 
 - 依 DSH Subscriptions／Handing back 原則，訊息在入站即定唯一擁有者。async hook await 入列，成功回 `skip`；worker 擁有的訊息不交 Router 決策，停止請求則交 Router 取消。預設仍 off，建議先 observe、看過 Decisions 再人工切 auto。

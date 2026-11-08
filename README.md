@@ -43,6 +43,7 @@ You talk to one Mythos. It always has time to answer because it never does the w
 - **秒回**：Router 不跑指令、不讀檔。工具白名單由 Hermes 的 `platform_toolsets` 與 `router-guard` 外掛兩層擋。
 - **追問、取消、改方向**：`mythos_dispatch` 的 `mode` 有 `queue`（預設）、`cancel`（停掉整個行程樹）、`interrupt`（停掉後帶原需求與新指示重做）。
 - **併發**：同時最多 `MYTHOS_HERMES_SLOTS` 個 worker（預設 3），超出的依序排隊。
+- **喚醒**：worker 完成即觸發 dispatch-watch；撞鎖留下待掃旗標，持鎖者重掃並在釋鎖後交接，launchd 每 120 秒補掃。
 - **送達**：注入對話後確認真的落地，逾時直接發 Telegram。
 - **口吻**：`bin/adhd-lint.mjs` 擋掉「派工、工單、代號」這類斷裂用語。
 
@@ -50,6 +51,7 @@ You talk to one Mythos. It always has time to answer because it never does the w
 - **Follow-ups**: `mythos_dispatch` takes `mode` = `queue` (default), `cancel` (kills the whole process tree) or `interrupt` (kills it and redoes the request with the new instruction).
 - **Concurrency**: at most `MYTHOS_HERMES_SLOTS` workers (default 3); the rest wait in FIFO order.
 - **Status line**: a worker result starts with `狀態：完成|已轉交|受阻|失敗`. Blocked, failed or empty results are retried through the free-model dispatch chain.
+- **Wake-ups**: worker completion triggers dispatch-watch; lock contention persists a rescan marker for the owner and post-release handoff, with launchd sweeping every 120 seconds as a fallback.
 - **Delivery**: injected results are checked against the conversation log and sent to Telegram directly if they never land.
 - **Voice**: `bin/adhd-lint.mjs` rejects wording that exposes tickets, ids or hand-offs.
 

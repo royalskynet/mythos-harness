@@ -4,11 +4,13 @@
 # (b) 觸發的 watch 真的能把 PASS 送出去（不用手動跑 watch）
 # (c) deliver-mode=hermes（inbox 路徑）：不經 brief-answer 改寫，tg-send 收到原摘要；直送 TG（deliver=tg）仍走 brief 改寫
 # (d) 外掛 inbox 輪詢間隔常數 1 秒
+# (e)(f)(g) 撞鎖接手、釋鎖空窗與持續流量上限
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/dispatch-latency.XXXXXX")"
-trap 'rm -rf "$TMP"' EXIT
+trap 'touch "$TMP/release"; [ -z "${holder:-}" ] || wait "$holder" 2>/dev/null; rm -rf "$TMP"' EXIT
 export MYTHOS_DIR="$TMP/mythos" MYTHOS_WORKER_DIR="$TMP/worker" DCQ_HOME="$TMP/dcq"
+export BRIEF_LINES_DIR="$TMP/brief-lines"
 export ROUTER_SLUG="dshgap-latency-$$"
 export DISPATCH_BG_HERMES_BIN="$TMP/hermes" CLAUDE_BIN="$TMP/claude"
 export FAKE_AGENTS="$TMP/agents.json" FAKE_ID="$TMP/fake-id"
@@ -35,13 +37,15 @@ printf '#!/bin/sh\ncat >/dev/null\necho called >> "$BRIEF_LOG"\necho BRIEFED-OUT
 mkdir -p "$TMP/rt"; printf '%s\n' '{"type":"user","message":{"content":"hi"}}' > "$TMP/rt/router.jsonl"
 export MYTHOS_TRANSCRIPT_DIR="$TMP/rt" CLAUDE_PROJECTS_DIR="$TMP/projects" BG_AUTOHEAL=0
 export BG_PERM_MIN=100000 BG_STALL_MIN=100000 RESEND_SEC=100000
-# 觸發用的 watch：記下「被叫時 rc 檔是否已落地」，再 exec 真的 dispatch-watch
+# 觸發用的 watch：記下「被叫時 rc 檔是否已落地」，再跑真的 dispatch-watch 並記錄退出
+export TRIG_DONE="$TMP/trig.done"
 export TRIG_LOG="$TMP/trig.log" REAL_WATCH="$ROOT/bin/dispatch-watch"
 cat > "$TMP/watch-wrapper" <<'W'
 #!/bin/bash
 rcf="$(ls "$MYTHOS_DIR"/state/bg/r-*.result.rc 2>/dev/null | head -1)"
 echo "called rc_present=$([ -n "$rcf" ] && echo yes || echo no)" >> "$TRIG_LOG"
-exec bash "$REAL_WATCH"
+bash "$REAL_WATCH"
+printf 'done\n' >> "$TRIG_DONE"
 W
 chmod +x "$TMP/watch-wrapper"
 export DISPATCH_WATCH_BIN="$TMP/watch-wrapper"
@@ -64,6 +68,7 @@ echo '(b) ok'
 grep -q 'SUMMARY-RAW' "$TG_STDIN" || fail "(c) inbox 路徑 tg-send 應收到原摘要：$(cat "$TG_STDIN")"
 [ ! -s "$BRIEF_LOG" ] || fail "(c) deliver-mode=hermes 不該呼叫 brief-answer：$(cat "$BRIEF_LOG")"
 
+wait_for '[ ! -d "$MYTHOS_DIR/state/.dispatch-watch.lock" ]' || fail "前輪未解鎖"
 # (c-tg)：直送 TG 仍改寫
 : > "$TG_STDIN"; : > "$TRIG_LOG"
 export MYTHOS_DELIVER=tg
@@ -74,8 +79,72 @@ wait_for 'grep -q BRIEFED-OUTPUT "$TG_STDIN"' || fail "(c) 直送 TG 應走 brie
 echo '(c) ok'
 
 # (d) 外掛輪詢常數
-PLUG="${MYTHOS_PLUGIN_INIT:-$HOME/.hermes/profiles/mythos/plugins/mythos-tools/__init__.py}"
+PLUG="$ROOT/profiles/mythos/plugins/mythos-tools/__init__.py"
 [ -f "$PLUG" ] || fail "(d) 找不到外掛 $PLUG"
 grep -q 'time.sleep(1)' "$PLUG" && ! grep -q 'time.sleep(5)' "$PLUG" || fail "(d) inbox 輪詢不是 1 秒"
 echo '(d) ok'
+# (e) 真 watch 持鎖且已掃完 ledger，第二張完成必須由持鎖者接手。
+wait_for '[ ! -d "$MYTHOS_DIR/state/.dispatch-watch.lock" ]' || fail '前輪未解鎖'
+export NODE_REAL="$(command -v node)" NODE_BIN="$TMP/node-held"
+cat > "$NODE_BIN" <<'NODE'
+#!/bin/bash
+if [ "${1##*/}" = lib-events.mjs ] && [ "${2:-}" = scan ] && [ ! -f "$MYTHOS_TEST_SANDBOX/held" ]; then
+  touch "$MYTHOS_TEST_SANDBOX/held"
+  while [ ! -f "$MYTHOS_TEST_SANDBOX/release" ]; do sleep 0.05; done
+fi
+exec "$NODE_REAL" "$@"
+NODE
+chmod +x "$NODE_BIN"
+bash "$REAL_WATCH" >"$TMP/holder.log" 2>&1 &
+holder=$!
+wait_for '[ -f "$TMP/held" ]' || fail '(e) 未持鎖'
+: > "$TG_LOG"; : > "$BRIEF_LOG"; : > "$TRIG_LOG"; : > "$TRIG_DONE"
+printf 'doing race\n' > "$TMP/race.md"
+DISPATCH_BG_WORKER=hermes bash "$ROOT/bin/dispatch-bg" t-race "$TMP/race.md" >"$TMP/race.id" 2>/dev/null </dev/null
+wait_for '[ -s "$TRIG_LOG" ]' || fail '(e) 未觸發'
+# 等待撞鎖那支退出，禁止放鎖後手動叫 watch。
+wait_for '[ -f "$MYTHOS_DIR/state/.dispatch-watch.lock.rescan" ]' || { touch "$TMP/release"; wait "$holder"; fail '(e) 撞鎖未留下待掃旗標'; }
+wait_for '[ -s "$TRIG_DONE" ]' || fail '(e) 撞鎖者未退出'
+touch "$TMP/release"
+wait "$holder"
+wait_for '[ "$(wc -l < "$TG_LOG" | tr -d " ")" = 1 ]' || fail '(e) 未自動送出'
+[ "$(wc -l < "$BRIEF_LOG" | tr -d ' ')" = 1 ] || fail '(e) brief 次數錯誤'
+[ "$(wc -l < "$TG_LOG" | tr -d ' ')" = 1 ] || fail '(e) TG 次數錯誤'
+echo '(e) ok'
+# (f) 在最後檢查後、實際刪鎖前注入完成喚醒；只攔測試自己的 rm。
+mkdir "$TMP/shims"
+cat > "$TMP/shims/rm" <<'RM'
+#!/bin/bash
+if [ "$*" = "-rf $MYTHOS_DIR/state/.dispatch-watch.lock" ] && [ ! -f "$MYTHOS_TEST_SANDBOX/gap-injected" ]; then
+  touch "$MYTHOS_TEST_SANDBOX/gap-injected"
+  : > "$TRIG_DONE"
+  DISPATCH_BG_WORKER=hermes bash "$TEST_DISPATCH_BG" t-gap "$MYTHOS_TEST_SANDBOX/gap.md" >"$MYTHOS_TEST_SANDBOX/gap.id" 2>/dev/null </dev/null
+  n=0
+  while [ ! -s "$TRIG_DONE" ] && [ "$n" -lt 150 ]; do sleep 0.05; n=$((n+1)); done
+fi
+exec /bin/rm "$@"
+RM
+chmod +x "$TMP/shims/rm"
+export TEST_DISPATCH_BG="$ROOT/bin/dispatch-bg"
+printf 'doing gap\n' > "$TMP/gap.md"
+: > "$TG_LOG"; : > "$BRIEF_LOG"
+PATH="$TMP/shims:$PATH" bash "$REAL_WATCH" >"$TMP/gap.log" 2>&1
+[ -f "$TMP/gap-injected" ] || fail '(f) 空窗未注入'
+[ "$(wc -l < "$TG_LOG" | tr -d ' ')" = 1 ] || fail '(f) 釋鎖空窗遺失喚醒'
+[ "$(wc -l < "$BRIEF_LOG" | tr -d ' ')" = 1 ] || fail '(f) brief 次數錯誤'
+echo '(f) ok'
+# (g) 持續喚醒達八輪即交還鎖，旗標留給下次喚醒。
+cat > "$NODE_BIN" <<'NODE'
+#!/bin/bash
+if [ "${1##*/}" = lib-events.mjs ] && [ "${2:-}" = scan ]; then
+  echo scan >> "$MYTHOS_TEST_SANDBOX/rounds"
+  touch "$MYTHOS_DIR/state/.dispatch-watch.lock.rescan"
+fi
+exec "$NODE_REAL" "$@"
+NODE
+bash "$REAL_WATCH" >"$TMP/bounded.log" 2>&1
+[ "$(wc -l < "$TMP/rounds" | tr -d ' ')" = 8 ] || fail '(g) 輪數未受限'
+[ ! -d "$MYTHOS_DIR/state/.dispatch-watch.lock" ] || fail '(g) 未釋鎖'
+[ -f "$MYTHOS_DIR/state/.dispatch-watch.lock.rescan" ] || fail '(g) 逾限遺失旗標'
+echo '(g) ok'
 echo 'DISPATCH-LATENCY PASS'

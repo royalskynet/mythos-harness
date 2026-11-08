@@ -132,16 +132,32 @@ mkdir -p "$MYTHOS_DIR/state" 2>/dev/null || exit 0
 mkdir -p "$MYTHOS_DIR/state/deep" 2>/dev/null || true
 
 LOCK="$MYTHOS_DIR/state/.dispatch-watch.lock"
-mkdir "$LOCK" 2>/dev/null || exit 0
-# 鎖內記 pid：watchdog 靠它判斷持有者是否已死（C）
-printf '%s\n' "$$" > "$LOCK/pid"
+RESCAN="$LOCK.rescan"
+owned=0
+acquire_watch() {
+  if ! mkdir "$LOCK" 2>/dev/null; then
+    touch "$RESCAN" || return 1
+    # 建旗標前持鎖者可能已退出；再取一次，關閉延遲登記的空窗。
+    mkdir "$LOCK" 2>/dev/null || return 1
+  fi
+  owned=1
+  # watchdog／deadline 依持鎖 pid 回收死鎖；旗標不隨鎖刪除。
+  printf '%s\n' "$$" > "$LOCK/pid"
+}
+acquire_watch || exit 0
 
 OUT="$(mktemp "${TMPDIR:-/tmp}/dispatch-watch-tsv.XXXXXX")" || { rm -rf "$LOCK"; exit 0; }
 TODOS="$(mktemp "${TMPDIR:-/tmp}/dispatch-watch-todos.XXXXXX")" || { rm -f "$OUT"; rm -rf "$LOCK"; exit 0; }
 REVIEWS="$(mktemp "${TMPDIR:-/tmp}/dispatch-watch-reviews.XXXXXX")" || { rm -f "$OUT" "$TODOS"; rm -rf "$LOCK"; exit 0; }
-cleanup() { rm -f "$OUT" "$TODOS" "$REVIEWS"; rm -rf "$LOCK"; }
+release_watch() { rm -rf "$LOCK"; owned=0; }
+cleanup() {
+  rm -f "$OUT" "$TODOS" "$REVIEWS"
+  [ "$owned" = 0 ] || release_watch
+}
 trap cleanup EXIT
 
+scan_once() {
+: > "$OUT"; : > "$TODOS"; : > "$REVIEWS"
 # worker 首回延遲記帳（11-08，零 token）：慢的寫 brief-lines 轉 Scribe；失敗不擋本輪
 python3 "$(dirname "$0")/worker-latency" 2>>"$WATCH_LOG" || true
 
@@ -757,8 +773,8 @@ promote_rows() { # promote 清單檔 ledger 檔 now → 新 ledger 印到 stdout
 }
 # end promote_rows
 if awk -F'\t' '$5=="queued"' "$TSV" 2>/dev/null | grep -q .; then
-  ledger_lock || exit 0
-  QDIR="$(mktemp -d "${TMPDIR:-/tmp}/dispatch-watch-queue.XXXXXX")" || { ledger_unlock; exit 0; }
+  ledger_lock || return 0
+  QDIR="$(mktemp -d "${TMPDIR:-/tmp}/dispatch-watch-queue.XXXXXX")" || { ledger_unlock; return 0; }
   : > "$QDIR/promote"; : > "$QDIR/launch"; : > "$QDIR/tops"
   while IFS=$'\t' read -r qid _ qtask _ qst qcwd _ qbackend; do
     [ "$qst" = queued ] && { [ "$qbackend" = deep ] || [ "$qbackend" = head ]; } || continue
@@ -1157,7 +1173,7 @@ if [ -s "$TODOS" ] && { [ "$sent" = 1 ] || [ "$late" = 1 ]; }; then
 fi
 
 # 5) ledger 整檔替換：以事件為準決定 notified-<status>，全程在共同鎖內（D）
-ledger_lock || exit 0
+ledger_lock || return 0
 {
   while IFS= read -r line || [ -n "$line" ]; do
     id="$(printf '%s\n' "$line" | cut -f1)"
@@ -1180,3 +1196,19 @@ ledger_lock || exit 0
   mv "$OUT" "$TSV"
 }
 ledger_unlock
+
+}
+
+# ponytail: 每支最多八輪；持續流量超限保留旗標，由下次喚醒／排程接手。
+round=0
+while :; do
+  rm -f "$RESCAN"
+  scan_once
+  round=$((round + 1))
+  if [ "$round" -lt 8 ] && [ -f "$RESCAN" ]; then continue; fi
+  release_watch
+  [ "$round" -lt 8 ] || break
+  # 最後檢查後、釋鎖前的喚醒仍可接手；取不到鎖就留給新持鎖者。
+  [ -f "$RESCAN" ] || break
+  acquire_watch || break
+done
