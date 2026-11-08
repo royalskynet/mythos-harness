@@ -3,6 +3,18 @@
 開發紀錄，新的在上面。只記做了什麼、為什麼；不含本機路徑、帳號與內部計畫。
 Development log, newest first. It records what changed and why, without local paths, accounts or internal plans.
 
+## 2026-11-08 — P6 決策備忘 / P6 decision notes
+
+- 不採用程式碼知識圖譜（Graphify 類）給 worker 找檔。實測一題系統提問 18 次模型呼叫，卡點在拼湊執行中設定（模型、派工順序、排程），不在找檔；圖譜只知道程式碼位置，查設定還指到過時文件。社群 360 次試驗（srijansriv.com/graphify-benchmark）與上游 issue（Graphify-Labs/graphify#985）也未見準確率或成本改善。改用 `bin/system-facts` 直接讀設定。
+- 防幻覺的 LLM 層只走本機 Laya（laya-only）。本機 cascade 未限制可上雲的呼叫者，不帶 laya-only 就會打付費雲端，且 worker 結果可能含個資；本機判斷不出機、不花錢。先只記錄，累積約兩週 ledger 後依誤判率決定是否讓它擋。Hermes 上游查無可用的防幻覺外掛（相關 PR 未接進執行流程）。
+- 回歸基準：main 上既有紅燈為 test-bg-autoheal、test-compact-lock、test-dispatch-bg-watch、test-tg-send、test-watchdog、test-test-guard、adhd-outlet，與 P6 無關、尚未處理。回歸比對排除會讀外部工具目錄的 test_no_cabinet。
+- 工單教訓：禁令寫得比需要寬（禁讀整個外部目錄、禁讀所有 *.env），會與驗收要跑的測試衝突，執行人照規則停工，連續兩次。之後派工單先過 lint，禁令只列真實憑證位置，並註明測試自建的夾具可讀寫。
+
+- No code-knowledge graph (Graphify-style) for worker file discovery. A measured system question took 18 model calls; the cost came from assembling runtime settings (models, dispatch order, schedules), not from finding files. The graph only knows code locations and pointed to stale docs for settings. A 360-trial community benchmark and an upstream issue showed no accuracy or cost gain. `bin/system-facts` reads the settings directly instead.
+- The LLM layer of the claim guard uses local Laya only (laya-only). The local cascade does not restrict which callers may reach the paid cloud judge, so a request without laya-only would spend money and could send personal data off the machine. Local judgement stays on the machine and is free. It is observation-only until about two weeks of ledger data show its error rate. No usable anti-hallucination plugin exists upstream in Hermes.
+- Regression baseline: the existing red checks on main are test-bg-autoheal, test-compact-lock, test-dispatch-bg-watch, test-tg-send, test-watchdog, test-test-guard and adhd-outlet; they are unrelated to P6 and remain open. Regression comparison excludes test_no_cabinet, which reads an external tool directory.
+- Ticket lesson: prohibitions wider than needed (a whole external directory, every *.env file) conflicted with tests the acceptance had to run, and the executor stopped twice by the rules. Tickets now pass lint first, list only real credential locations, and state that fixtures created by tests may be read and written.
+
 ## 2026-11-08 — P6h 結果防幻覺 / P6h claim guard
 
 - worker 摘要直發前新增零 LLM 檢查：commit 必須存在於工作 repo 或 Mythos，網址必須出現在該 job 工單、結果細節或工具輸出。worker session 無法唯一對應時，網址只記錄原因。
