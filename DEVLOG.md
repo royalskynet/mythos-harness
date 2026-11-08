@@ -3,6 +3,11 @@
 開發紀錄，新的在上面。只記做了什麼、為什麼；不含本機路徑、帳號與內部計畫。
 Development log, newest first. It records what changed and why, without local paths, accounts or internal plans.
 
+## 2026-11-08 — P6g 閒聊直接回 / P6g direct small talk
+
+- Router 對閒聊與情緒話用同一個口吻直接回一兩句，不呼叫工具、不派工。判斷原則：回答需要這台機器上的事實才派工，不需要就自己回；要查、要做、問系統／專案現況、要意見或分析仍照舊派工。
+- The Router answers small talk and emotional remarks directly in the same voice, using one or two sentences without tools or dispatch. Dispatch when the answer requires facts from this machine; otherwise answer directly. Requests to investigate, act, report system or project status, or provide opinions or analysis still use dispatch.
+
 ## 2026-11-08 — P6f 小派工省力 / P6f lighter small dispatches
 
 - Router 秒回改用短口語，一句結束並輪換說法。
