@@ -5,6 +5,11 @@
 # 11-02 改：舊條件「6 小時沒動」永遠不成立——夜間排程 03:00 會叫 Router 寫計畫，
 # 於是每天 04:00 都判 active。改成短閒置＋多試幾個整點，Router 還在寫就等下一點。
 IDLE_MIN=${IDLE_MIN:-30}
+# N09（11-08）：Router 是 Hermes gateway（無 tmux pane）時不送 /clear；MYTHOS_RUNTIME=claude 才走下面舊流程。
+if [ "${MYTHOS_RUNTIME:-hermes}" = hermes ]; then
+  echo "$(date '+%F %T') skip hermes（Router 為 Hermes，不送 tmux /clear）"
+  exit 0
+fi
 TMUX=${TMUX_BIN:-$(command -v tmux || echo /opt/homebrew/bin/tmux)}
 BOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 # Claude Code 的 transcript 目錄＝工作目錄路徑把非英數字換成 -

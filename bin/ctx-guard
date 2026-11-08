@@ -36,6 +36,8 @@ COOLDOWN = 15 * 60
 # transcript QUIET 秒沒動（老闆沒在聊）就先送 /compact，壓縮落在空檔。CTX_ROUTER_IDLE=0 關閉。
 IDLE_COMPACT = int(os.environ.get("CTX_ROUTER_IDLE", "140000"))
 QUIET = int(os.environ.get("CTX_ROUTER_QUIET_SEC", "180"))
+# N09（11-08）：Router 是 Hermes gateway（沒有 tmux pane 可送 /compact）→ 不送，log skip hermes。MYTHOS_RUNTIME=claude 才送。
+HERMES = os.environ.get("MYTHOS_RUNTIME", "hermes") == "hermes"
 
 slug = lambda p: re.sub(r"[^A-Za-z0-9]", "-", p)
 ROUTER_DIR = os.environ.get("CTX_ROUTER_DIR", os.path.join(HOME, ".claude/projects", slug(MYTHOS)))
@@ -277,7 +279,10 @@ def cmd_scan():
             seen[sid]["job"] = job
         if (kind == "router" and sid == newest_router and IDLE_COMPACT and IDLE_COMPACT <= tok <= LIMIT
                 and now - s["mtime"] >= QUIET and now - seen[sid]["actioned"] >= COOLDOWN):
-            if DRY:
+            if HERMES:
+                seen[sid]["actioned"] = int(now)  # 同一 session 15 分鐘只記一行
+                log("skip hermes: router idle /compact 不送（sid=%s tokens=%d）" % (sid[:8], tok))
+            elif DRY:
                 log("DRY router idle compact")
             elif router_compact(s):
                 seen[sid]["actioned"] = int(now)
@@ -299,7 +304,10 @@ def cmd_scan():
         if now - seen[sid]["actioned"] < COOLDOWN:
             continue
         if kind == "router":
-            if DRY:
+            if HERMES:
+                seen[sid]["actioned"] = int(now)  # 同一 session 15 分鐘只記一行
+                log("skip hermes: router /compact 不送（sid=%s tokens=%d）" % (sid[:8], tok))
+            elif DRY:
                 log("DRY router compact")
             elif router_compact(s):
                 seen[sid]["actioned"] = int(now)

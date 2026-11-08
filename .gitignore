@@ -131,3 +131,6 @@ __pycache__/
 !/tests/test-hermes-contract.sh
 !/bin/hermes-upgrade
 !/tests/test-hermes-upgrade.sh
+# 11-08 N09／N11／N12：Hermes 控制迴路（watchdog 健康、dispatch-watch 進度、idle-reset／ctx-guard 跳過）
+!/bin/lib-hermes-state.py
+!/tests/test-hermes-control-loop.py

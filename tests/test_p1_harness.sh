@@ -2,6 +2,7 @@
 # P1 驗收（11-03）：事件 ACK 佇列、thread 續派、watchdog、統一 job schema＋共同鎖。
 # 全部用暫存 MYTHOS_DIR／假 tmux／假 dcq／假 transcript，不碰真的 state、tmux、launchd、brief-lines。
 set -eu
+export MYTHOS_RUNTIME=claude  # 測 Claude TUI 舊流程；Hermes 模式另見 tests/test-hermes-control-loop.py
 export DISPATCH_HARD_BACKEND=deep  # 工單 D：hard 預設改 bg-hard；本檔驗的是 deep 舊路徑，明設才走 deep-run
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

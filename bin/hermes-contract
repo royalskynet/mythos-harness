@@ -78,6 +78,11 @@ grep -q 'def _run_oneshot_from_args' "$ROOT/hermes_cli/main.py" 2>/dev/null \
 grep -q 'logging.disable' "$ROOT/hermes_cli/oneshot.py" 2>/dev/null \
   && bad "oneshot 又會 logging.disable：worker 的 agent.log 會變空白（11-08 已退役的 hermes-logged 可從 git 5c2abef 撈回）"
 
+# 3. state.db 的表與欄：watchdog（N11 Router 健康）、dispatch-watch（N12 worker 進度）唯讀查詢依賴它；常數清單在 bin/lib-hermes-state.py
+for p in mythos mythos-worker; do
+  sr="$(python3 "$REPO/bin/lib-hermes-state.py" schema "$LIVE/$p/state.db" 2>&1 </dev/null)"
+  case "$sr" in OK) ;; *) bad "state.db ${p}：${sr#FAIL }" ;; esac
+done
 
 # 4. 線上設定實際被 CLI 讀到
 if [ -x "$HERMES" ]; then
