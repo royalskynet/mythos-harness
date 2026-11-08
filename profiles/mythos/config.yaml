@@ -22,7 +22,7 @@ plugins:
   entries:
     mythos-tools:
       allow_gateway_injection: true
-_config_version: 47
+_config_version: 53
 memory:
   memory_enabled: true
   user_profile_enabled: true
@@ -62,7 +62,7 @@ platform_toolsets:
   cli: [mythos, no_mcp]
 tools:
   tool_search:
-    enabled: off
+    enabled: false
 # 11-08 驗屍 #4：供應商暫掛時不在同一回合裡重試／自癒占住對話；fallback 鏈照走。
 # coding_context 預設 auto：cwd 像程式 repo 就注入「coding agent」說明（叫模型用 read_file／search_files），
 # Router 沒這些工具卻會照著編造呼叫、多一輪。Router 永遠不是 coding agent。

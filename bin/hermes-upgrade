@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# 升 Hermes 的唯一入口：拉最新 Hermes → 從 repo 拉 profile（hermes profile update）→ 契約檢查 → 重啟 mythos gateway。
+# 在地修改（hermes-agent 工作樹的 diff）先存成 patch，hermes update 自己 stash／還原；還原衝突時 patch 檔還在。
+# 回滾：bin/hermes-upgrade --rollback（checkout 升級前的 commit，再走一次 profile update＋契約）。
+set -u
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="${HERMES_AGENT_ROOT:-${HOME}/.hermes/hermes-agent}"
+HERMES="${HERMES_BIN:-${HOME}/.local/bin/hermes}"
+ST="${REPO}/state/hermes-upgrade"; mkdir -p "${ST}"
+TS="$(date +%Y%m%d-%H%M%S)"
+LOG="${ST}/${TS}.log"
+say() { printf '%s %s\n' "$(date '+%H:%M:%S')" "$*" | tee -a "${LOG}"; }
+PROFILES="mythos mythos-worker"
+
+pull_profiles() {
+  for p in ${PROFILES}; do
+    "${HERMES}" profile update "${p}" -y >>"${LOG}" 2>&1 || { say "FAIL profile update ${p}"; return 1; }
+  done
+  "${REPO}/bin/hermes-contract" | tee -a "${LOG}"
+  return "${PIPESTATUS[0]}"
+}
+
+if [ "${1:-}" = --rollback ]; then
+  old="$(cat "${ST}/last-old-sha" 2>/dev/null)"
+  [ -n "${old}" ] || { say "FAIL 沒有升級前 commit 紀錄"; exit 1; }
+  say "回滾 hermes-agent 到 ${old}"
+  git -C "${ROOT}" stash push -u -m "hermes-upgrade rollback ${TS}" >>"${LOG}" 2>&1
+  git -C "${ROOT}" checkout -q "${old}" >>"${LOG}" 2>&1 || { say "FAIL checkout ${old}"; exit 1; }
+  "${HERMES}" pm install >>"${LOG}" 2>&1 || say "WARN pm install 非 0，看 ${LOG}"
+  pull_profiles; rc=$?
+  "${HERMES}" gateway restart >>"${LOG}" 2>&1; "${HERMES}" -p mythos gateway restart >>"${LOG}" 2>&1
+  exit "${rc}"
+fi
+
+old="$(git -C "${ROOT}" rev-parse HEAD)"; echo "${old}" > "${ST}/last-old-sha"
+say "升級前 ${old}（$("${HERMES}" --version 2>/dev/null | head -1)）"
+# 升級前就漂移＝線上有人直接改 profile，profile update 會蓋掉它：先停
+"${REPO}/bin/hermes-contract" >>"${LOG}" 2>&1 || { grep '^FAIL' "${LOG}" | tail -5; say "FAIL 升級前契約不過，先處理再升"; exit 1; }
+if [ -n "$(git -C "${ROOT}" status --porcelain)" ]; then
+  git -C "${ROOT}" diff > "${ST}/${TS}-local.diff"
+  git -C "${ROOT}" ls-files --others --exclude-standard -z | (cd "${ROOT}" && xargs -0 tar czf "${ST}/${TS}-untracked.tgz") 2>>"${LOG}"
+  say "在地修改已存 ${ST}/${TS}-local.diff（＋untracked.tgz）"
+fi
+
+say "hermes update（會重啟同一安裝下的所有 gateway）"
+"${HERMES}" update --yes --keep-stash >>"${LOG}" 2>&1; urc=$?
+new="$(git -C "${ROOT}" rev-parse HEAD)"
+say "hermes update rc=${urc}，${old} → ${new}（$("${HERMES}" --version 2>/dev/null | head -1)）"
+[ "${urc}" = 0 ] || { tail -20 "${LOG}"; say "FAIL hermes update 非 0；回滾：bin/hermes-upgrade --rollback"; exit 1; }
+git -C "${ROOT}" stash list | head -3 | tee -a "${LOG}"
+
+# --keep-stash 不自動還原：逐檔套回升級前的在地修改；上游刪檔或衝突就列 WARN，原 diff 留在 state
+if [ -s "${ST}/${TS}-local.diff" ]; then
+  for f in $(grep '^diff --git' "${ST}/${TS}-local.diff" | sed 's|.* b/||'); do
+    # -3：上游改到附近行時普通 apply 會因 context 失敗（11-08 實測 auxiliary_client.py）；-3 會寫 index，套完 reset 回工作樹修改
+    if git -C "${ROOT}" apply -3 --include="${f}" "${ST}/${TS}-local.diff" >>"${LOG}" 2>&1 && git -C "${ROOT}" reset -q -- "${f}"; then
+      say "還原在地修改 ${f}"
+    else
+      # 衝突時 -3 會把 <<<<<<< 標記留在原始碼：退回上游版，不讓 Hermes 帶著衝突標記啟動
+      if [ -n "$(git -C "${ROOT}" ls-files -u -- "${f}")" ]; then
+        git -C "${ROOT}" reset -q -- "${f}"; git -C "${ROOT}" checkout -q HEAD -- "${f}"
+      fi
+      say "WARN 在地修改套不上 ${f}（原 diff：${ST}/${TS}-local.diff）"
+    fi
+  done
+fi
+
+# Hermes 升版會自己遷移 config（_config_version、值正規化）：回寫 repo 正本，chat id 換回變數，再提醒 commit
+for p in ${PROFILES}; do
+  live="${HOME}/.hermes/profiles/${p}/config.yaml"; tpl="${REPO}/profiles/${p}/config.yaml"
+  scrubbed="$(sed -E "s/'[0-9]{6,}'/'\${MYTHOS_TG_CHAT_ID}'/g" "${live}")"
+  if [ "${scrubbed}" != "$(cat "${tpl}")" ]; then
+    printf '%s\n' "${scrubbed}" > "${tpl}"
+    say "config 遷移已回寫 repo：${p}（記得 commit）"
+  fi
+done
+
+say "從 repo 拉 profile＋契約檢查"
+pull_profiles || { say "FAIL 契約不過；mythos gateway 不重啟。回滾：bin/hermes-upgrade --rollback"; exit 1; }
+"${HERMES}" -p mythos gateway restart >>"${LOG}" 2>&1 || { say "FAIL mythos gateway restart"; exit 1; }
+say "UPGRADE_OK ${new}"

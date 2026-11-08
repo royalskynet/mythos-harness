@@ -12,7 +12,7 @@ fallback_providers:
     model: beam-free
 # worker 無人值守（fix 11812）：危險命令一律放行；-z 單次與 webhook 也放行。
 approvals:
-  mode: off
+  mode: false
   timeout: 60
   cron_mode: approve
   single_query_mode: approve
@@ -21,7 +21,7 @@ approvals:
 checkpoints:
   enabled: true
   max_snapshots: 3
-_config_version: 47
+_config_version: 53
 memory:
   memory_enabled: true
   user_profile_enabled: true

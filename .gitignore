@@ -126,3 +126,5 @@ __pycache__/
 !/profiles/
 !/bin/hermes-contract
 !/tests/test-hermes-contract.sh
+!/bin/hermes-upgrade
+!/tests/test-hermes-upgrade.sh
