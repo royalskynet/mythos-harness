@@ -372,13 +372,41 @@ def _recall_count(sid: str) -> int:
         return n
 
 
-def _on_pre_llm_call(session_id: str = "", **_: Any) -> None:
+# 11-08：Router 說話規則直接套 Genie 本體（不複製）：每回合注入 `prefs.py context` 的輸出，
+# 偏好檔 state/genie-prefs.json（level 等用 `GENIE_PREFS=… prefs.py set` 改）。找不到 Genie 或跑失敗就不注入。
+_GENIE_DIRS = [os.environ.get("MYTHOS_GENIE_DIR", ""),
+               os.path.expanduser("~/.claude/plugins/marketplaces/genie-harness"),
+               os.path.expanduser("~/dev/genie-harness")]
+GENIE_PREFS = os.path.join(STATE, "genie-prefs.json")
+_genie_cache: Dict[str, Any] = {"key": None, "text": ""}
+
+
+def _genie_context() -> str:
+    script = next((os.path.join(d, "router", "prefs.py") for d in _GENIE_DIRS
+                   if d and os.path.isfile(os.path.join(d, "router", "prefs.py"))), "")
+    if not script:
+        return ""
+    try:
+        key = (script, os.path.getmtime(script),
+               os.path.getmtime(GENIE_PREFS) if os.path.exists(GENIE_PREFS) else 0)
+        if key != _genie_cache["key"]:
+            out = subprocess.run(["python3", script, "context"], capture_output=True, text=True,
+                                 timeout=5, env={**os.environ, "GENIE_PREFS": GENIE_PREFS})
+            text = out.stdout.strip() if out.returncode == 0 else ""
+            _genie_cache.update(key=key if text else None, text=text)
+        return _genie_cache["text"]
+    except Exception:
+        return ""
+
+
+def _on_pre_llm_call(session_id: str = "", **_: Any) -> Optional[Dict[str, str]]:
     global _recall_current
-    if not session_id:
-        return
-    with _recall_lock:
-        _recall_used.pop(session_id, None)
-        _recall_current = session_id
+    if session_id:
+        with _recall_lock:
+            _recall_used.pop(session_id, None)
+            _recall_current = session_id
+    ctx = _genie_context()
+    return {"context": ctx} if ctx else None
 
 
 def _on_pre_tool_call(tool_name: str = "", session_id: str = "", **_: Any) -> None:

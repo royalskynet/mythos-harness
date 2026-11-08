@@ -6,6 +6,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/adhd-trunc.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
+# 夾具照舊上限寫（預設 11-08 起 500／12／60，見 test-adhd-lint (g)）
+export ADHD_MAX_CHARS=220 ADHD_MAX_LINES=6 ADHD_MAX_LINE_CHARS=40
 L="$ROOT/bin/adhd-lint.mjs"
 strip() { printf '%s' "$1" | tr -d ' \n' | wc -m | tr -d ' '; }
 

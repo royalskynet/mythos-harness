@@ -2,6 +2,8 @@
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 fail() { echo "FAIL: $*" >&2; exit 1; }
+# 夾具照舊上限寫；預設值另在最後檢查
+export ADHD_MAX_CHARS=220 ADHD_MAX_LINES=6 ADHD_MAX_LINE_CHARS=40
 lint() { printf '%s' "$1" | node "$ROOT/bin/adhd-lint.mjs" 2>"$ROOT/.adhd-lint-test.err"; }
 
 # (a) 廢話實例 → exit 1 且含「客套句」
@@ -38,6 +40,18 @@ set +e
 lint '待辦搬出的規劃單第三次成功了。這次改在獨立的工作副本跑，工單已寫好並通過派工前檢查，之後會自動派出執行單。'
 rc=$?; set -e
 [ "$rc" = 1 ] || fail "(f) 應 exit 1"
+
+# (g) 預設上限 500 字／12 行／每行 60（11-08 放寬）：約 270 字、7 行的回覆要過（舊上限 220／6 會擋）
+unset ADHD_MAX_CHARS ADHD_MAX_LINES ADHD_MAX_LINE_CHARS
+mid="$(printf '%s\n' \
+  '測試補好了，八個檔案都已經推上 GitHub，自動檢查也重新跑過一次。' \
+  '1. 原因是卡住的判斷方式改了，對應的測試一直沒送出，所以雲端的檢查一直失敗。' \
+  '2. 做法是先在本機把八個測試全部跑過一遍，確認都通過以後，再一起送出去。' \
+  '3. 驗收方式是看雲端檢查有沒有轉綠，以及本機重跑兩次是不是都通過，兩項都已經確認。' \
+  '4. 另外把字數上限放寬到五百字，之後回答「那是什麼」這類問題可以講完整。' \
+  '5. 對應的格式測試也一起更新，改回舊上限時測試會失敗，避免以後被誤改回去。' \
+  '你不用做任何事，之後再有東西卡住，系統會照新的方式判斷並提醒你。')"
+lint "$mid" || fail "(g) 約 270 字、7 行應在預設上限內：$(cat "$ROOT/.adhd-lint-test.err")"
 
 rm -f "$ROOT/.adhd-lint-test.err"
 echo 'ADHD-LINT PASS'

@@ -3,6 +3,18 @@
 開發紀錄，新的在上面。只記做了什麼、為什麼；不含本機路徑、帳號與內部計畫。
 Development log, newest first. It records what changed and why, without local paths, accounts or internal plans.
 
+## 2026-11-08 — Router 套 Genie 說話規則、放寬字數 / Router uses Genie voice rules, longer replies
+
+- 使用者回報 Router 不說人話，問「那是什麼」也講不出來。原因有兩個：Router 沒有白話規則可依；字數上限 220 字、6 行，又要求第二行起全部編號，解釋一件事根本放不下。
+- Router 外掛每回合執行本機已安裝的 Genie `prefs.py context`，把輸出當本回合提示注入；不複製規則，Genie 更新就跟著更新。偏好檔放 runtime 目錄。找不到 Genie 或執行失敗就不注入，不擋對話。
+- 上限放寬為 500 字、12 行、每行 60 字；清單後可留一行不編號的收尾。SOUL 加一條：「那是什麼」的答案在這段對話裡就自己白話解釋，要查機器上的事實才派工。
+- 新增 `tests/test-genie-context.py`；`test-adhd-lint` 加一則約 270 字、7 行的回覆，預設上限改回 220 時會失敗。舊測試釘住舊上限，照原意驗格式。
+
+- The user reported that the Router did not talk plainly and could not explain "what is that". Two causes: the Router had no plain-language rules, and the 220-character, 6-line cap with mandatory numbering after the first line left no room to explain anything.
+- The Router plugin now runs the locally installed Genie `prefs.py context` every turn and injects its output as turn context. The rules are not copied, so Genie updates apply automatically. The prefs file lives in the runtime directory. If Genie is missing or fails, nothing is injected and the chat continues.
+- Limits are now 500 characters, 12 lines and 60 characters per line, and a list may end with one unnumbered closing line. SOUL gained a rule: when the answer to "what is that" is already in the conversation, explain it plainly; dispatch only for facts on the machine.
+- Added `tests/test-genie-context.py`. `test-adhd-lint` gained a reply of about 270 characters in 7 lines that fails if the default cap goes back to 220. Older tests pin the old limits so they still check format as intended.
+
 ## 2026-11-08 — 「詳細」全文送不出 / Full-text replies failed
 
 - 使用者回「詳細」時，Router 回報「權限問題」。原因是外掛直接執行 `bin/tg-send`，這支腳本在 git 裡是 644，執行時拋出 PermissionError；Mythos 的權限設定與此無關。收件匣的 TG 退路也走同一支腳本。外掛測試用的假執行檔會自己 chmod，所以測試沒抓到。已補上執行權，並新增 `tests/test-plugin-bin-exec.sh`：外掛直接執行的 bin 在 git 裡必須是 100755。
