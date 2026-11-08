@@ -49,6 +49,7 @@
 !/tests/test-tg-send-inbox.sh
 !/tests/test-tg-plugin-patch.sh
 !/tests/test-tg-reply-thread.sh
+!/tests/test-small-residuals.sh
 !/tests/test_tg_commands.mjs
 !/tests/test_dispatch_gate.mjs
 !/tests/test-review-judge.sh

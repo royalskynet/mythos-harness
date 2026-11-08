@@ -19,7 +19,7 @@ import subprocess
 import threading
 import time
 from collections import OrderedDict
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 # 11-08 差距 #6：thread 會被拼進 state/bg/<thread>-<epoch>.md 與 bin/dispatch-bg 的 argv，先驗再寫檔。
 # 比 dispatch-bg 的 `*[!A-Za-z0-9-]*` 更嚴（只收 t- 小寫代號）；gate 產生的 t-abc123 都合規。
@@ -148,22 +148,49 @@ def mythos_dispatch(args: Dict[str, Any], **_: Any) -> str:
     return f"已派 {thread}"
 
 
-def mythos_full_text(args: Dict[str, Any], **_: Any) -> str:
+def _full_for_thread(thread: str) -> Optional[str]:
+    """該 thread 最新一份全文的路徑。對照 bin/tg-send 記的 state/tg-msg-thread.tsv（chat\\tmid\\tthread\\tjob\\tepoch），
+    全文檔名是 state/tg-full/<mid>.txt：取該 thread 最後一筆、且檔案還在的。對不到回 None，不退回全域最新。"""
+    try:
+        with open(os.path.join(STATE, "tg-msg-thread.tsv"), encoding="utf-8") as f:
+            rows = [l.rstrip("\n").split("\t") for l in f if l.strip()]
+    except OSError:
+        return None
+    for r in reversed(rows):  # 檔案是 append，倒著找就是最新
+        if len(r) >= 3 and r[2] == thread:
+            p = os.path.join(STATE, "tg-full", f"{r[1]}.txt")
+            if os.path.isfile(p):
+                return p
+    return None
+
+
+def _full_newest() -> Optional[str]:
     full = os.path.join(STATE, "tg-full")
     try:
         names = [n for n in os.listdir(full) if n.endswith(".txt")]
     except OSError:
-        return "沒有可取的全文"
+        return None
     if not names:
+        return None
+    return os.path.join(full, max(names, key=lambda n: os.stat(os.path.join(full, n)).st_mtime_ns))
+
+
+def mythos_full_text(args: Dict[str, Any], **_: Any) -> str:
+    # ponytail: Router 呼叫不帶 thread、adhd-outlet 的 <epoch>.txt 也不在 tg-msg-thread.tsv，
+    # 對不到就退回全域最新（舊行為），否則線上「詳細」全壞。要精準對到被回覆的那則，留給 P3 讓 outlet 記 mid 對照。
+    thread = _text(args, "thread")
+    path = _full_for_thread(thread) if thread else None
+    if path is None:
+        path = _full_newest()
+    if path is None:
         return "沒有可取的全文"
-    newest = max(names, key=lambda n: os.stat(os.path.join(full, n)).st_mtime_ns)
+    thread = thread or "t-full"
     try:
-        with open(os.path.join(full, newest), encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             text = f.read()
     except OSError:
         return "讀不到全文"
-    thread = _text(args, "thread") or "t-full"
-    _log(int(time.time()), thread, newest, "mythos_full_text")
+    _log(int(time.time()), thread, os.path.basename(path), "mythos_full_text")
     env = dict(os.environ, MYTHOS_DIR=MYTHOS)
     try:
         r = subprocess.run([os.path.join(MYTHOS, "bin", "tg-send"), "--thread", thread, "--job", "bg-full"],

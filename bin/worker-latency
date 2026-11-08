@@ -106,6 +106,6 @@ def run() -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except Exception as e:  # 記帳失敗不擋 dispatch-watch
+    except Exception as e:  # 記帳失敗要讓呼叫端看得到：寫 stderr、非零；dispatch-watch 那行有 `|| true`，不會因此中斷
         print(f"worker-latency: {type(e).__name__}: {e}", file=sys.stderr)
-        sys.exit(0)
+        sys.exit(3)

@@ -80,7 +80,9 @@ if [ "$backend" = hermes ]; then
   sid="${id#bg-}"
   case "$sid" in ''|*[!0-9a-f]*) echo "id 取不出 hermes sid：$id" >&2; exit 1 ;; esac
   hp="$(tr -d '[:space:]' < "$MYTHOS_DIR/state/bg/$sid.pid" 2>/dev/null)"
-  case "$hp" in ''|*[!0-9]*) echo "hermes 沒有 pid 檔，ledger 已標 cancelled：$id" >&2; exit 0 ;; esac
+  # 沒有 pid 檔＝無從確認行程停了沒（可能是剛登錄還沒寫 pid，也可能是舊列）：回 4、ledger 不改，呼叫端不可當成已停
+  # 碼 4：與 1（失敗）、2（用法）、97（測試守門）不衝突；bin/dispatch-bg 的 --cancel／--interrupt 迴圈見非零就中止，不會在舊 worker 可能還活著時重派
+  case "$hp" in ''|*[!0-9]*) echo "hermes 沒有 pid 檔，無法確認已停，ledger 未改：$id" >&2; exit 4 ;; esac
   # 11-08 差距 #6：pid 會被重用，且 pid_start 寫在 ledger 之前——先核身分再標 cancelled，對不上就不殺、不改 ledger。
   ps_start="$(ps -o lstart= -p "$hp" 2>/dev/null)"
   ps_start="$(printf '%s' "$ps_start" | sed 's/  */ /g; s/^ //; s/ $//')"
