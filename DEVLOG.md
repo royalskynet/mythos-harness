@@ -3,6 +3,26 @@
 開發紀錄，新的在上面。只記做了什麼、為什麼；不含本機路徑、帳號與內部計畫。
 Development log, newest first. It records what changed and why, without local paths, accounts or internal plans.
 
+## 2026-11-08 — P6e observe 上線與接續 / P6e observe rollout and next steps
+
+- 2026-11-08 起，線上 Mythos gateway 以 `MYTHOS_FOLLOWUP_DIRECT=observe` 執行，由 gateway 的服務管理器環境變數注入。新版 mythos-tools 外掛已部署，`bin/hermes-contract` 無 FAIL。
+- observe 對 Router 行為無影響：所有訊息仍交 Router，背景只寫觀察紀錄。上線當下 `bin/followup-report` 為 candidates=0、would_queue=0。
+- 回退方式：移除該環境變數並重啟 gateway；部署前的外掛與服務設定都有備份。
+- 部署備忘：改了服務管理器的環境變數後，只 stop/start 不夠時需明確 kickstart。本次第一次重新載入後 gateway 未自動起來，手動啟動後恢復。
+- 接續開發（未完）：累積真實回覆樣本後，用 `bin/followup-report` 逐則核對 would_queue 與實際 Router 決定是否一致，再人工決定是否切 auto。
+- 切 auto 前確認：停止請求一律交 Router；claim 逾時時重複而不漏；`hermes-contract` 仍檢查 async hook 被 await 與 inbound skip。
+- Telegram proxy（tg-commands）目前未在線上載入，`--seen` 只供它使用；若之後啟用 proxy，需另驗 observe／auto 在該路徑的行為。
+- main 上既有的 6 個紅燈測試（test-bg-autoheal、test-compact-lock、test-dispatch-bg-watch、test-tg-send、test-watchdog、adhd-outlet）與 P6 無關，尚未處理。
+
+- Since 2026-11-08, the live Mythos gateway runs with `MYTHOS_FOLLOWUP_DIRECT=observe`, injected through the gateway service manager's environment variables. The updated mythos-tools plugin is deployed, and `bin/hermes-contract` reports no FAIL.
+- observe has no effect on Router behavior: all messages still go to the Router, while the background only writes observations. At rollout, `bin/followup-report` showed candidates=0 and would_queue=0.
+- Rollback: remove the environment variable and restart the gateway. The plugin and service configuration were both backed up before deployment.
+- Deployment note: after changing the service manager's environment variables, an explicit kickstart is required when stop/start alone is insufficient. The gateway did not start automatically after the first reload in this rollout; starting it manually restored service.
+- Next steps (unfinished): collect real reply samples, then use `bin/followup-report` to compare would_queue with the actual Router decision for each reply before manually deciding whether to enable auto.
+- Before enabling auto, verify that stop requests always go to the Router, claim timeouts allow duplicates rather than lost messages, and `hermes-contract` still checks that the async hook is awaited and inbound skip is supported.
+- The Telegram proxy (tg-commands) is not currently loaded in production; `--seen` is only for that proxy. If the proxy is enabled later, verify observe / auto behavior on that path separately.
+- The 6 existing failing tests on main (test-bg-autoheal, test-compact-lock, test-dispatch-bg-watch, test-tg-send, test-watchdog, adhd-outlet) are unrelated to P6 and remain unresolved.
+
 ## 2026-11-08 — P6d 喚醒不遺失 / P6d no lost wake-ups
 
 - dispatch-bg 完成後的單次喚醒若撞上 dispatch-watch 鎖，原本直接退出，持鎖者已掃過的新完成單只能等排程補掃。現在撞鎖先建立鎖旁的持久待掃旗標；持鎖者消費旗標再掃，釋鎖後再檢查並嘗試接手，登記者也再取一次鎖以關閉延遲登記空窗。
