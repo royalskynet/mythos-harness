@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 大腦：只讀 brief，用 Claude 訂閱 CLI 的 Opus 寫一張可執行工單（不接 API key）。
-# 用法：bin/opus-plan <brief.md> <out.md>；exit 2 用法／brief 過長，exit 1 claude 失敗或 out 缺 `## 驗收`。
+# 用法：bin/opus-plan <brief.md> <out.md>；exit 2 用法／brief 過長，exit 1 Opus 與備援都失敗或 out 缺 `## 驗收`。
 set -u
 brief="${1:-}" out="${2:-}"
 [ -f "$brief" ] && [ -n "$out" ] && [ $# -eq 2 ] || { echo "用法：bin/opus-plan <brief.md> <out.md>" >&2; exit 2; }
@@ -13,6 +13,13 @@ prompt="你是規劃者：只讀下面這份說明，寫一張可執行工單，
 
 說明：
 $(cat "$brief")"
-"$CLAUDE" -p --model opus "$prompt" </dev/null || { echo "claude 失敗（exit $?）" >&2; exit 1; }
-[ -f "$out" ] || { echo "claude 沒寫出 $out" >&2; exit 1; }
+# 主腦 Opus（Claude 訂閱 CLI）；失敗、沒寫出或缺 `## 驗收` 就換備援 opencode-go DeepSeek Pro 再寫一次（11-08 使用者定）。
+ok() { [ -f "$out" ] && grep -q '^## 驗收' "$out"; }
+"$CLAUDE" -p --model opus "$prompt" </dev/null && ok && exit 0
+echo "Opus 沒產出合格工單，改用備援 ${OPUS_PLAN_FALLBACK_MODEL:-opencode-go/deepseek-v4-pro}" >&2
+rm -f "$out"
+OC="${OPUS_PLAN_OPENCODE_BIN:-$(command -v opencode || true)}"
+[ -n "$OC" ] && [ -x "$OC" ] || { echo "找不到 opencode，備援不可用" >&2; exit 1; }
+"$OC" run -m "${OPUS_PLAN_FALLBACK_MODEL:-opencode-go/deepseek-v4-pro}" "$prompt" </dev/null || { echo "備援失敗（exit $?）" >&2; exit 1; }
+[ -f "$out" ] || { echo "備援沒寫出 $out" >&2; exit 1; }
 grep -q '^## 驗收' "$out" || { echo "$out 缺 '## 驗收'" >&2; exit 1; }

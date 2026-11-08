@@ -29,6 +29,21 @@ STUB
 chmod +x "$TMP/claude"
 export OPUS_PLAN_CLAUDE_BIN="$TMP/claude"
 
+# 假 opencode（備援）：記 argv；照 $TMP/ocmode 寫 out.md 或失敗
+echo fail > "$TMP/ocmode"
+cat > "$TMP/opencode" <<STUB
+#!/bin/sh
+printf '%s\n' "\$*" > "$TMP/ocargv"
+out=\$(printf '%s\n' "\$*" | sed -n 's|.*寫到 \([^ ]*\.md\)，.*|\1|p' | head -1)
+case "\$(cat "$TMP/ocmode")" in
+  good) printf '# 備援\n工作目錄：/tmp\n\n## 驗收\n\`\`\`bash\ntest -e /tmp\n\`\`\`\n' > "\$out" ;;
+  fail) exit 7 ;;
+esac
+exit 0
+STUB
+chmod +x "$TMP/opencode"
+export OPUS_PLAN_OPENCODE_BIN="$TMP/opencode"
+
 run() { timeout 20 bash "$ROOT/bin/opus-plan" "$@" >/dev/null 2>&1 </dev/null; echo $?; }
 
 # 1) 正常：exit 0、out.md 有 `## 驗收`、收到 --model opus、stdin 不是 pipe
@@ -50,6 +65,19 @@ echo bad > "$TMP/mode"
 # 4) claude 什麼都沒寫 → exit 1
 echo none > "$TMP/mode"
 [ "$(run "$TMP/brief" "$TMP/none.md")" = 1 ] || fail "claude 沒寫 out 應 exit 1"
+
+# 4b) 備援：Opus 沒寫出或缺驗收 → opencode-go/deepseek-v4-pro 補寫，exit 0；舊的不合格 out 先清掉
+echo good > "$TMP/ocmode"
+rm -f "$TMP/ocargv"
+[ "$(run "$TMP/brief" "$TMP/fb.md")" = 0 ] || fail "Opus 失敗、備援成功應 exit 0"
+grep -q -- '-m opencode-go/deepseek-v4-pro' "$TMP/ocargv" || fail "備援沒用 deepseek-v4-pro：$(cat "$TMP/ocargv" 2>/dev/null)"
+grep -q '^# 備援' "$TMP/fb.md" || fail "out 不是備援寫的"
+echo bad > "$TMP/mode"
+[ "$(run "$TMP/brief" "$TMP/fb2.md")" = 0 ] && grep -q '^# 備援' "$TMP/fb2.md" || fail "Opus 缺驗收時應由備援覆寫"
+# Opus 成功就不叫備援
+echo good > "$TMP/mode"; rm -f "$TMP/ocargv"
+[ "$(run "$TMP/brief" "$TMP/ok2.md")" = 0 ] && [ ! -e "$TMP/ocargv" ] || fail "Opus 成功不該叫備援"
+echo fail > "$TMP/ocmode"
 
 # 5) 用法錯 → exit 2
 [ "$(run "$TMP/brief")" = 2 ] || fail "缺參數應 exit 2"
