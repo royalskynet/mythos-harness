@@ -5,7 +5,9 @@
 由 bin/dispatch-watch 每輪呼叫（已在 watch 鎖內，不會兩輪重複寫）。
 - 帳：state/worker-latency.tsv（session_id、開始時間 UTC+8、首回秒數、模型），已記過的 session 不重記。
 - 首回 ≥ WORKER_LAT_ALERT_SEC（預設 90）：寫一行 ⚠ 到 brief-lines，由 fleet-alerts 每小時轉 Scribe；附 7 天內第幾次。
-ponytail: 只記「已回」的 session；卡住一直沒回的不在這裡抓（那是 dispatch-watch 的 STALL）。
+- 11-08 G09：user 訊息過 THRESH 秒仍無 assistant 的 session，寫一行 ⚠「首回逾 … 秒仍未回」，每個 session 只告一次
+  （帳裡寫 `<sid>-stall` 列當去重）；之後回了照常補記秒數，不再重告。worker 庫打不開／查詢錯→
+  stderr `telemetry_unavailable: …`、結束碼 3（dispatch-watch 有 `|| true`，不擋派工）。
 """
 import os
 import sqlite3
@@ -24,7 +26,16 @@ LOOKBACK = 2 * 86400  # 只看兩天內開始的 session
 
 def main() -> int:
     if not os.path.exists(DB):
-        return 0
+        print(f"telemetry_unavailable: {DB} 不存在", file=sys.stderr)
+        return 3
+    try:
+        return run()
+    except sqlite3.Error as e:
+        print(f"telemetry_unavailable: {type(e).__name__}: {e}", file=sys.stderr)
+        return 3
+
+
+def run() -> int:
     seen = set()
     rows = []
     if os.path.exists(LEDGER):
@@ -41,19 +52,30 @@ def main() -> int:
             " WHERE u.t0>=? ORDER BY u.t0", (time.time() - LOOKBACK,)).fetchall()
     finally:
         con.close()
-    new = [(sid, t0, t1, model or "") for sid, t0, t1, model in q if t1 is not None and sid not in seen]
-    if not new:
-        return 0
     os.makedirs(os.path.dirname(LEDGER), exist_ok=True)
     with open(LEDGER, "a", encoding="utf-8") as f:
-        for sid, t0, t1, model in new:
+        # 逾時未回：每個 session 只告一次
+        now = time.time()
+        for sid, t0, t1, model in q:
+            if t1 is not None or now - t0 < THRESH or sid + "-stall" in seen:
+                continue
+            when = datetime.fromtimestamp(t0, TPE).strftime("%Y-%m-%d %H:%M:%S")
+            f.write(f"{sid}-stall\t{when}\t-\t{model or ''}\n")
+            seen.add(sid + "-stall")
+            os.makedirs(os.path.dirname(ALERT), exist_ok=True)
+            with open(ALERT, "a", encoding="utf-8") as a:
+                a.write(f"{when[:10]}\tMythos worker 首回逾 {THRESH:.0f} 秒仍未回：⚠ {sid}（{model or '-'}，{when[11:16]} 開始）\n")
+        for sid, t0, t1, model in q:
+            if t1 is None or sid in seen:
+                continue
             lat = round(t1 - t0, 1)
             when = datetime.fromtimestamp(t0, TPE).strftime("%Y-%m-%d %H:%M:%S")
             f.write(f"{sid}\t{when}\t{lat}\t{model}\n")
             rows.append([sid, when, str(lat), model])
             if lat >= THRESH:
                 week = (datetime.now(TPE) - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
-                n = sum(1 for r in rows if len(r) > 2 and r[1] >= week and float(r[2]) >= THRESH)
+                # 只數真正回了的慢帳（-stall 去重列秒數是「-」，不算）
+                n = sum(1 for r in rows if len(r) > 2 and r[1] >= week and r[2] != "-" and float(r[2]) >= THRESH)
                 os.makedirs(os.path.dirname(ALERT), exist_ok=True)
                 with open(ALERT, "a", encoding="utf-8") as a:
                     a.write(f"{when[:10]}\tMythos worker 首回慢：⚠ {lat:.0f}s（{model}，{when[11:16]}，7 天內第 {n} 次）\n")
