@@ -1,0 +1,20 @@
+name: mythos
+version: 1.0.0
+description: "Mythos Router：Telegram 前台，只聊天＋派工；回覆一律經 adhd-outlet 出口"
+# 下限＝目前驗過的版本。升 Hermes 後跑 bin/hermes-contract，過了才算相容
+hermes_requires: ">=0.21.0"
+author: "royalskynet"
+license: "MIT"
+# 明列擁有範圍：skills/、cron/ 是本機狀態，update 不碰
+distribution_owned:
+  - SOUL.md
+  - config.yaml
+  - plugins
+  - distribution.yaml
+env_requires:
+  - name: MYTHOS_TG_CHAT_ID
+    description: "Telegram 使用者 chat id（config.yaml 的 allow_from／home_channel 由它展開）"
+    required: true
+  - name: TELEGRAM_BOT_TOKEN
+    description: "Router 的 Telegram bot token"
+    required: true

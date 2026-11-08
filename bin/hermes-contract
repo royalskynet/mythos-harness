@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# Hermes 升版後的契約檢查：Mythos 外殼依賴的 Hermes 介面還在不在、線上 profile 跟 repo 正本有沒有漂移。
+# 任一條不過就 exit 1，印 FAIL 行；全過印 CONTRACT_OK。
+# 升級流程見 README「升級 Hermes」：hermes update → bin/hermes-contract → hermes profile update → 再跑一次。
+# 掛鉤名與 ctx 方法從 repo 的 plugin 原始碼抓（不手列清單），plugin 多用一個新介面就自動納入檢查。
+set -u
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="${HERMES_AGENT_ROOT:-$HOME/.hermes/hermes-agent}"
+LIVE="${HERMES_PROFILES_ROOT:-$HOME/.hermes/profiles}"
+DIST="${MYTHOS_DIST_DIR:-$REPO/profiles}"
+HERMES="${HERMES_BIN:-$HOME/.local/bin/hermes}"
+fail=0
+bad() { echo "FAIL $*"; fail=1; }
+
+# 1. Python 介面（用 hermes 自己的 python 匯入，launcher 解析法同 bin/hermes-logged）
+PY="$(sed -n 's/^exec \([^ ]*python3\) .*/\1/p' "$ROOT/.hermes/bin/hermes" 2>/dev/null | head -1)"
+if [ -z "$PY" ] || [ ! -x "$PY" ]; then
+  bad "launcher：${ROOT}/.hermes/bin/hermes 解析不到 python（bin/hermes-logged 會退回無 log 模式）"
+else
+  hooks="$(grep -hoE 'register_hook\("[a-z_]+"' "$DIST"/mythos/plugins/*/__init__.py | sed 's/.*("//; s/"$//' | sort -u | tr '\n' ' ')"
+  ctxm="$(grep -hoE 'ctx\.[a-z_]+\(' "$DIST"/mythos/plugins/*/__init__.py | sed 's/ctx\.//; s/($//' | sort -u | tr '\n' ' ')"
+  "$PY" -I - "$ROOT" "$hooks" "$ctxm" <<'PYEOF' || fail=1
+import sys, os
+root, hooks, ctxm = sys.argv[1], sys.argv[2].split(), sys.argv[3].split()
+sys.path.insert(0, root)
+os.environ.setdefault("HERMES_HOME", os.path.expanduser("~/.hermes"))
+import hermes_bootstrap  # 同 hermes-logged：先讓 PM 把相依路徑掛上
+from importlib import import_module
+bad = []
+
+def hooks_valid():
+    missing = set(hooks) - set(import_module("hermes_cli.plugins").VALID_HOOKS)
+    return True if not missing else f"plugin 用到但 VALID_HOOKS 沒有 {sorted(missing)}"
+def ctx_methods():
+    cls = getattr(import_module("hermes_cli.plugins"), "PluginContext", None)
+    if cls is None:
+        return "hermes_cli.plugins.PluginContext 不見了"
+    missing = [m for m in ctxm if not hasattr(cls, m)]
+    return True if not missing else f"PluginContext 少了 {missing}"
+def interim_off():
+    # 出口只攔最終回覆；中間訊息靠這個設定關掉（11-08）。解析器改語意就會漏
+    r = import_module("gateway.display_config").resolve_display_setting
+    cfg = {"display": {"platforms": {"telegram": {"interim_assistant_messages": False}}}}
+    v = r(cfg, "telegram", "interim_assistant_messages")
+    return True if v is False else f"per-platform 設 false 卻解析成 {v!r}"
+def standalone_shim():
+    # gateway.standalone 是官方標明的過渡 shim；拿掉時 outlet 會回到 multiplexer 下不觸發的老問題
+    ok = hasattr(import_module("hermes_cli.gateway_multiplex_mode"), "STANDALONE_PROFILE_REASON")
+    return True if ok else "gateway.standalone shim 已移除：先查 multiplexer 下 profile plugin 的 transform_llm_output 會不會觸發"
+def bg_review_key():
+    aux = import_module("hermes_cli.config_defaults").DEFAULT_CONFIG.get("auxiliary", {})
+    return True if "enabled" in aux.get("background_review", {}) else "auxiliary.background_review.enabled 不見了（worker 關 bg-review 靠它）"
+def dist_api():
+    m = import_module("hermes_cli.profile_distribution")
+    return True if all(hasattr(m, f) for f in ("update_distribution", "read_manifest")) else "profile distribution API 變了"
+
+for n, f in [("hooks", hooks_valid), ("ctx", ctx_methods), ("interim", interim_off),
+             ("standalone", standalone_shim), ("bg-review", bg_review_key), ("distribution", dist_api)]:
+    try:
+        ok = f()
+    except Exception as e:  # 介面消失多半是 ImportError／AttributeError，一律當 FAIL 印原因
+        ok = f"{type(e).__name__}: {e}"
+    if ok is not True:
+        bad.append(f"{n}：{ok}")
+for b in bad:
+    print("FAIL", b)
+sys.exit(1 if bad else 0)
+PYEOF
+fi
+
+# 2. 原始碼層的依賴（沒有可匯入的介面，只能看字串）
+# ponytail: 上游改名時這裡先叫，再人工確認；有公開 API 後改成匯入檢查
+grep -q 'stale_timeout_seconds' "$ROOT/run_agent.py" 2>/dev/null \
+  || bad "run_agent.py 不再讀 per-model stale_timeout_seconds（worker 的 90s 防卡設定失效）"
+grep -q 'logging.disable' "$ROOT/hermes_cli/oneshot.py" 2>/dev/null \
+  || echo "NOTE oneshot 不再 logging.disable：bin/hermes-logged 可以退役"
+
+# 3. hermes-logged 入口能起來
+HERMES_AGENT_ROOT="$ROOT" "$REPO/bin/hermes-logged" --version >/dev/null 2>&1 || bad "bin/hermes-logged --version 跑不起來"
+
+# 4. 線上設定實際被 CLI 讀到
+if [ -x "$HERMES" ]; then
+  v="$("$HERMES" -p mythos config get display.platforms.telegram.interim_assistant_messages 2>/dev/null | tail -1)"
+  case "$v" in *[Ff]alse*) ;; *) bad "mythos 的 interim_assistant_messages 讀出來是「${v}」，不是 false" ;; esac
+fi
+
+# 5. 漂移：線上 profile 跟 repo 正本要一致（config 的 chat id 先換回變數再比）
+drift() {  # $1 profile　$2 相對路徑
+  a="$DIST/$1/$2"; b="$LIVE/$1/$2"
+  if [ -d "$a" ]; then
+    diff -rq -x '*.bak-*' -x __pycache__ -x claude-mem "$a" "$b" >/dev/null 2>&1 || bad "漂移 $1/$2（diff -rq -x '*.bak-*' -x __pycache__ ${a} ${b}）"
+  elif [ "$2" = config.yaml ]; then
+    sed -E "s/'[0-9]{6,}'/'\${MYTHOS_TG_CHAT_ID}'/g" "$b" 2>/dev/null | cmp -s - "$a" || bad "漂移 $1/config.yaml"
+  else
+    cmp -s "$a" "$b" || bad "漂移 $1/$2"
+  fi
+}
+for f in SOUL.md config.yaml plugins; do drift mythos "$f"; done
+for f in SOUL.md config.yaml profile.yaml; do drift mythos-worker "$f"; done
+[ -L "$LIVE/mythos-worker/plugins/claude-mem" ] || bad "mythos-worker/plugins/claude-mem symlink 不見了（worker 記憶層斷）"
+
+[ "$fail" = 0 ] && echo CONTRACT_OK
+exit "$fail"

@@ -1,0 +1,72 @@
+model:
+  default: beam-free
+  provider: opencode-go
+  base_url: https://opencode.ai/zen/go/v1
+  api_mode: chat_completions
+fallback_providers:
+  - provider: opencode-go
+    model: deepseek-v4.1-flash
+  - provider: opencode-go
+    model: glm-5.3-flash
+model_catalog:
+  excluded_providers:
+    - openrouter
+    - copilot
+    - ollama-cloud
+    - anthropic
+plugins:
+  enabled:
+    - mythos-tools
+    - router-guard
+    - adhd-outlet
+  entries:
+    mythos-tools:
+      allow_gateway_injection: true
+_config_version: 47
+memory:
+  memory_enabled: true
+  user_profile_enabled: true
+  memory_char_limit: 2200
+  user_char_limit: 1375
+gateway:
+  # 11-08：multiplexer 下 profile plugin 的 transform_llm_output 從沒觸發（outlet 漏擋 reasoning-only 回覆），
+  # 改跑自己的 gateway 行程。官方標明是過渡 shim，移除前 release notes 會預告。
+  standalone: true
+  platforms:
+    telegram:
+      enabled: true
+      extra:
+        allow_from:
+          - '${MYTHOS_TG_CHAT_ID}'
+approvals:
+  destructive_slash_confirm: false
+platforms:
+  telegram:
+    enabled: true
+    home_channel:
+      platform: telegram
+      chat_id: '${MYTHOS_TG_CHAT_ID}'
+      name: Ether
+      user_id: '${MYTHOS_TG_CHAT_ID}'
+display:
+  busy_ack_enabled: false
+  # 11-08：transform_llm_output 每回合只對最終回覆觸發一次（agent/turn_finalizer.py:470），
+  # 工具呼叫旁的中間訊息直接送 TG、不經 adhd-outlet。關掉，只留最終回覆一條出口（取代升 Hermes 換 hold_stream）。
+  platforms:
+    telegram:
+      interim_assistant_messages: false
+# 11-08：Router 只聊天＋派工。只給 mythos toolset（mythos_dispatch／mythos_full_text），不給任何 MCP；
+# 不開 tool_search，免得它在找工具的迴圈裡占住對話。
+platform_toolsets:
+  telegram: [mythos, no_mcp]
+  cli: [mythos, no_mcp]
+tools:
+  tool_search:
+    enabled: off
+# 11-08 驗屍 #4：供應商暫掛時不在同一回合裡重試／自癒占住對話；fallback 鏈照走。
+# coding_context 預設 auto：cwd 像程式 repo 就注入「coding agent」說明（叫模型用 read_file／search_files），
+# Router 沒這些工具卻會照著編造呼叫、多一輪。Router 永遠不是 coding agent。
+agent:
+  coding_context: "off"
+  api_max_retries: 1
+  auto_recovery_cycles: 0

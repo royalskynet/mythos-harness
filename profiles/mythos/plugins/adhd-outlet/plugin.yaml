@@ -1,0 +1,6 @@
+name: adhd-outlet
+version: 0.1.0
+description: "Router 出口套 ADHD 格式：telegram 回覆經 bin/adhd-lint.mjs --truncate，超標換截斷版並存全文供「詳細」取回。零 LLM、零網路。"
+author: Ether
+provides_hooks:
+  - transform_llm_output

@@ -1,0 +1,13 @@
+name: mythos-worker
+version: 1.0.0
+description: "Mythos worker：hermes -z 無人值守跑 Router 派下的工"
+hermes_requires: ">=0.21.0"
+author: "royalskynet"
+license: "MIT"
+# plugins/claude-mem 是指向 ~/.hermes/plugins/claude-mem 的 symlink（distribution 不收 symlink），
+# 新機安裝後補：ln -s ~/.hermes/plugins/claude-mem ~/.hermes/profiles/mythos-worker/plugins/claude-mem
+distribution_owned:
+  - SOUL.md
+  - config.yaml
+  - profile.yaml
+  - distribution.yaml

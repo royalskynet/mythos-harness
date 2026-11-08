@@ -30,7 +30,7 @@ chat with Sonnet; every request goes to a background haiku worker that triages a
 - **追問、取消、改方向**：`mythos_dispatch` 的 `mode` 有 queue（預設，補充排隊）、cancel（停掉整個行程樹，結果不再送回）、interrupt（停掉後帶原需求＋新指示重做）。
 - **送達確認**：注入後查對話紀錄確認真的落地；逾時沒落地就直接發 Telegram。
 - **多 profile 共用 gateway**：外掛由自己所在的目錄推 profile 的 `state.db`，不看 `HERMES_HOME`（gateway 行程裡它指向主機 profile）。
-- profile 端的 SOUL 與外掛（mythos-tools、router-guard、adhd-outlet）放在 Hermes profile 目錄，不在本 repo。
+- profile 端的 SOUL、config、外掛（mythos-tools、router-guard、adhd-outlet）正本在 `profiles/`，以 Hermes 原生 profile distribution 裝到 `~/.hermes/profiles/`，見下方「升級 Hermes」。
 - **已知問題**：Telegram 回合裡還沒觀察到出口外掛被呼叫（oneshot 正常），追查中；一次實測 worker 第一次模型回應等了 150 秒（單獨跑同題 13 秒），原因未明。
 
 **One Mythos.** The Telegram conversation and every session that does work for you are the same Mythos. User-facing text never mentions dispatching, tickets, ids or anyone else; `bin/adhd-lint.mjs` rejects such wording and the outlet drops those sentences.
@@ -40,7 +40,7 @@ chat with Sonnet; every request goes to a background haiku worker that triages a
 - `mode`: queue (default), cancel (kills the whole process tree; the result is never delivered), interrupt (kills it and redoes the original request plus the new instruction).
 - Delivery is confirmed against the conversation log; if the injected message never lands it is sent to Telegram directly.
 - Plugins locate `state.db` from their own directory, not `HERMES_HOME`, because the shared multi-profile gateway process points that at the host profile.
-- The profile's SOUL and plugins live in the Hermes profile directory, not in this repo.
+- The profiles' SOUL, config and plugins live in `profiles/` and are installed as native Hermes profile distributions; see “Upgrading Hermes” below.
 - **Known issues:** the outlet plugin has not yet been observed running on Telegram turns (it works in one-shot runs); under investigation. In one live run the worker's first model response took 150 s versus 13 s when run alone; cause unknown.
 
 ```
@@ -61,6 +61,17 @@ chat with Sonnet; every request goes to a background haiku worker that triages a
         watchdog（每 5 分）── L0 零 token：死鎖、重送用盡、Router 未回、pending 逾 6 小時、deep 停滯、背景 agent 卡權限 → brief-lines
                       └─ log 錯誤行進待判 → L1 免費模型（每小時上限；白名單→scrub 去識別→canary）→ 退路鏈 → 規則表 → 判不了才告警
 ```
+
+## 升級 Hermes / Upgrading Hermes
+
+Mythos 不改 hermes-agent 原始碼，只靠三樣東西接上它：`profiles/` 兩個 distribution、`bin/` 的外部腳本、`bin/hermes-contract` 的契約檢查。
+
+- **正本在 repo**：`profiles/mythos`（Router）、`profiles/mythos-worker`（worker）各有 `distribution.yaml`，`distribution_owned` 明列 SOUL、config、外掛；skills、cron、記憶、session 都是本機資料，update 不碰。config 的 Telegram chat id 寫成 `${MYTHOS_TG_CHAT_ID}`，線上 config 在 update 時保留（不加 `--force-config` 就不覆蓋）。
+- **改 SOUL／外掛**：改 `profiles/` 裡的檔 → `hermes profile update mythos -y`（worker 同理）→ `bin/hermes-contract`。直接改 `~/.hermes/profiles/` 會被契約檢查判成漂移。
+- **升 Hermes**：`hermes update` → `bin/hermes-contract`，任何 `FAIL` 行先修再重啟 gateway（`hermes -p mythos gateway restart`）。檢查項：外掛用到的掛鉤名與 `ctx` 方法（從外掛原始碼抓，不手列）、per-platform `interim_assistant_messages` 解析、`gateway.standalone` 過渡 shim、`auxiliary.background_review.enabled`、per-model `stale_timeout_seconds`、`bin/hermes-logged` 能起來、線上 profile 與 repo 一致、worker 的 claude-mem symlink。
+- **新機安裝**：`hermes profile install profiles/mythos` 與 `profiles/mythos-worker`，在 profile `.env` 填 `MYTHOS_TG_CHAT_ID`、bot token，再 `ln -s ~/.hermes/plugins/claude-mem ~/.hermes/profiles/mythos-worker/plugins/claude-mem`（distribution 不收 symlink）。
+
+Mythos never patches hermes-agent. It attaches through two profile distributions in `profiles/`, external scripts in `bin/`, and the `bin/hermes-contract` check. Edit files under `profiles/`, then `hermes profile update <name> -y`. After `hermes update`, run `bin/hermes-contract`; fix every `FAIL` line before restarting the gateway. The contract derives hook names and `ctx` methods from the plugin sources, checks the per-platform interim-message setting, the `gateway.standalone` shim, the background-review and per-model timeout keys, the `hermes-logged` launcher, profile drift against this repo, and the worker's claude-mem symlink.
 
 ## 秒回 / Instant replies
 

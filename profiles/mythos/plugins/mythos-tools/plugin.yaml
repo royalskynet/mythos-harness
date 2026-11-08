@@ -1,0 +1,8 @@
+name: mythos-tools
+version: 0.1.0
+description: "Mythos Router 的手：mythos_dispatch（原話交 bin/dispatch-bg）、mythos_recall（bin/recall 唯讀索引）、mythos_full_text（取回被截斷的全文交 bin/tg-send）。"
+author: Ether
+provides_tools:
+  - mythos_dispatch
+  - mythos_recall
+  - mythos_full_text

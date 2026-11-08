@@ -1,0 +1,6 @@
+name: router-guard
+version: 0.1.0
+description: "Router 只放行 mythos_dispatch／mythos_recall／mythos_full_text／Hermes 記憶工具，其他工具一律 block 並改指 mythos_dispatch。零 LLM、零網路。"
+author: Ether
+provides_hooks:
+  - pre_tool_call
