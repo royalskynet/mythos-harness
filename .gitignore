@@ -8,7 +8,6 @@
 !/bin/
 !/tests/
 !/router/
-!/docs/
 /bin/*
 !/bin/dispatch
 !/bin/dispatch-bg
