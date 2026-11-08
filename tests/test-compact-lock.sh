@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 11-07 回歸：全部資料與 runner 都在暫存目錄。
 set -eu
+export MYTHOS_RUNTIME=claude  # 測 Claude TUI 舊流程；Hermes 模式另見 tests/test-hermes-control-loop.py
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/mythos-1107.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
