@@ -54,6 +54,7 @@
 !/tests/test-tg-reply-thread.sh
 !/tests/test-small-residuals.sh
 !/tests/test-thread-routing.py
+!/tests/test-superagent-replay.py
 !/tests/test_tg_commands.mjs
 !/tests/test_dispatch_gate.mjs
 !/tests/test-review-judge.sh
