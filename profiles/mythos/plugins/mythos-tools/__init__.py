@@ -372,29 +372,16 @@ def _recall_count(sid: str) -> int:
         return n
 
 
-# 11-08：Router 說話規則直接套 Genie 本體（不複製）：每回合注入 `prefs.py context` 的輸出，
-# 偏好檔 state/genie-prefs.json（level 等用 `GENIE_PREFS=… prefs.py set` 改）。找不到 Genie 或跑失敗就不注入。
-_GENIE_DIRS = [os.environ.get("MYTHOS_GENIE_DIR", ""),
-               os.path.expanduser("~/.claude/plugins/marketplaces/genie-harness"),
-               os.path.expanduser("~/dev/genie-harness")]
-GENIE_PREFS = os.path.join(STATE, "genie-prefs.json")
-_genie_cache: Dict[str, Any] = {"key": None, "text": ""}
+# 11-08：Router 說話規則直接套 Genie 本體（不複製）：每回合注入 bin/genie-context 的輸出（跟著 Claude Code
+# 裝的版本走，找法見該檔）。偏好檔 state/genie-prefs.json。找不到 Genie 或跑失敗就不注入。
+# ponytail: 每回合跑一次約 0.2 秒，不快取；回合變多或嫌慢再按 installed_plugins.json／偏好檔 mtime 快取。
 
 
 def _genie_context() -> str:
-    script = next((os.path.join(d, "router", "prefs.py") for d in _GENIE_DIRS
-                   if d and os.path.isfile(os.path.join(d, "router", "prefs.py"))), "")
-    if not script:
-        return ""
     try:
-        key = (script, os.path.getmtime(script),
-               os.path.getmtime(GENIE_PREFS) if os.path.exists(GENIE_PREFS) else 0)
-        if key != _genie_cache["key"]:
-            out = subprocess.run(["python3", script, "context"], capture_output=True, text=True,
-                                 timeout=5, env={**os.environ, "GENIE_PREFS": GENIE_PREFS})
-            text = out.stdout.strip() if out.returncode == 0 else ""
-            _genie_cache.update(key=key if text else None, text=text)
-        return _genie_cache["text"]
+        out = subprocess.run([os.environ.get("MYTHOS_GENIE_BIN") or os.path.join(MYTHOS, "bin", "genie-context")], capture_output=True,
+                             text=True, timeout=8, stdin=subprocess.DEVNULL)
+        return out.stdout.strip() if out.returncode == 0 else ""
     except Exception:
         return ""
 

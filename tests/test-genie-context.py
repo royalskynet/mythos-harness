@@ -31,7 +31,8 @@ def fail(msg):
 
 write_fake("import os,sys\nassert sys.argv[1]=='context'\n"
            "print('[genie prefs] fake', os.path.basename(os.environ['GENIE_PREFS']))\n", 1)
-os.environ.update(MYTHOS_DIR=os.path.join(TMP, "mythos"), MYTHOS_GENIE_DIR=GENIE)
+os.environ.update(MYTHOS_DIR=os.path.join(TMP, "mythos"), MYTHOS_GENIE_DIR=GENIE,
+                  MYTHOS_GENIE_BIN=os.path.join(ROOT, "bin", "genie-context"))
 sys.path.insert(0, PLUGIN_DIR)
 import __init__ as tools  # noqa: E402
 
@@ -52,6 +53,19 @@ write_fake("import sys\nsys.exit(1)\n", 2)
 got = tools._on_pre_llm_call(session_id="s1")
 if got is not None:
     fail(f"prefs.py 失敗應不注入，得到 {got!r}")
+
+# 找 Genie：沒設 MYTHOS_GENIE_DIR 時跟著 Claude Code 裝的版本（installed_plugins.json 的 user scope installPath）
+import json  # noqa: E402
+import subprocess  # noqa: E402
+INST = os.path.join(TMP, "installed_plugins.json")
+with open(INST, "w") as f:
+    json.dump({"plugins": {"genie-harness@genie-harness": [
+        {"scope": "project", "installPath": "/nonexistent"}, {"scope": "user", "installPath": GENIE}]}}, f)
+env = {k: v for k, v in os.environ.items() if k != "MYTHOS_GENIE_DIR"}
+env.update(HOME=TMP, CLAUDE_INSTALLED_PLUGINS=INST)
+d = subprocess.run([os.path.join(ROOT, "bin", "genie-context"), "--dir"], capture_output=True, text=True, env=env).stdout.strip()
+if d != GENIE:
+    fail(f"應找到 installed_plugins.json 的 user installPath，得到 {d!r}")
 
 shutil.rmtree(TMP, True)
 print("GENIE_CONTEXT_OK")

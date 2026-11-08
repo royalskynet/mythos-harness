@@ -10,6 +10,7 @@ Development log, newest first. It records what changed and why, without local pa
 - 上限放寬為 500 字、12 行、每行 60 字；清單後可留一行不編號的收尾。SOUL 加一條：「那是什麼」的答案在這段對話裡就自己白話解釋，要查機器上的事實才派工。
 - 背景工作直接寄給使用者的摘要也套同一份規則：派工時把 Genie 輸出附在工作指示尾端，限定用在「摘要：」段。
 - 上線後她仍回「我查一下」，原因有兩個：舊規則「系統／專案問題一律派工」壓過新規則；Hermes 每段對話會凍結當時的系統提示，重啟也不會換。已把白話解釋那條移到最前面並寫明優先；外掛在使用者追問剛轉過的結果時，每回合加一行提醒；並用 `hermes sessions refresh-prompts` 讓進行中的對話改用新規則。
+- Genie 路徑改跟 Claude Code 裝的版本：共用的 `bin/genie-context` 讀 `installed_plugins.json` 的 installPath（帶版本號，升級就換），Router 外掛與背景派工都呼叫它。原本寫死的 marketplaces 路徑不存在，實際一直退到開發版。接手說明見 HANDOFF.md。
 - 新增 `tests/test-genie-context.py`；`test-adhd-lint` 加一則約 270 字、7 行的回覆，預設上限改回 220 時會失敗。舊測試釘住舊上限，照原意驗格式。
 
 - The user reported that the Router did not talk plainly and could not explain "what is that". Two causes: the Router had no plain-language rules, and the 220-character, 6-line cap with mandatory numbering after the first line left no room to explain anything.
@@ -17,6 +18,7 @@ Development log, newest first. It records what changed and why, without local pa
 - Limits are now 500 characters, 12 lines and 60 characters per line, and a list may end with one unnumbered closing line. SOUL gained a rule: when the answer to "what is that" is already in the conversation, explain it plainly; dispatch only for facts on the machine.
 - Summaries that background workers send straight to the user follow the same rules: dispatch appends the Genie output to the worker prompt, scoped to the summary section.
 - After deploy she still answered "let me check". Two causes: the older "always dispatch system or project questions" rule outranked the new one, and Hermes freezes the system prompt per conversation, so a restart does not reload it. The explain rule now comes first and says it takes priority, the plugin adds a one-line hint when the user asks about a result just relayed, and `hermes sessions refresh-prompts` moved the running conversation to the new rules.
+- Genie now follows the Claude Code install: the shared `bin/genie-context` reads installPath from `installed_plugins.json` (versioned, changes on upgrade), and both the Router plugin and background dispatch call it. The hard-coded marketplaces path never existed, so the dev checkout was being used. See HANDOFF.md for handoff notes.
 - Added `tests/test-genie-context.py`. `test-adhd-lint` gained a reply of about 270 characters in 7 lines that fails if the default cap goes back to 220. Older tests pin the old limits so they still check format as intended.
 
 ## 2026-11-08 — 「詳細」全文送不出 / Full-text replies failed
