@@ -11,6 +11,7 @@ Development log, newest first. It records what changed and why, without local pa
 - 背景工作直接寄給使用者的摘要也套同一份規則：派工時把 Genie 輸出附在工作指示尾端，限定用在「摘要：」段。
 - 上線後她仍回「我查一下」，原因有兩個：舊規則「系統／專案問題一律派工」壓過新規則；Hermes 每段對話會凍結當時的系統提示，重啟也不會換。已把白話解釋那條移到最前面並寫明優先；外掛在使用者追問剛轉過的結果時，每回合加一行提醒；並用 `hermes sessions refresh-prompts` 讓進行中的對話改用新規則。
 - Genie 路徑改跟 Claude Code 裝的版本：共用的 `bin/genie-context` 讀 `installed_plugins.json` 的 installPath（帶版本號，升級就換），Router 外掛與背景派工都呼叫它。原本寫死的 marketplaces 路徑不存在，實際一直退到開發版。接手說明見 HANDOFF.md。
+- CI 紅燈 `test-compact-lock`：先前 ctx-guard 改成預設 Hermes 模式（不送 /compact、不取鎖），這支測的是 Claude TUI 的壓縮鎖流程卻沒指定模式，所以必紅。補 `MYTHOS_RUNTIME=claude`，與同類測試一致；Hermes 那條路由 `test-hermes-control-loop.py` 覆蓋。
 - 新增 `tests/test-genie-context.py`；`test-adhd-lint` 加一則約 270 字、7 行的回覆，預設上限改回 220 時會失敗。舊測試釘住舊上限，照原意驗格式。
 
 - The user reported that the Router did not talk plainly and could not explain "what is that". Two causes: the Router had no plain-language rules, and the 220-character, 6-line cap with mandatory numbering after the first line left no room to explain anything.
@@ -19,6 +20,7 @@ Development log, newest first. It records what changed and why, without local pa
 - Summaries that background workers send straight to the user follow the same rules: dispatch appends the Genie output to the worker prompt, scoped to the summary section.
 - After deploy she still answered "let me check". Two causes: the older "always dispatch system or project questions" rule outranked the new one, and Hermes freezes the system prompt per conversation, so a restart does not reload it. The explain rule now comes first and says it takes priority, the plugin adds a one-line hint when the user asks about a result just relayed, and `hermes sessions refresh-prompts` moved the running conversation to the new rules.
 - Genie now follows the Claude Code install: the shared `bin/genie-context` reads installPath from `installed_plugins.json` (versioned, changes on upgrade), and both the Router plugin and background dispatch call it. The hard-coded marketplaces path never existed, so the dev checkout was being used. See HANDOFF.md for handoff notes.
+- CI was red on `test-compact-lock`. ctx-guard had switched to Hermes mode by default (no /compact, no lock), but this test covers the Claude TUI compaction lock and never set the mode, so it always failed. It now sets `MYTHOS_RUNTIME=claude` like its sibling tests; `test-hermes-control-loop.py` covers the Hermes path.
 - Added `tests/test-genie-context.py`. `test-adhd-lint` gained a reply of about 270 characters in 7 lines that fails if the default cap goes back to 220. Older tests pin the old limits so they still check format as intended.
 
 ## 2026-11-08 — 「詳細」全文送不出 / Full-text replies failed

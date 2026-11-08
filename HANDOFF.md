@@ -28,17 +28,17 @@
 
 - 本輪新增或改動：`tests/test-genie-context.py`、`tests/test-adhd-lint.sh`（g）、`tests/test-dispatch-metadata.py`（Genie 兩例）。都做過突變檢查，改壞會紅。
 - `tests/` 被 `.gitignore` 白名單擋，新測試要 `git add -f`。
-- 既有紅燈（本輪之前就紅，與本輪無關）：`test-compact-lock`（CI 紅的原因）、`check_1107.py`、`test-superagent-replay.py`、`test-test-guard.sh`。
+- `test-compact-lock`（CI 紅燈）已修：測 Claude TUI 流程的測試要 `export MYTHOS_RUNTIME=claude`，ctx-guard 預設是 Hermes 模式。
+- 既有紅燈（本輪之前就紅，與本輪無關）：`test-superagent-replay.py`、`test-test-guard.sh`。`check_1107.py` 是輔助腳本，要帶 mode 參數，單獨跑會 IndexError，不算紅燈。
 
 ## 還沒做完 / 待驗證
 
 1. **真實對話還沒驗證**：Router 用免費模型。若被追問仍回「我查一下」，下一步在 `router-guard` 的 `pre_tool_call` 擋 `mythos_dispatch`（條件同 `_asks_about_last_result`），附訊息叫它直接答。
 2. 背景摘要套 Genie 後的實際效果，等下一則摘要看。
-3. 修 `test-compact-lock`（CI 紅燈）。
-4. P6 追問影子模式：觀察到 20 個候選後用 `bin/followup-report --routed` 比對。
-5. 結果防幻覺（P6h）的本機判斷 ledger：約 11-22 看誤判率，決定要不要讓它擋。
-6. 派工佇列（O／dcq）有兩個已知問題：測試的 runner 漏到正式 socket、逐單指定模型無效。已在派工工具的 repo 開 issue，由另一條線處理，這裡不動。
+3. P6 追問影子模式：觀察到 20 個候選後用 `bin/followup-report --routed` 比對。
+4. 結果防幻覺（P6h）的本機判斷 ledger：約 11-22 看誤判率，決定要不要讓它擋。
+5. 派工佇列（O／dcq）有兩個已知問題：測試的 runner 漏到正式 socket、逐單指定模型無效。已在派工工具的 repo 開 issue，由另一條線處理，這裡不動。
 
 ---
 
-Handoff for the next developer. Done work is in DEVLOG.md; this file holds current state, deploy steps and open items. On 2026-11-08 the Router started applying Genie's voice rules from the installed Genie (resolved via Claude Code's installed_plugins.json, not copied). Background summaries got the same rules. Reply limits went to 500 characters, and follow-up "what is that" questions are now answered in place. Hermes freezes the system prompt per conversation, so after any SOUL change run `hermes sessions refresh-prompts`. Open items: real-chat verification, the red `test-compact-lock` in CI, P6 observation, and the claim-guard ledger review.
+Handoff for the next developer. Done work is in DEVLOG.md; this file holds current state, deploy steps and open items. On 2026-11-08 the Router started applying Genie's voice rules from the installed Genie (resolved via Claude Code's installed_plugins.json, not copied). Background summaries got the same rules. Reply limits went to 500 characters, and follow-up "what is that" questions are now answered in place. Hermes freezes the system prompt per conversation, so after any SOUL change run `hermes sessions refresh-prompts`. The red `test-compact-lock` in CI was fixed by setting `MYTHOS_RUNTIME=claude`. Open items: real-chat verification, P6 observation, and the claim-guard ledger review.
