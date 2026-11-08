@@ -236,25 +236,50 @@ def _on_pre_tool_call(tool_name: str = "", session_id: str = "", **_: Any) -> No
         _recall_current = session_id
 
 
+def _num(args: Dict[str, Any], key: str) -> Optional[int]:
+    """非負整數參數：沒給＝None；給了不是整數＝-1（呼叫端報錯）。"""
+    v = args.get(key)
+    if v is None or str(v).strip() == "":
+        return None
+    v = str(v).strip()
+    return int(v) if v.isdigit() else -1
+
+
 def mythos_recall(args: Dict[str, Any], session_id: str = "", **_: Any) -> str:
+    # P3：帶 id（thread／任務／訊息號；thread 也認 thread 欄）＝按 ID 查那件事，不查 keywords；帶 offset＝續讀全文。
+    # 預算同一套：一回合一次，不分關鍵字或 ID 路。
+    ident = _text(args, "id") or _text(args, "thread")
     keywords = _text(args, "keywords")
-    if not keywords:
+    rev, off = _num(args, "revision"), _num(args, "offset")
+    if not keywords and not ident:
         return "缺 keywords"
+    if rev == -1 or off == -1:
+        return "revision／offset 要是非負整數"
     sid = session_id or _recall_current
     # 兩條路都拿不到 session：保守放行（不計數），記 log 供查
     if sid and _recall_count(sid) >= 1:
         return "這回合已查過一次，用剛剛的結果回答。"
     if not sid:
         _logline("recall-no-session")
-    _log(int(time.time()), "recall", keywords, "mythos_recall")
+    _log(int(time.time()), ident or "recall", f"id:{ident}" if ident else keywords, "mythos_recall")
+    if ident:
+        cmd = [os.path.join(MYTHOS, "bin", "recall"), "--expand", ident, "--offset", str(off or 0)] if off is not None \
+            else [os.path.join(MYTHOS, "bin", "recall"), "--id", ident]
+        if rev is not None:
+            cmd += ["--revision", str(rev)]
+    else:
+        cmd = [os.path.join(MYTHOS, "bin", "recall"), keywords]
     try:
-        r = subprocess.run([os.path.join(MYTHOS, "bin", "recall"), keywords], stdin=subprocess.DEVNULL,
-                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10, text=True)
+        r = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE if ident else subprocess.DEVNULL, timeout=10, text=True,
+                           env=dict(os.environ, MYTHOS_DIR=MYTHOS))
     except subprocess.TimeoutExpired:
         return "記憶查詢逾時，先說查不到，要更確定再 mythos_dispatch。"
     except OSError as e:
         return f"查詢失敗：{e.strerror or type(e).__name__}"
     out = r.stdout.strip()
+    if ident and r.returncode in (1, 2):
+        return f"查不到或 ID 不合規（{r.returncode}）：{(r.stderr or '').strip()[:200]}"
     if r.returncode == 1:
         return "查不到相關紀錄。"
     if r.returncode == 6:
@@ -289,11 +314,17 @@ _FULL_SCHEMA = {
 
 _RECALL_SCHEMA = {
     "name": "mythos_recall",
-    "description": "查以前的事（做過的事、定過的決定、偏好；本機唯讀，約 5 秒）。一回合最多呼叫一次，拿到文字後自己用口語回答。",
+    "description": "查以前的事（做過的事、定過的決定、偏好；本機唯讀，約 5 秒）。一回合最多呼叫一次，拿到文字後自己用口語回答。"
+                   "知道那件事的代號（thread 的 t-…、任務 bg-…）就帶 id：回需求、驗收、最新結果；要看被截斷的全文，"
+                   "用同一 id 加 offset（取自上次 continuation.offset）續讀。",
     "parameters": {
         "type": "object",
-        "properties": {"keywords": {"type": "string", "description": "兩三個關鍵字，中文沒中就換英文"}},
-        "required": ["keywords"],
+        "properties": {
+            "keywords": {"type": "string", "description": "兩三個關鍵字，中文沒中就換英文（沒有 id 時用）"},
+            "id": {"type": "string", "description": "thread 代號 t-…、任務代號 bg-…、或 Telegram 訊息號；有它就不查 keywords"},
+            "revision": {"type": "integer", "description": "同一 thread 的第幾版（1 起算，預設最新）"},
+            "offset": {"type": "integer", "description": "續讀全文的字元位置（取自上次 continuation.offset）"},
+        },
     },
 }
 

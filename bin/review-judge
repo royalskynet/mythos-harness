@@ -36,8 +36,35 @@ if [ -z "$progress" ] || [ "$progress" = "讀不到進度" ]; then
   exit 0
 fi
 
-# Inline & Spill：工單只給前 N 字，超出的截掉（判跑歪用不到尾段細節）
-body="$(cut -c1-"$MAX_TASK_CHARS" "$task" 2>/dev/null | head -c "$MAX_TASK_CHARS")"
+# P3：給判斷的是工單的「目標」與「驗收」段（標題含 目標／驗收，到同級或更高標題為止），不是只給檔頭。
+# 找不到這兩段就用整份工單。送出的段落超過 MAX_TASK_CHARS → UNKNOWN（需展開），不呼叫模型，由呼叫端照舊喚醒 Mythos
+# （Mythos 可用 bin/recall --expand 讀完整工單）。ponytail: 上限內才送；以後要分段判就改成每段各判一次。
+body="$(python3 -I - "$task" "$MAX_TASK_CHARS" <<'PY'
+import re, sys
+text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+cap = int(sys.argv[2])
+out, keep, level, hit = [], False, 0, False
+for ln in text.splitlines():
+    m = re.match(r"^(#+)\s*(.*)", ln)
+    if m:
+        lv = len(m.group(1))
+        if keep and lv <= level:
+            keep = False
+        if re.search(r"目標|驗收|goal|acceptance", m.group(2), re.I):
+            keep, level, hit = True, lv, True
+    if keep:
+        out.append(ln)
+body = "\n".join(out) if hit else text
+if len(body) > cap:
+    sys.exit(3)
+sys.stdout.write(body)
+PY
+)"; brc=$?
+case "$brc" in
+  0) ;;
+  3) echo "UNKNOWN（需展開）"; exit 0 ;;
+  *) echo "UNKNOWN 工單段落抽取失敗（rc=${brc}）"; exit 0 ;;
+esac
 if [ -z "$body" ]; then
   echo "UNKNOWN 工單是空的"
   exit 0
