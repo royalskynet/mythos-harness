@@ -3,6 +3,20 @@
 開發紀錄，新的在上面。只記做了什麼、為什麼；不含本機路徑、帳號與內部計畫。
 Development log, newest first. It records what changed and why, without local paths, accounts or internal plans.
 
+## 2026-11-08 — P6c 接 auto 前的加固 / P6c hardening before auto
+
+- 依 DSH Subscriptions／Handing back 原則，訊息在入站即定唯一擁有者。async hook await 入列，成功回 `skip`；worker 擁有的訊息不交 Router 決策，停止請求則交 Router 取消。預設仍 off，建議先 observe、看過 Decisions 再人工切 auto。
+- 新增 `--claim-router`，與入列共用 ledger 鎖；queued 回 `seen`，否則寫 routed，晚到入列以 stale／exit 8 拒絕。入列 2 秒、claim 1 秒，逾時 kill 並回收子行程群組；claim 失敗仍交 Router，避免漏訊息。
+- 移除 session 綁定、行程全域入站 context、chat 對照檔與外掛派工前的 `--seen` 檢查。`--seen` 仍供 Telegram proxy 使用；S3 重播改為入站歸屬模型，S1／S2 指標維持不變、S3 重複結果為 0。
+- meta.json 存在即唯一權威，repo 空不退讀正文。無 meta 舊檔保留開頭標頭相容；一般入口先遷移正式標頭，interrupt／信箱批次繼承舊 job 宣告，Hermes 佇列保留 meta。
+- 加入 claim 20 輪競爭、逾時清理與事件迴圈前進、停止請求、meta 權威與舊格式繼承測試。Hermes 契約檢查 async callback 仍被 await、入站仍接受 skip，並驗證移除行為會失敗。
+
+- Following DSH Subscriptions / Handing back, each message gets one owner at ingress. The async hook awaits queueing and returns `skip` on success. Worker-owned input bypasses Router decisions; stop requests go to the Router for cancellation. Default remains off: observe first, review Decisions, then enable auto manually.
+- `--claim-router` shares the ledger lock with queueing: queued input returns `seen`; otherwise a routed receipt rejects late queueing as stale with exit 8. Queueing has a 2-second bound, claiming 1 second; timeout kills and reaps the subprocess group. Claim failure falls through to the Router to avoid lost messages.
+- Removed session binding, process-global inbound context, chat mapping files and the plugin's dispatch-time `--seen` check. The Telegram proxy still uses `--seen`. S3 replay now models ingress ownership; S1 / S2 metrics are unchanged and S3 duplicate results remain zero.
+- Existing meta.json is the sole authority; an empty repo never falls back to body headers. Legacy files without metadata retain opening-header compatibility. Normal ingress migrates formal headers; interrupts and mailbox batches inherit legacy job declarations; the Hermes queue preserves metadata.
+- Added 20-round claim races, timeout cleanup and event-loop progress, stop requests, metadata authority and legacy inheritance tests. Hermes contracts verify callbacks are awaited and inbound skip remains accepted, with negative cases for removed behavior.
+
 ## 2026-11-08 — P6 追問影子模式 / P6 follow-up shadow mode
 
 - `MYTHOS_FOLLOWUP_DIRECT` 分成 `off`（預設）、`observe`、`auto`；舊值 `1` 等同 `auto`。影子模式只把是否接受、thread 提案與判定理由寫入 `state/followup/observations.jsonl`，不入列；`bin/followup-report` 依事件鍵去重，統計候選、接受數與 Router thread 一致率，先量測再接自動派工。
@@ -10,14 +24,14 @@ Development log, newest first. It records what changed and why, without local pa
 - 收據以 `chat_id + message_id` 為事件鍵，區分 `pending`、`queued`、`stale`。入列中斷後依信箱檔與 generation 對帳，不重複入列、不復活取消前的訊息；`followup-direct --seen` 讓 Router 派工前查已直通事件，命中回「已接續原工作」。P5 重播的 S3 重複結果降為 0。
 - repo 與唯讀旗標移到 `<prompt>.meta.json`，避免正文中段的 `repo=`／`readonly=1` 改變排程。沒有 meta 的舊檔只讀開頭 5 行標頭；續派繼承同 thread 前一張 job 的 meta，interrupt 也能繼承舊格式標頭。
 - 取消時把 generation bump、清信箱與清佇列放進同一把 ledger 鎖，與追問入列互斥，防止取消後留下舊方向訊息。
-- **未完，接 auto 前必修**：auto 入列與 Router 派工仍有競態；外掛入站事件鍵目前是行程全域，多 session 並發可能互蓋，需改成按 session 綁定；meta 存在但 repo 空時仍會讀正文開頭標頭，保留舊行為，本輪未擴大權限。
+- **P6c 已處理**：auto／Router 競態以入站歸屬與 routed 收據解決；session 綁定改為移除，不再依賴 hook key 與 turn key 相等；meta 存在時為唯一權威，repo 空不讀正文。
 
 - `MYTHOS_FOLLOWUP_DIRECT` now supports `off` (default), `observe` and `auto`; legacy `1` means `auto`. Shadow mode only records acceptance decisions, proposed threads and reasons in `state/followup/observations.jsonl`, without queueing. `bin/followup-report` deduplicates by event key and reports candidates, acceptance counts and Router thread agreement, so routing can be measured before automatic dispatch is connected.
 - The Hermes plugin adds `pre_gateway_dispatch`, restricted to allowlisted Telegram replies. A background subprocess has a 2-second limit; exceptions are swallowed and the hook always returns `None`. Observations omit the user's text. Hermes `auto` is still forced to `observe` in this release and logs that automatic queueing is not wired, keeping unverified direct queueing out of the front end.
 - Receipts use `chat_id + message_id` as the event key, with `pending`, `queued` and `stale` states. Recovery reconciles mailbox files and generations without duplicate queueing or reviving cancelled messages. Before dispatching, the Router checks `followup-direct --seen` and replies “已接續原工作” for an event already queued directly. Duplicate results in the P5 S3 replay fell to 0.
 - Repo and read-only declarations move to `<prompt>.meta.json`, so `repo=` / `readonly=1` in the middle of a request cannot change scheduling. Legacy files without metadata only read headers in the first 5 lines. Follow-ups inherit metadata from the previous job in the same thread; interrupts also inherit legacy headers.
 - Cancellation now bumps the generation and clears the mailbox and queue under the same ledger lock used by follow-up queueing, preventing stale instructions from surviving cancellation.
-- **Unfinished; required before enabling auto**: direct queueing still races Router dispatch; the plugin's inbound event key is process-global and concurrent sessions can overwrite it, so it must be bound per session; metadata with an empty repo still falls back to opening body headers, preserving legacy behavior without broadening permissions in this release.
+- **Addressed in P6c**: ingress ownership and routed receipts resolve the auto / Router race; session binding was removed rather than relying on equal hook and turn keys; existing metadata is the sole authority, including an empty repo.
 
 ## 2026-11-08 — Hermes 版上線 / Hermes goes live
 

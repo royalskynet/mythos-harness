@@ -167,6 +167,13 @@ def expect_queued(thread, prompt, why):
         fail(f"{why}：應排隊，卻直接派出了：{out}")
 
 
+# M0：meta 存在即唯一權威，包括空 repo；無 meta 才讀正式標頭。
+for name, meta_repo, expected in (("legacy", None, "/x"), ("empty", "", ""), ("authority", "/y", "/y")):
+    p = write_prompt("decl-" + name, "repo=/x\nreadonly=1\n", repo=meta_repo)
+    rc, out, err = run(["bash", "-c", '. "$1"; prompt_repo_of "$2"', "_", os.path.join(ROOT, "bin/lib-ledger.sh"), p], env_for())
+    if rc or out.strip() != expected:
+        fail(f"M0 {name}: expected={expected!r} actual={out.strip()!r} rc={rc}")
+
 # ---- 占用中的寫入任務：repo A，meta 宣告、正文不含標頭 ----
 P_A = write_prompt("t-ma01", "JOB-MA1 寫入 A\n", repo=REPO_A, readonly=False)
 expect_started("t-ma01", P_A, "JOB-MA1", "基準：A 的寫入任務應派出")

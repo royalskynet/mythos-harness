@@ -8,12 +8,14 @@ Router（flash）不自己做事：要做事＝mythos_dispatch（原話寫成 pr
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import fcntl
 import json
 import os
 import random
 import re
+import signal
 import string
 import subprocess
 import threading
@@ -72,7 +74,6 @@ def _remember_session_key() -> None:
         os.replace(tmp, SESSION_KEY_FILE)
     except OSError as e:
         _logline(f"session key 寫入失敗 {e}")
-    _remember_session_chat(key)
 
 
 _HOOK_TIMEOUT = 2.0  # 秒：pre_gateway_dispatch 子行程上限（hook 在入站路徑上，不能拖住訊息）
@@ -93,20 +94,12 @@ def _env_dirs() -> None:
     WARN_TSV = os.path.join(os.path.expanduser("~/.cache/brief-lines"), "mythos-inbox.tsv")
 
 
-_HOOK_TIMEOUT = 2.0  # 秒：pre_gateway_dispatch 子行程上限（hook 在入站路徑上，不能拖住訊息）
 
 
-# ---- P6：入站影子觀察（pre_gateway_dispatch）----
+# ---- P6c：入站歸屬（pre_gateway_dispatch）----
 # 這個 hook 在 auth 之前跑：只認 allowlist 內的 Telegram chat（profile config 的
 # gateway.platforms.telegram.extra.allow_from，'${MYTHOS_TG_CHAT_ID}' 先展開；再併環境變數 MYTHOS_TG_CHAT_ID），
 # 不在名單一律回 None 且不記錄。判定交子行程 bin/followup-direct（同一份規則）；原文不進 observation、不入 argv。
-def _chat_map() -> str:
-    """session_key -> 最近一次入站的 chat_id；路徑跟著目前的 STATE（不在 import 時定死）。"""
-    return os.path.join(STATE, "tg-chat-session.json")
-
-_chat_lock = threading.Lock()
-
-
 def _profile_allow() -> list:
     """Mythos profile 的 config.yaml：telegram extra 的 allow_from／group_allow_from（${VAR} 寫法原樣回傳，
     由 _allowed_chats 展開）。放生的環境沒設變數時＝名單空＝不記錄，比放寬安全。"""
@@ -135,47 +128,6 @@ def _allowed_chats(gateway: Any) -> set:
     return out
 
 
-def _remember_session_chat(key: str) -> None:
-    """pre_gateway_dispatch 記入站事件時才寫（同執行緒的 _inbound_ctx）；mythos_dispatch 沒有事件、只有 session_id，
-    靠這份對回這個 session 最近一則回覆訊息。沒有新入站就不覆寫（使用者先打追問、Router 才派工時鍵還在）。"""
-    _env_dirs()
-    fresh = getattr(_inbound_ctx, "chat", "")
-    if not key or not fresh:
-        return
-    if getattr(_inbound_ctx, "saved", "") == key + ":" + fresh + ":" + getattr(_inbound_ctx, "msg", ""):
-        return  # 同一則入站的重複呼叫不重寫
-    try:
-        with _chat_lock:
-            try:
-                with open(_chat_map(), encoding="utf-8") as f:
-                    m = json.load(f)
-            except Exception:
-                m = {}
-            m[key] = {"chat": fresh, "msg": getattr(_inbound_ctx, "msg", ""), "seen": False}
-            while len(m) > 500:
-                m.pop(next(iter(m)))
-            os.makedirs(STATE, exist_ok=True)
-            cm = _chat_map()
-            tmp = cm + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(m, f)
-            os.replace(tmp, cm)
-        _inbound_ctx.saved = key + ":" + fresh + ":" + getattr(_inbound_ctx, "msg", "")
-    except Exception:
-        pass
-
-
-class _InboundCtx:
-    """行程全域（不是 threading.local）：hook 跑在 gateway 事件迴圈執行緒，mythos_dispatch 跑在 agent 工具執行緒，
-    thread-local 兩邊看不到彼此。單一 allowlist 使用者；鍵仍以 session_key 存檔。"""
-    chat: str = ""
-    msg: str = ""
-    saved: str = ""
-
-
-_inbound_ctx = _InboundCtx()
-
-
 _inflight: list = []
 
 
@@ -192,13 +144,35 @@ def _run_observer(cmd: list, text: str, mythos: str) -> None:
         pass  # 逾時／找不到腳本／任何錯：吞掉
 
 
-def _on_pre_gateway_dispatch(event: Any = None, gateway: Any = None, **_: Any) -> None:
-    """P6 inbound shadow observe; always returns None (never blocks delivery). See module header.
-    Hermes 對同步 callback 直接在 gateway 事件迴圈上呼叫：子行程丟進 daemon 執行緒，這裡立刻回，不佔迴圈。"""
-    if not _followup_mode():
+async def _followup_exec(cmd: list, text: str, timeout: float) -> tuple:
+    """await 子行程；逾時、取消或例外都收掉整個子行程群組並 wait，避免孤兒。"""
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL, start_new_session=True,
+        env=dict(os.environ, MYTHOS_DIR=MYTHOS))
+    completed = False
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(text.encode()), timeout)
+        completed = True
+        return proc.returncode, out.decode(errors="replace").strip()
+    finally:
+        if not completed:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            await proc.wait()
+
+
+async def _on_pre_gateway_dispatch(event: Any = None, gateway: Any = None, **_: Any) -> Optional[dict]:
+    """入站即定擁有者：worker 入列成功就 skip；其餘以持鎖收據交回 Router。
+    Hermes ainvoke_hook await 此 callback；pre_gateway_dispatch 不套 callback timeout。
+    我們自己限制入列 2 秒、claim 1 秒；observe 維持背景影子觀察，預設 off。
+    """
+    mode = _followup_mode()
+    if not mode:
         return None
     try:
-        mode = _followup_mode()
         src = getattr(event, "source", None)
         plat = getattr(src, "platform", None)
         if str(getattr(plat, "value", plat) or "") != "telegram":
@@ -206,64 +180,33 @@ def _on_pre_gateway_dispatch(event: Any = None, gateway: Any = None, **_: Any) -
         chat = str(getattr(src, "chat_id", "") or "")
         mid = str(getattr(event, "message_id", "") or "")
         rmid = str(getattr(event, "reply_to_message_id", "") or "")
-        if not chat or chat not in _allowed_chats(gateway):
+        if chat not in _allowed_chats(gateway) or not mid.isdigit() or not rmid.isdigit():
             return None
-        if not mid.isdigit() or not rmid.isdigit():
-            _inbound_ctx.chat = _inbound_ctx.msg = ""  # 名單內的新訊息不是追問：清掉上一則殘留，免得 dispatch 對錯事件
-            return None
-        _inbound_ctx.chat, _inbound_ctx.msg = chat, mid
-        if mode in ("auto", "1"):
-            _logline("pre_gateway_dispatch: auto 尚未接線（本輪只做影子觀察）")
         cmd = [os.path.join(MYTHOS, "bin", "followup-direct"), chat, mid, rmid]
-        t = threading.Thread(target=_run_observer, name="mythos-observe", daemon=True,
-                             args=(cmd, str(getattr(event, "text", "") or "") + "\n", MYTHOS))
-        _inflight[:] = [x for x in _inflight if x.is_alive()][-31:] + [t]
-        t.start()
+        text = str(getattr(event, "text", "") or "") + "\n"
+        if mode == "observe":
+            t = threading.Thread(target=_run_observer, name="mythos-observe", daemon=True,
+                                 args=(cmd, text, MYTHOS))
+            _inflight[:] = [x for x in _inflight if x.is_alive()][-31:] + [t]
+            t.start()
+            return None
+        try:
+            rc, out = await _followup_exec(cmd, text, _HOOK_TIMEOUT)
+            if rc == 0 and re.fullmatch(r"(?:queued|dup) t-[a-z0-9][a-z0-9-]{3,30}", out):
+                _logline("pre_gateway_dispatch: worker " + out)
+                return {"action": "skip"}
+        except Exception:
+            pass
+        try:
+            rc, out = await _followup_exec([cmd[0], "--claim-router", chat, mid], "", 1.0)
+            if rc == 0 and re.fullmatch(r"seen t-[a-z0-9][a-z0-9-]{3,30}", out):
+                _logline("pre_gateway_dispatch: worker " + out)
+                return {"action": "skip"}
+        except Exception:
+            pass  # claim 失敗：安全側交 Router，最多重複，不漏訊息
     except Exception:
         pass
     return None
-
-
-def _seen(chat: str, mid: str) -> str:
-    """這則入站是否已被 followup-direct 直通入列（--seen）。有＝回 thread，沒有／查不到＝空。"""
-    if not chat or not mid.isdigit():
-        return ""
-    try:
-        r = subprocess.run([os.path.join(MYTHOS, "bin", "followup-direct"), "--seen", chat, mid],
-                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                           timeout=_HOOK_TIMEOUT, text=True)
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    if r.returncode != 0:
-        return ""
-    m = re.match(r"seen (t-[a-z0-9][a-z0-9-]{3,30})$", (r.stdout or "").strip())
-    return m.group(1) if m else ""
-
-
-def _handled_elsewhere(session_id: str) -> str:
-    """本回合的入站事件若已直通：這次派工不派，回 thread（空＝照常派）。每個事件只擋一次。
-    MYTHOS_FOLLOWUP_DIRECT 未啟用時完全不動（不讀對照檔、不呼叫子行程）：與 main 行為一致。"""
-    if not _followup_mode():
-        return ""
-    try:
-        with _chat_lock:
-            with open(_chat_map(), encoding="utf-8") as f:
-                m = json.load(f)
-            rec = m.get(session_id) or {}
-            if not rec or rec.get("seen"):
-                return ""
-            th = _seen(str(rec.get("chat") or ""), str(rec.get("msg") or ""))
-            if not th:
-                return ""
-            rec["seen"] = True
-            cm = _chat_map()
-            tmp = cm + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(m, f)
-            os.replace(tmp, cm)
-        return th
-    except Exception:
-        return ""
 
 
 def _text(args: Dict[str, Any], key: str) -> str:
@@ -314,11 +257,6 @@ def mythos_dispatch(args: Dict[str, Any], **_: Any) -> str:
         return f"{mode} 必帶 thread：用要{'停' if mode == 'cancel' else '改'}的那件事的代號"
     if mode == "cancel":
         return _cancel(th)
-    # P6：這則入站已被 pre_gateway_dispatch 之前的那套規則判過直通 → 不重複派
-    done_th = _handled_elsewhere(_text(args, "session_id") or _recall_current)
-    if done_th:
-        _log(int(time.time()), done_th, "(已直通，不重複派)")
-        return "已接續原工作"
     if not request:
         return "缺 request：把使用者原話放進來"
     # P4 N03：宣告目標 repo（絕對路徑）；唯讀另標 readonly。先驗再動，不合規一個字都不寫。

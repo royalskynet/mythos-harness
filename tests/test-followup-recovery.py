@@ -8,6 +8,7 @@
 用法：python3 tests/test-followup-recovery.py → 全過印 FOLLOWUP_RECOVERY_OK。"""
 import atexit
 import glob
+import json
 import os
 import shutil
 import subprocess
@@ -140,7 +141,7 @@ def follow(fmid, rmid, text, **extra):
 
 
 # ---- 基底：一張已完成的 job，rmid 100 綁到它 ----
-P0 = write_prompt(THREAD, "原需求：查 R 服務\n")
+P0 = write_prompt(THREAD, "repo=/example/project\nreadonly=1\n原需求：查 R 服務\n")
 with open(TSV, "a", encoding="utf-8") as f:
     f.write("\t".join(["bg-rc1", "mid", P0, str(int(time.time())), "done", TMP, THREAD, "hermes"]) + "\n")
 with open(MAP, "a", encoding="utf-8") as f:
@@ -161,6 +162,14 @@ if dispatch_count() != 1:
     fail(f"重啟後應恰好派出一次，實際 {dispatch_count()}：{read(BG_CALLS)}")
 if len(receipts("queued", 3001)) != 1:
     fail(f"重啟對帳應補一筆 queued：{read(RCPT)}")
+batch_prompt = read(os.path.join(MB, THREAD, ".batch", "prompt-path")).strip()
+# 成功消費後 .batch 會清掉；由 stub argv 取實際批次 prompt。
+if not batch_prompt:
+    batch_prompt = read(BG_CALLS).splitlines()[0].split()[-1]
+batch_meta = json.loads(read(batch_prompt + ".meta.json"))
+if batch_meta.get("repo") != "/example/project" or not batch_meta.get("readonly"):
+    fail(f"MAILBOX_LEGACY_META: 舊 job 正式標頭必須帶入批次 meta：{batch_meta}")
+print("MAILBOX_LEGACY_META ok")
 watch()  # 再跑一輪不得重派
 if dispatch_count() != 1:
     fail("對帳後再跑 dispatch-watch 不得重派")

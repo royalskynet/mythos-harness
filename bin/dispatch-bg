@@ -181,6 +181,11 @@ fi
 if [ "$thread" != - ] && [ -f "$prompt" ]; then
   inh=''
   [ -f "$MYTHOS_DIR/state/dispatch-jobs.tsv" ] && inh="$(awk -F'\t' -v th="$thread" '$7==th && ($8=="bg" || $8=="bg-hard" || $8=="hermes") {p=$3} END{print p}' "$MYTHOS_DIR/state/dispatch-jobs.tsv")"
+  # 一般入口的無 meta prompt：開頭標頭原本就是正式宣告，先遷入 meta。
+  # interrupt 的新指示屬正文，不得把正文標頭升成宣告。
+  if [ "$mode" != interrupt ] && [ ! -f "$declsrc.meta.json" ]; then
+    prompt_meta_inherit "$declsrc" --legacy-first "$declsrc" || exit 1
+  fi
   prompt_meta_inherit "$prompt" --legacy-first "$inh" "$declsrc" || { echo "寫 ${prompt}.meta.json 失敗" >&2; exit 1; }
 fi
 

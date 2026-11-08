@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# P4 N02：follow-up 直通。P6：三值模式、事件鍵收據、可恢復入列、影子判定、--seen 查詢。
+# P4 N02：follow-up 直通。P6：三值模式、事件鍵收據、可恢復入列、影子判定、入站歸屬收據。
 # 模式（MYTHOS_FOLLOWUP_DIRECT）：
 #   未設／off（預設）：完全不碰任何檔，exit 3。
 #   observe：跑同一份判定（只讀，不取鎖），把判定寫進 state/followup/observations.jsonl（不存使用者原文），不入列，exit 3（呼叫端照舊交 Router）。
 #   auto（舊值 1 同義）：判定通過才入列。其他值一律當 off。
 # 用法：
 #   MYTHOS_FOLLOWUP_DIRECT=auto bin/followup-direct <chat> <fmid> <rmid> < 使用者原話
+#   bin/followup-direct --claim-router <chat> <fmid>  持鎖決定歸屬；queued → seen <thread>、exit 0；否則 routed、exit 1
 #   bin/followup-direct --seen <chat> <fmid>     不看模式；exit 0＝這事件已直通入列（stdout 印 seen <thread>），1＝沒有
 #   chat／fmid：這則 follow-up 的 chat 與 message_id（事件鍵＝chat+fmid）；rmid：它 reply 的那則（去 state/tg-msg-thread.tsv 對照）。
 # stdout 一行、exit（auto）：
@@ -15,9 +16,10 @@
 #   3 不直通（模式為 off 或 observe；observe 只寫觀察）
 #   4 不直通：rmid 不在對照表（來源偽造／未綁定）、對到的不是 bg 任務、thread 不合規
 #   5 不直通：歧義，同 chat+rmid 對到多個 thread
-#   6 不直通：像新話題（規則見下）
+#   6 不直通：新話題或停止請求（/stop 沿用 Telegram 指令；另收停／停止／取消／不要繼續／stop／cancel 完整訊息）
 #   7 不直通：對應任務已取消（或取消發生在判定與入列之間，舊 generation）
-# 4–7 一律交 Router 判斷（呼叫端照舊的 [回覆 bg …] 標註流程）。
+#   8 不直通：Router 已接手（routed 收據），不入列
+# 4–8 一律交 Router 判斷（呼叫端照舊的 [回覆 bg …] 標註流程）。
 # 新話題規則（ponytail）：空白、以「新題／新的題／換一題／換個話題／另一題／另外一件」開頭、或內含別的 thread 代號 → 視為新話題。
 #   不做語意判斷；誤判會回 Router（安全側）。升級路徑：接 jev_evaluate 或小模型分類。
 # 入列：鎖前只做快速拒絕；取鎖後整段重判（映射、job 狀態、generation、去重），鎖內結果才算數。
@@ -38,6 +40,23 @@ if [ "${1:-}" = --seen ]; then
   th="$(awk -F'\t' -v c="$c" -v m="$m" '$2=="queued" && $3==c && $4==m {t=$5; f=1} END{if (f) print t; exit !f}' "$RCPT")" || exit 1
   echo "seen $th"
   exit 0
+fi
+
+# claim 與入列使用同一把 ledger 鎖；先對帳 rename 完成但尚未 queued 的事件。
+if [ "${1:-}" = --claim-router ]; then
+  chat="${2:-}"; fmid="${3:-}"
+  printf '%s' "$chat" | grep -Eq '^-?[0-9]+$' || exit 2
+  case "$fmid" in ''|*[!0-9]*) exit 2 ;; esac
+  . "$ROOT_DIR/bin/lib-ledger.sh"
+  ledger_lock || exit 1
+  followup_reconcile
+  th="$(awk -F'\t' -v c="$chat" -v m="$fmid" '$2=="queued" && $3==c && $4==m {t=$5} END{print t}' "$RCPT" 2>/dev/null)"
+  if [ -n "$th" ]; then ledger_unlock; echo "seen $th"; exit 0; fi
+  if ! awk -F'\t' -v c="$chat" -v m="$fmid" '$2=="routed" && $3==c && $4==m {f=1} END{exit !f}' "$RCPT" 2>/dev/null; then
+    followup_receipt routed "$chat" "$fmid" - 0 - "Router 已接手" || { ledger_unlock; exit 1; }
+  fi
+  ledger_unlock
+  exit 1
 fi
 
 case "${MYTHOS_FOLLOWUP_DIRECT:-}" in
@@ -81,6 +100,9 @@ EOF
   if [ "$jth" != "$JTH" ]; then REASON=thread_mismatch; return 4; fi
   case "$jbe" in bg|bg-hard|hermes) ;; *) REASON=not_bg; return 4 ;; esac
   if [ "$JST" = cancelled ]; then REASON=cancelled; return 7; fi
+  case "$text" in
+    /stop|/stop[[:space:]]*|停|停止|取消|不要繼續|stop|cancel) REASON=stop; return 6 ;;
+  esac
   trimmed="$(printf '%s' "$text" | tr -d '[:space:]')"
   if [ -z "$trimmed" ]; then REASON=empty; return 6; fi
   case "$text" in
@@ -146,6 +168,12 @@ pg="$(awk -F'\t' -v c="$chat" -v m="$fmid" '$2=="pending" && $3==c && $4==m {g=$
 if [ -n "$pg" ] && [ "$pg" != "$gen" ]; then
   followup_receipt stale "$chat" "$fmid" "$JTH" "$gen" "$JJB" "pending 時的 generation 已過期，不入列"
   ledger_unlock; exit 7
+fi
+
+# Router 先 claim 的事件，晚到的入列必須拒絕（同鎖內、寫 pending 之前）。
+if awk -F'\t' -v c="$chat" -v m="$fmid" '$2=="routed" && $3==c && $4==m {f=1} END{exit !f}' "$RCPT" 2>/dev/null; then
+  followup_receipt stale "$chat" "$fmid" "$JTH" "$gen" "$JJB" "Router 已接手"
+  ledger_unlock; exit 8
 fi
 
 mb="$MYTHOS_DIR/state/mailbox/$JTH"

@@ -22,4 +22,22 @@ out="$(run)"; echo "$out" | grep -q 'no_such_hook_xyz' || { echo "假掛鉤沒�
 rm "$T/live/mythos-worker/plugins/claude-mem"
 out="$(run)"; echo "$out" | grep -q 'claude-mem symlink' || { echo "symlink 消失沒抓到：$out"; ok=0; }
 
+# 入站 async/skip 契約獨立用假上游原始碼驗證；其餘缺介面錯誤不影響這兩項判斷。
+mkdir -p "$T/upstream/hermes_cli" "$T/upstream/gateway"
+printf 'class Manager:\n async def ainvoke_hook(self):\n  if inspect.isawaitable(ret):\n   ret = await ret\n' > "$T/upstream/hermes_cli/plugins_dispatch.py"
+printf 'async def inbound():\n _hook_results = await _ainvoke_hook("pre_gateway_dispatch")\n for result in _hook_results:\n  _action = result.get("action")\n  if _action == "skip":\n   return None\n' > "$T/upstream/gateway/run_inbound_hooks.py"
+source_run() { HERMES_AGENT_ROOT="$T/upstream" run; }
+out="$(source_run)"
+echo "$out" | grep -Eq '^FAIL inbound-(await|skip)' && { echo "有效入站契約誤報：$out"; ok=0; }
+sed 's/ret = await ret/ret = ret/' "$T/upstream/hermes_cli/plugins_dispatch.py" > "$T/no-await"
+cp "$T/upstream/hermes_cli/plugins_dispatch.py" "$T/await-ok"
+cp "$T/no-await" "$T/upstream/hermes_cli/plugins_dispatch.py"
+out="$(source_run)"
+echo "$out" | grep -q '^FAIL inbound-await' || { echo "移除 await 沒抓到：$out"; ok=0; }
+cp "$T/await-ok" "$T/upstream/hermes_cli/plugins_dispatch.py"
+sed 's/"skip"/"other"/' "$T/upstream/gateway/run_inbound_hooks.py" > "$T/no-skip"
+cp "$T/no-skip" "$T/upstream/gateway/run_inbound_hooks.py"
+out="$(source_run)"
+echo "$out" | grep -q '^FAIL inbound-skip' || { echo "移除 skip 沒抓到：$out"; ok=0; }
+
 [ "$ok" = 1 ] && echo PASS || { echo FAIL; exit 1; }

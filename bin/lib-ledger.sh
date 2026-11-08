@@ -77,12 +77,11 @@ last_ts_epoch() { # transcript
 # ---- P4 N03：同 repo 寫入序列化（hermes） ----
 # 目標 repo 與唯讀旗標不放在使用者正文裡，改放與 prompt 同名的 <prompt>.meta.json（P6）：
 #   {"v":1,"repo":"<絕對路徑或空>","readonly":true|false}
-# 沒有 meta.json、且 meta 也沒宣告 repo 時，才退回讀 prompt 開頭 5 行的 `repo=<絕對路徑>`／`readonly=1`（舊檔相容）；正文中段出現的同名行一律當正文。
-# （meta 是 dispatch-bg 自動寫的繼承檔，repo 空只代表「這輪沒宣告」，不代表要忽略舊檔自己的標頭。）
+# meta.json 存在即唯一權威（repo 空＝沒宣告）；不存在才讀開頭 5 行正式標頭，供舊檔相容。
 # 沒宣告 repo ＝不參與序列化（現行行為）。唯讀不擋、也不被擋。
 prompt_decl() { # prompt 檔 → 印 "repo<TAB>readonly"（readonly 為 1 或空；repo 空＝沒宣告）
   local f="$1" m="$1.meta.json"
-  if [ -f "$m" ] && jq -e 'select(.repo // "" | length > 0)' "$m" >/dev/null 2>&1; then
+  if [ -f "$m" ]; then
     jq -r '[(.repo // ""), (if .readonly == true then "1" else "" end)] | @tsv' "$m"
     return 0
   fi
@@ -139,7 +138,8 @@ hermes_repo_busy() { # repo
 # ---- P4 N02：follow-up 直通的 generation 與收據 ----
 # generation：每次 --cancel／--interrupt 停掉 thread 就 +1（state/followup/gen-<thread>）。
 # 收據 state/followup/receipts.tsv 一行一事件：epoch event chat fmid thread gen job detail
-#   event＝queued（入列）／consumed（信箱派出）／stale（舊 generation，不消費）。同 chat+fmid 有 queued 即視為已入列（去重）。
+#   event＝pending（入列中）／queued（已入列）／routed（Router 擁有）／consumed（信箱派出）／stale（不消費）。
+#   同 chat+fmid 有 queued 即視為已入列（去重）；有 routed 就拒絕晚到入列。
 followup_gen() { # thread → 目前 generation（沒檔＝0）
   local f="${MYTHOS_DIR:-$(cd "$LEDGER_LIB_DIR/.." && pwd)}/state/followup/gen-$1" n
   if [ -f "$f" ]; then n="$(tr -dc '0-9' < "$f")"; fi

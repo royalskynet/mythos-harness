@@ -18,7 +18,7 @@
   - thread 序列化：同 thread 同時只跑一個 job（信箱規則；Router 路徑假設相同）。
   - 使用者看到結果才回：follow-up 到達 = max(排程時間, 被回覆結果送達時刻)。事件內容與順序三策略一致。
   - Telegram 層重播（同 chat+fmid）：S1／S2 假設 TG 層已去重（未實測）；S3 的重播進直通判斷，
-    直通去重只擋「已入列」的收據，被交回 Router 的重播會再進 Router（報表的「重複結果」會計到）。
+    在入站依 queued／routed 收據決定唯一擁有者；worker 擁有時不呼叫 Router，不依賴 session 鍵。
   - token 欄不量，一律 unsupported。
 """
 import argparse
@@ -129,7 +129,7 @@ class Sim:
         self.term, self.arrived = {}, {}
         self.waiting, self.new_job, self.tinfo = {}, {}, {}
         self.replay_map, self.delivered_fmid = {}, set()
-        self.routed_fmid = set()   # S3 已交 Router 的 fmid（--seen 只認已直通；這裡記已派 = 防重複派）
+        self.routed_fmid = set()   # S3 入站時 claim-router 的 routed 收據（與 queued 互斥）
         self.ctrl, self.target_of = {}, {}
         self.resp, self.cancel_eff, self.qwait, self.batch = [], [], [], []
         self.misroute, self.dup = 0, 0
@@ -205,15 +205,16 @@ class Sim:
     def on_fu(self, eid):
         e = self.ev[eid]
         if self.mode == "direct":
+            # 入站即定唯一擁有者；routed 收據先擋晚到入列，queued 直接 skip Router。
+            if e["fmid"] in self.routed_fmid:
+                self.term[eid] = ("dedup", self.now)
+                return
             code = self.direct_decide(e)
             if code == "dup":
                 self.term[eid] = ("dedup", self.now)
                 return
             if code == "queue":
                 self.mailbox_add(e)
-                return
-            if e.get("replay_of") or e["fmid"] in self.routed_fmid:
-                self.term[eid] = ("dedup", self.now)   # 直通路：Router 派工前先查 --seen，重播不再派
                 return
             self.routed_fmid.add(e["fmid"])
         elif e.get("replay_of"):
