@@ -24,7 +24,25 @@ THRESH = float(os.environ.get("WORKER_LAT_ALERT_SEC", "90"))
 LOOKBACK = 2 * 86400  # 只看兩天內開始的 session
 
 
+def _sandboxed_real_db() -> bool:
+    """沙箱 MYTHOS_DIR（測試跑 dispatch-watch）卻沒覆寫 worker 庫：會讀真庫、寫真告警（11-08 實測灌了 5 行），直接跳過。"""
+    here = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    return os.path.realpath(MYTHOS) != here and "MYTHOS_WORKER_DB" not in os.environ
+
+
+def _worker_alive() -> bool:
+    """有 mythos-worker 行程在跑才算「卡住」；沒有＝被取消／被殺，不報仍未回。測試用 MYTHOS_WORKER_ALIVE=0/1 覆寫。"""
+    forced = os.environ.get("MYTHOS_WORKER_ALIVE")
+    if forced in ("0", "1"):
+        return forced == "1"
+    import subprocess
+    return subprocess.run(["pgrep", "-f", "-p mythos-worker"], stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL).returncode == 0
+
+
 def main() -> int:
+    if _sandboxed_real_db():
+        return 0
     if not os.path.exists(DB):
         print(f"telemetry_unavailable: {DB} 不存在", file=sys.stderr)
         return 3
@@ -56,7 +74,10 @@ def run() -> int:
     with open(LEDGER, "a", encoding="utf-8") as f:
         # 逾時未回：每個 session 只告一次
         now = time.time()
+        alive = _worker_alive()
         for sid, t0, t1, model in q:
+            if not alive:
+                break
             if t1 is not None or now - t0 < THRESH or sid + "-stall" in seen:
                 continue
             when = datetime.fromtimestamp(t0, TPE).strftime("%Y-%m-%d %H:%M:%S")

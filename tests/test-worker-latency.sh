@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${WL_BIN:-$ROOT/bin/worker-latency}"
 T="$(mktemp -d /tmp/test-wl.XXXXXX)"; trap 'rm -rf "$T"' EXIT
 fail() { echo "FAIL: $*"; exit 1; }
-export MYTHOS_DIR="$T/m" MYTHOS_WORKER_DB="$T/state.db" BRIEF_LINES_DIR="$T/brief"
+export MYTHOS_DIR="$T/m" MYTHOS_WORKER_DB="$T/state.db" BRIEF_LINES_DIR="$T/brief" MYTHOS_WORKER_ALIVE=1
 L="$MYTHOS_DIR/state/worker-latency.tsv"; A="$BRIEF_LINES_DIR/mythos-worker-latency.tsv"
 
 mk() { # sid user_ts assistant_ts(空＝還沒回)
@@ -55,6 +55,15 @@ grep -q $'^s-still\t.*\t[0-9]' "$L" || fail "s-still 回了要補記秒數：$(c
 grep -q '⚠ 120s.*7 天內第 2 次' "$A" || fail "第二次慢要標第 2 次：$(cat "$A")"
 [ "$(wc -l < "$A" | tr -d ' ')" = 3 ] || fail "s-wait 20s 不該告警、s-still 回了不再重告：$(cat "$A")"
 [ "$(grep -c 's-still' "$A")" = 1 ] || fail "s-still 只該告一次：$(cat "$A")"
+
+# 沒有 worker 行程（被取消／被殺）：不報仍未回
+rm -rf "$T/m2" "$T/b2" "$T/db2"; mkdir -p "$T/m2"
+MYTHOS_WORKER_DB="$T/db2" mk s-dead $((now-200)) ''
+MYTHOS_DIR="$T/m2" MYTHOS_WORKER_DB="$T/db2" BRIEF_LINES_DIR="$T/b2" MYTHOS_WORKER_ALIVE=0 python3 "$BIN" || fail "dead rc≠0"
+[ ! -s "$T/b2/mythos-worker-latency.tsv" ] || fail "沒有 worker 行程不該報仍未回：$(cat "$T/b2/mythos-worker-latency.tsv")"
+# 沙箱 MYTHOS_DIR 卻沒覆寫 worker 庫（測試跑 dispatch-watch）：整支跳過，不讀真庫、不寫告警
+out="$(env -u MYTHOS_WORKER_DB MYTHOS_DIR="$T/m3" BRIEF_LINES_DIR="$T/b3" python3 "$BIN" 2>&1)"; rc=$?
+[ "$rc" = 0 ] && [ ! -e "$T/b3" ] && [ ! -e "$T/m3/state/worker-latency.tsv" ] || fail "沙箱未覆寫 DB 要跳過：rc=$rc $out"
 
 rm -f "$MYTHOS_WORKER_DB"; out="$(python3 "$BIN" 2>&1)"; rc=$?
 [ "$rc" = 3 ] || fail "DB 不存在要 rc=3，實得 $rc：$out"
