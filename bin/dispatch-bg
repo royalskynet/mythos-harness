@@ -124,6 +124,12 @@ if [ -n "$mode" ]; then
   fi
   # 排在信箱的補充是對舊方向說的；不清掉，dispatch-watch 會在舊 worker 被停後把它當新單派出去
   rm -rf "$MYTHOS_DIR/state/mailbox/$thread" 2>/dev/null
+  # 11-08（G11）：排隊中的（hermes 上限滿時排的）也一起丟掉；每項第一欄是 thread
+  qn=''
+  for qf in $(awk -F'\t' -v th="$thread" '$1==th {print FILENAME}' "$MYTHOS_DIR"/state/hermes-queue/* 2>/dev/null); do
+    [ -f "$qf" ] && rm -f -- "$qf" && qn="$qn $qf"
+  done
+  [ -n "$qn" ] && echo "已丟掉排隊項：$(for f in $qn; do printf '%s ' "${f##*/}"; done)"
   if [ "$mode" = cancel ]; then
     if [ -n "$stopped" ]; then echo "已停${stopped}"; else echo "thread ${thread} 沒有進行中的事"; fi
     exit 0
@@ -217,6 +223,25 @@ if [ -n "$resume" ] && [ -z "$hb" ]; then
   else
     echo "找不到 ${resume} 的完整 sessionId（claude agents 沒列出），改開新 session" >&2
     resume=''
+  fi
+fi
+# 11-08（G11）：hermes worker 同時開工上限 MYTHOS_HERMES_SLOTS（預設 3）。達上限→不寫 ledger、不起行程，
+# 改排 state/hermes-queue/（一筆一檔，<epoch>-<pid> 保 FIFO；內容含 thread 與 prompt 路徑），dispatch-watch 有空位再照原參數派。
+# 仍在上面 hold 著的 ledger 鎖內數，兩個呼叫不會同時看到有空位。同一 thread 的續派已在上面進信箱，不受此限。
+if [ -n "$hb" ]; then
+  slots="${MYTHOS_HERMES_SLOTS:-3}"
+  case "$slots" in ''|*[!0-9]*) slots=3 ;; esac
+  # ponytail: 存活數＝ledger pending 列；worker 果真死掉時要等 dispatch-watch 一輪收尾才釋放。
+  nlive=0
+  [ -f "$MYTHOS_DIR/state/dispatch-jobs.tsv" ] && nlive="$(awk -F'\t' '$5=="pending" && $8=="hermes"' "$MYTHOS_DIR/state/dispatch-jobs.tsv" | wc -l | tr -d ' ')"
+  if [ "$nlive" -ge "$slots" ]; then
+    qd="$MYTHOS_DIR/state/hermes-queue"
+    mkdir -p "$qd" || exit 1
+    qf="$qd/$(date +%s)-$$"
+    printf '%s\t%s\n' "$thread" "$prompt" > "$qf.tmp" && mv -f "$qf.tmp" "$qf" || { rm -f "$qf.tmp"; exit 1; }
+    echo "已排隊：hermes worker ${nlive}/${slots} 都在跑，thread ${thread} 排入佇列 ${qf##*/}" >&2
+    echo "queued-${qf##*/}"
+    exit 0
   fi
 fi
 

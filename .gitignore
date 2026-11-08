@@ -122,6 +122,9 @@ __pycache__/
 !/tests/test-dispatch-watch-hermes-alive.sh
 !/tests/test-dispatch-bg-hermes-dedupe.sh
 !/tests/test-hermes-to-of.sh
+!/tests/test-hermes-slots.sh
+!/tests/test-hermes-fail-to-of-watch.sh
+!/tests/test-hermes-report-status.sh
 # 11-08：Hermes profile distribution 正本（升級外殼）
 !/profiles/
 !/bin/hermes-contract

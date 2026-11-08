@@ -70,6 +70,7 @@ BRIEF_BIN="${BRIEF_BIN:-$(cd "$(dirname "$0")" && pwd)/brief-answer}"
 BG_AUTOHEAL="${BG_AUTOHEAL:-1}"
 DISPATCH_BG_BIN="${DISPATCH_BG_BIN:-$(cd "$(dirname "$0")" && pwd)/dispatch-bg}"
 DISPATCH_CANCEL_BIN="${DISPATCH_CANCEL_BIN:-$(cd "$(dirname "$0")" && pwd)/dispatch-cancel}"
+DISPATCH_RETRY_BIN="${DISPATCH_RETRY_BIN:-$(cd "$(dirname "$0")" && pwd)/dispatch-retry}"  # 11-08：hermes 全敗／自報受阻失敗 → 轉派 of；測試換 stub
 DISPATCH_BIN="${DISPATCH_BIN:-$(cd "$(dirname "$0")" && pwd)/dispatch}"  # 規劃單 PASS 後自動派執行單（11-07）
 BRIEF_LINES_DIR="${BRIEF_LINES_DIR:-$HOME/.cache/brief-lines}"
 DIRECT_SENDING_SEC="${DIRECT_SENDING_SEC:-600}"
@@ -482,11 +483,27 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
     fi
     ;;
   esac
+  # 11-08（G04）：hermes worker 結果第一行「狀態：完成／已轉交／受阻／失敗」，在分派 case 之前判（bash case 命中後不會往下掉）：
+  # 受阻／失敗 → st=selfreport，走下面 FAIL 分支（先 dispatch-retry 轉派 of）；完成／已轉交 → PASS，送使用者前去掉狀態行；
+  # 沒有狀態行（舊 worker）照舊 PASS，log 記 report-status-missing。全形冒號先換半形再比。
+  rsf=''; rsv=''
+  if [ "$backend" = hermes ] && [ "$st" = done ]; then
+    rsn="$(head -n 1 "$(bg_rf "$sid")" 2>/dev/null | tr -d ' \t\r')"; rsn="${rsn//：/:}"
+    case "$rsn" in
+      # 前綴比：模型常把原因接在同一行（狀態：受阻：缺帳號），逐字比會漏判成 PASS 直發
+      狀態:完成*|狀態:已轉交*|狀態:受阻*|狀態:失敗*) rsf="${rsn}"; rsv="${rsn#*:}"; rsv="${rsv%%:*}" ;;
+      *) log "report-status-missing ${id}" ;;
+    esac
+    case "$rsv" in 受阻|失敗) st=selfreport ;; esac
+  fi
   case "$st" in
     done|completed|exited)
       rf="$(bg_rf "$sid")"
       extra=''
-      if [ -s "$rf" ]; then
+      if [ -s "$rf" ] && [ -n "$rsf" ]; then
+        extra="$(tail -n +2 "$rf" | tr '\t\n' '  ' | cut -c1-300)"
+        tail -n +2 "$rf" > "$MYTHOS_DIR/state/bg/$sid.send"
+      elif [ -s "$rf" ]; then
         extra="$(tr '\t\n' '  ' < "$rf" | cut -c1-300)"
       else
         seen="$MYTHOS_DIR/state/bg/$sid.done-seen"
@@ -497,9 +514,12 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
       fi
       guide="看結果決定：要續派用 bin/dispatch-bg --thread $thread <prompt檔>，卡死就 bin/dispatch-cancel $id"
       case "$backend" in bg|hermes) bgb=1 ;; *) bgb='' ;; esac
-      if add_event "$id" PASS "$task" "$extra" "$guide" >/dev/null && [ -n "$bgb" ] && [ -s "$rf" ]; then
+      if true; then
         sf="$MYTHOS_DIR/state/bg/$sid.summary"
-        if summary_of "$rf" > "$sf" && [ -n "$(tr -d '[:space:]' < "$sf")" ]; then
+        add_event "$id" PASS "$task" "$extra" "$guide" >/dev/null || continue
+        [ -n "$bgb" ] && [ -s "$rf" ] || continue
+        srf="$rf"; [ -f "$MYTHOS_DIR/state/bg/$sid.send" ] && srf="$MYTHOS_DIR/state/bg/$sid.send"
+        if summary_of "$srf" > "$sf" && [ -n "$(tr -d '[:space:]' < "$sf")" ]; then
           if [ "$(head -1 "$sf" | tr -d '[:space:]')" = "[靜默]" ]; then
             # 11-06：例行排程（daily-backlog）沒事時不推 TG；摘要第一行寫 [靜默] 就只 ack、不直發不交 Router
             ledger_events set "$EVENTS_FILE" "$id-PASS" "{\"direct\":\"quiet\",\"acked_at\":$now}" >/dev/null && log "quiet ack $id-PASS"
@@ -567,16 +587,22 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
       add_event "$id" FAIL "$task" "worker 已不在 claude agents 清單（對帳）" "$guide" >/dev/null &&
         { [ "$backend" = bg ] && bg_autoheal "$id" "$id-FAIL" "$thread" "$task" "worker 不見了" FAIL || true; }
       ;;
-    stopped|failed|error|killed)
+    stopped|failed|error|killed|selfreport)
       # F4：worker 沒寫 result 就停了 → 終態 FAIL，不再永遠 pending
       rf="$MYTHOS_DIR/state/bg/$sid.result"
-      if [ "$backend" = hermes ] && [ -n "$hrc" ]; then
+      if [ "$st" = selfreport ]; then
+        extra="$(tail -n +2 "$(bg_rf "$sid")" | tr '\t\n' '  ' | cut -c1-200 | sed "s/ *\$//")"
+        if ${DISPATCH_RETRY_BIN:+"$DISPATCH_RETRY_BIN"} "$id" "上一位 worker 回報${rsv}（${extra}）" >/dev/null 2>>"$WATCH_LOG"; then
+          log "hermes 自報${rsv}，靜默重派 of：${id}"
+          continue
+        fi
+      elif [ "$backend" = hermes ] && [ -n "$hrc" ]; then
         # 11-08b #1：hermes 失敗原因＝結束碼＋stderr 尾端（stdout 不混進來）
         et="$(tail -c 300 "${hrcf%.rc}.err" 2>/dev/null | tr '\t\n' '  ')"
         if [ "$hrc" = 0 ]; then extra="hermes 結束碼 0 但沒有輸出"; else extra="hermes 結束碼 ${hrc}"; fi
         extra="$(printf '%s' "${extra}${et:+；stderr：$et}" | cut -c1-300)"
         # 11-08 使用者定：worker 模型鏈全敗後接派of（dispatch-retry 的 hermes 分支＝easy／DCQ_ORDER=free），成功就靜默、不產生 FAIL 事件
-        if "$ROOT_DIR/bin/dispatch-retry" "$id" "上一位 worker 的模型全部失敗（${extra}）" >/dev/null 2>>"$WATCH_LOG"; then
+        if ${DISPATCH_RETRY_BIN:+"$DISPATCH_RETRY_BIN"} "$id" "上一位 worker 的模型全部失敗（${extra}）" >/dev/null 2>>"$WATCH_LOG"; then
           log "hermes 全失敗，靜默重派 of：$id"
           continue
         fi
@@ -591,6 +617,33 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
       ;;
   esac
 done < <(ledger_fields < "$TSV")
+
+# 11-08（G11）：hermes 排隊項。有空位（backend=hermes pending 列 < MYTHOS_HERMES_SLOTS）就照 FIFO 用原參數叫 dispatch-bg；
+# 起失敗的留著並記 log。項名 <epoch>-<pid>，FIFO 由檔名排序達成；同 thread 已排／尚在 ledger → 丟掉這項（重派會自己再排）。
+hqd="$MYTHOS_DIR/state/hermes-queue"
+if [ -d "$hqd" ]; then
+  hslots="${MYTHOS_HERMES_SLOTS:-3}"
+  case "$hslots" in ''|*[!0-9]*) hslots=3 ;; esac
+  for qf in $(ls "$hqd" 2>/dev/null | grep -v '\.tmp$' | sort); do
+    hq="$hqd/$qf"
+    [ -f "$hq" ] || continue
+    hth="$(cut -f1 "$hq" | tr -d '\r')"; hp="$(cut -f2 "$hq")"
+    hn="$(awk -F'\t' '$5=="pending" && $8=="hermes"' "$TSV" | wc -l | tr -d ' ')"
+    [ "$hn" -lt "$hslots" ] || break
+    # 同 thread 重複排隊：FILENAME 是完整路徑，me 要比完整路徑（比檔名永遠不等，每一項都會把自己算成重複）
+    if awk -F'\t' -v th="$hth" -v me="$hq" '$1==th && FILENAME!=me {f=1} END{exit !f}' "$hqd"/* \
+       || awk -F'\t' -v th="$hth" '$5=="pending" && $7==th && $8=="hermes"{f=1} END{exit !f}' "$TSV"; then
+      rm -f "$hq"; log "hermes 排隊 ${qf}：thread $hth 已有在跑或重複排隊，丟掉"
+      continue
+    fi
+    if [ ! -f "$hp" ]; then rm -f "$hq"; log "hermes 排隊 ${qf}：prompt 檔不見了，丟掉 $hp"; continue; fi
+    if out="$(DISPATCH_BG_WORKER=hermes MYTHOS_DIR="$MYTHOS_DIR" bash "$DISPATCH_BG_BIN" --thread "$hth" "$hp" 9>&- 2>>"$WATCH_LOG")"; then
+      rm -f "$hq"; log "hermes 排隊起 worker：thread $hth → $out"
+    else
+      log "hermes 排隊起 worker 失敗，留在佇列：$qf"
+    fi
+  done
+fi
 
 # 同 thread 只派一個信箱批次。先把本輪訊息移到 .batch，新的 incoming 留給下輪；中斷後重用同 prompt。
 for mb in "$MYTHOS_DIR"/state/mailbox/*; do
