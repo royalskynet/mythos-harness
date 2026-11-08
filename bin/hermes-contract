@@ -12,10 +12,10 @@ HERMES="${HERMES_BIN:-$HOME/.local/bin/hermes}"
 fail=0
 bad() { echo "FAIL $*"; fail=1; }
 
-# 1. Python 介面（用 hermes 自己的 python 匯入，launcher 解析法同 bin/hermes-logged）
+# 1. Python 介面（用 hermes 自己的 python 匯入；python 路徑讀官方 launcher 的 exec 行）
 PY="$(sed -n 's/^exec \([^ ]*python3\) .*/\1/p' "$ROOT/.hermes/bin/hermes" 2>/dev/null | head -1)"
 if [ -z "$PY" ] || [ ! -x "$PY" ]; then
-  bad "launcher：${ROOT}/.hermes/bin/hermes 解析不到 python（bin/hermes-logged 會退回無 log 模式）"
+  bad "launcher：${ROOT}/.hermes/bin/hermes 解析不到 python"
 else
   hooks="$(grep -hoE 'register_hook\("[a-z_]+"' "$DIST"/mythos/plugins/*/__init__.py | sed 's/.*("//; s/"$//' | sort -u | tr '\n' ' ')"
   ctxm="$(grep -hoE 'ctx\.[a-z_]+\(' "$DIST"/mythos/plugins/*/__init__.py | sed 's/ctx\.//; s/($//' | sort -u | tr '\n' ' ')"
@@ -24,7 +24,7 @@ import sys, os
 root, hooks, ctxm = sys.argv[1], sys.argv[2].split(), sys.argv[3].split()
 sys.path.insert(0, root)
 os.environ.setdefault("HERMES_HOME", os.path.expanduser("~/.hermes"))
-import hermes_bootstrap  # 同 hermes-logged：先讓 PM 把相依路徑掛上
+import hermes_bootstrap  # 先讓 PM 把相依路徑掛上
 from importlib import import_module
 bad = []
 
@@ -72,11 +72,12 @@ fi
 # ponytail: 上游改名時這裡先叫，再人工確認；有公開 API 後改成匯入檢查
 grep -q 'stale_timeout_seconds' "$ROOT/run_agent.py" 2>/dev/null \
   || bad "run_agent.py 不再讀 per-model stale_timeout_seconds（worker 的 90s 防卡設定失效）"
+# worker 由 dispatch-bg 以 `hermes -p mythos-worker -z` 起；v0.23 起 -z 經 gateway 跑（launch_gateway_chat），log 原生寫進 agent.log
+grep -q 'def _run_oneshot_from_args' "$ROOT/hermes_cli/main.py" 2>/dev/null \
+  || bad "hermes_cli/main.py 沒有 _run_oneshot_from_args：hermes -z（worker 入口）可能改了"
 grep -q 'logging.disable' "$ROOT/hermes_cli/oneshot.py" 2>/dev/null \
-  || echo "NOTE oneshot 不再 logging.disable：bin/hermes-logged 可以退役"
+  && bad "oneshot 又會 logging.disable：worker 的 agent.log 會變空白（11-08 已退役的 hermes-logged 可從 git 5c2abef 撈回）"
 
-# 3. hermes-logged 入口能起來
-HERMES_AGENT_ROOT="$ROOT" "$REPO/bin/hermes-logged" --version >/dev/null 2>&1 || bad "bin/hermes-logged --version 跑不起來"
 
 # 4. 線上設定實際被 CLI 讀到
 if [ -x "$HERMES" ]; then

@@ -10,7 +10,6 @@
 !/router/
 /bin/*
 !/bin/dispatch
-!/bin/hermes-logged
 !/bin/dispatch-bg
 !/bin/dispatch-cancel
 !/bin/dispatch-deep-run

@@ -23,8 +23,8 @@ MYTHOS_DIR="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CLAUDE="${CLAUDE_BIN:-claude}"
 BG_WORKER="${DISPATCH_BG_WORKER:-claude}"
-# 預設走 bin/hermes-logged：hermes -z 會關掉全部 logging，包一層才看得到 worker 的 agent.log（11-08）
-HERMES="${DISPATCH_BG_HERMES_BIN:-$ROOT_DIR/bin/hermes-logged}"
+# 11-08 Hermes v0.23：hermes -z 改經 gateway 跑、不再 logging.disable，worker 的 agent.log 原生就有紀錄；hermes-logged 已退役
+HERMES="${DISPATCH_BG_HERMES_BIN:-$HOME/.local/bin/hermes}"
 case "$BG_WORKER" in claude|hermes) ;; *) echo "DISPATCH_BG_WORKER 只認 claude 或 hermes：$BG_WORKER" >&2; exit 2 ;; esac
 hb=''
 [ "$BG_WORKER" = hermes ] && hb=1
