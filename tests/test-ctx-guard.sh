@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ctx-guard 測試：假 transcript，超過閾值被標出、低於不標；advisor 加總不算；Router/worker 動作用 stub。
 set -u
+export MYTHOS_RUNTIME=claude  # 測 Claude TUI 舊流程；Hermes 模式另見 tests/test-hermes-control-loop.py
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 G="${CTX_GUARD_BIN:-$HERE/bin/ctx-guard}"  # 突變測試指向副本，不改現役檔
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT

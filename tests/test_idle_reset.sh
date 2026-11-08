@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 驗收：idle-reset 短閒置才清、忙就等、一天只清一次（11-02：舊版 6h 條件被夜間排程永遠擋住）。
 set -euo pipefail
+export MYTHOS_RUNTIME=claude  # 測 Claude TUI 舊流程；Hermes 模式另見 tests/test-hermes-control-loop.py
 SRC="$(cd "$(dirname "$0")/../bin" && pwd)/idle-reset"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }

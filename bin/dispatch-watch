@@ -88,6 +88,11 @@ fi
 # 抽查兩段過濾（11-02）：fast path 是這支腳本的 mtime／間隔判斷，slow path 交免費模型，
 # 只有 OFF_TRACK／STUCK／看不懂才喚醒 Mythos。沒這支或不可執行＝退回舊行為（每次抽查都喚醒）。
 REVIEW_JUDGE="${REVIEW_JUDGE:-$MYTHOS_DIR/bin/review-judge}"
+# N12（11-08）：hermes worker 同名同結果的工具呼叫連續 HERMES_LOOP_N 次＝抽查候選（交 review-judge；不殺、不重派）。
+# 候選節流沿用 DEEP_REVIEW_MIN（同一票每 N 分鐘最多一次）。worker 庫路徑 MYTHOS_WORKER_DB 同 bin/worker-latency。
+HERMES_LOOP_N="${HERMES_LOOP_N:-6}"
+MYTHOS_WORKER_DB="${MYTHOS_WORKER_DB:-$HOME/.hermes/profiles/mythos-worker/state.db}"
+HERMES_STATE_PY="${HERMES_STATE_PY:-$(cd "$(dirname "$0")" && pwd)/lib-hermes-state.py}"
 # deepclaude 用自己的 CLAUDE_CONFIG_DIR，transcript 不在 ~/.claude/projects（11-02 實查）
 CLAUDE_PROJECTS_DIR="${CLAUDE_PROJECTS_DIR:-$HOME/.deepclaude/config/projects}"
 # 主 session transcript：取 mtime 最新的 *.jsonl
@@ -432,6 +437,31 @@ if [ -f "$EVENTS_FILE" ]; then
   done < <(jq -r --argjson now "$now" --argjson lim "$DIRECT_SENDING_SEC" \
     'select(.direct == "sending" and .acked_at == null and ($now - .created) >= $lim) | [.job_id, .event_id] | @tsv' "$EVENTS_FILE" 2>/dev/null)
 fi
+# N12：hermes worker 工具呼叫原地打轉的候選。對應 session 的方法：dispatch-bg 把 state/bg/r-<rk>.result 寫進 prompt，
+# rk 存在 state/bg/<sid>.rkey，worker 庫裡只有一個 session 的 user 訊息含這串字（lib-hermes-state.py worker-loop）。
+# 候選格式同 deep 路徑：id、task、last-review 檔、progress 四欄以 tab 分隔（進 REVIEWS，之後由 review-judge 判）。
+hermes_loop_candidate() { # id sid task
+  local id="$1" sid="$2" task="$3" rk lrf lr out prog
+  mkdir -p "$MYTHOS_DIR/logs" 2>/dev/null  # 下面 2>>WATCH_LOG 要求目錄已存在
+  rk="$(tr -d '[:space:]' < "$MYTHOS_DIR/state/bg/$sid.rkey" 2>/dev/null)"
+  case "$rk" in ''|*[!0-9-]*) log "hermes-loop UNKNOWN ${id} 沒有 rkey，對不到 session（不殺、不重派）"; return 0 ;; esac
+  lrf="$MYTHOS_DIR/state/bg/$sid.last-review"
+  if [ -f "$lrf" ]; then
+    lr="$(tr -d '[:space:]' < "$lrf" 2>/dev/null)"
+    case "$lr" in ''|*[!0-9]*) ;; *) [ $((now - lr)) -lt $((DEEP_REVIEW_MIN * 60)) ] && return 0 ;; esac
+  fi
+  out="$(python3 "$HERMES_STATE_PY" worker-loop "$MYTHOS_WORKER_DB" "$rk" "$HERMES_LOOP_N" 2>>"$WATCH_LOG" </dev/null)" || out="UNKNOWN helper-exit"
+  case "$out" in
+    LOOP\ *)
+      prog="$(printf '%s' "${out#LOOP }" | tr '\t\n' '  ')"
+      printf '%s\t%s\t%s\t%s\n' "$id" "$task" "$lrf" "$prog" >> "$REVIEWS"
+      log "hermes-loop 候選 ${id} ${prog}" ;;
+    UNKNOWN*) log "hermes-loop $id ${out}（不殺、不重派）" ;;
+    *) ;;  # NOLOOP：沒有循環，不記
+  esac
+  return 0
+}
+
 # 1a) bg／bg-hard 掃描：done 走事件投遞、working 逾時發 STALL
 while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend; do
   [ "$status" = pending ] || continue
@@ -496,6 +526,8 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
     esac
     case "$rsv" in 受阻|失敗) st=selfreport ;; esac
   fi
+  # N12：hermes worker 還活著（working）→ 看工具呼叫有沒有原地打轉；只產候選，不殺、不重派
+  if [ "$backend" = hermes ] && [ "$st" = working ]; then hermes_loop_candidate "$id" "$sid" "$task" || true; fi
   case "$st" in
     done|completed|exited)
       rf="$(bg_rf "$sid")"

@@ -353,8 +353,35 @@ if [ -f "$EVENTS_FILE" ]; then
   done < <(jq -r 'select(.acked_at == null and .tries >= 5) | [.event_id, .job_id] | @tsv' "$EVENTS_FILE" 2>/dev/null)
 fi
 
-# 3) Router 未回：最後一則 Telegram 訊息之後 10 分鐘內沒有任何 telegram reply
-newest="$(ls -t "$ROUTER_DIR"/*.jsonl 2>/dev/null | head -1)"
+# 3h) Hermes 模式（N11，11-08）：Router 是 hermes gateway，Claude transcript 看不到它，改讀 mythos state.db。
+#     最近一則 TG 使用者訊息之後超過 HERMES_ROUTER_SILENT_MIN 分鐘沒有 assistant 最終回覆 → router-silent。
+#     庫打不開／schema 不符／查詢錯 → unavailable：記 log 並告警，絕不當健康。MYTHOS_RUNTIME=claude 時不走這段。
+RUNTIME="${MYTHOS_RUNTIME:-hermes}"
+ROUTER_DB="${MYTHOS_ROUTER_DB:-$HOME/.hermes/profiles/mythos/state.db}"
+HERMES_SILENT_MIN="${HERMES_ROUTER_SILENT_MIN:-10}"
+if [ "$RUNTIME" = hermes ]; then
+  rs="$(python3 "$HERE/lib-hermes-state.py" router-silent "$ROUTER_DB" "$HERMES_SILENT_MIN" "$now" 2>>"$LOG" </dev/null)" || rs="UNAVAILABLE query helper-exit"
+  case "$rs" in
+    SILENT\ *)
+      read -r _k t0 mins when <<<"$rs"
+      alert "router-silent-$t0" "Router 無回覆（router-silent，hermes）：最近一則 TG 訊息 ${when}（UTC+8）之後已 ${mins} 分鐘沒有回覆"
+      ;;
+    OK\ *) ;;
+    UNAVAILABLE\ *)
+      read -r _k kind rest <<<"$rs"
+      log "UNAVAILABLE router-hermes ${kind:-unknown} ${rest:-}"
+      alert "router-unavailable-${kind:-unknown}" "Router 健康判不了（hermes 狀態庫 ${kind:-unknown}：${rest:-}），不當作正常"
+      ;;
+    *)
+      log "UNAVAILABLE router-hermes 檢查器輸出看不懂：$rs"
+      alert "router-unavailable-parse" "Router 健康判不了（檢查器輸出看不懂），不當作正常"
+      ;;
+  esac
+fi
+
+# 3) Router 未回（claude 模式）：最後一則 Telegram 訊息之後 10 分鐘內沒有任何 telegram reply
+newest=""
+[ "$RUNTIME" = hermes ] || newest="$(ls -t "$ROUTER_DIR"/*.jsonl 2>/dev/null | head -1)"
 if [ -n "$newest" ]; then
   stale="$("$NODE" - "$newest" <<'JS'
 const fs = require('fs')
