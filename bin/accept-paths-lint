@@ -72,7 +72,9 @@ def extract(wo):
             return r.stdout
     except FileNotFoundError:
         pass
-    lines, out, ins, fence, lvl = open(wo, encoding='utf-8').read().splitlines(), [], False, False, 0
+    # 有 ```bash 圍欄 → 只收圍欄內的（`預期：` 這類標籤行不進驗收腳本，否則 CI 沒裝 wo-verify 時
+    # 會把「預期：/path」當相對路徑判 STALE）；沒有圍欄 → 才收章節內未圍欄的行。
+    lines, fenced, plain, ins, fence, lvl = open(wo, encoding='utf-8').read().splitlines(), [], [], False, False, 0
     for l in lines:
         if l.startswith('```'):
             if not fence and ins and FENCE.match(l):
@@ -80,17 +82,21 @@ def extract(wo):
             elif fence:
                 fence = False
             continue
-        if not fence:
-            m = re.match(r'^(#{1,6})[ \t]', l)
-            if m:
-                nl = len(m.group(1))
-                if ins and nl <= lvl:
-                    ins = False
-                if HEADING.match(l):
-                    ins, lvl = True, nl
-                    continue
+        if fence:
             if ins and l.strip():
-                out.append(re.sub(r'^\$ ', '', l))
+                fenced.append(re.sub(r'^\$ ', '', l))
+            continue
+        m = re.match(r'^(#{1,6})[ \t]', l)
+        if m:
+            nl = len(m.group(1))
+            if ins and nl <= lvl:
+                ins = False
+            if HEADING.match(l):
+                ins, lvl = True, nl
+                continue
+        if ins and l.strip():
+            plain.append(re.sub(r'^\$ ', '', l))
+    out = fenced or plain
     return '\n'.join(out) if out else None
 
 

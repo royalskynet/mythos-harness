@@ -20,5 +20,13 @@ if [ "$rc" != 0 ] || [ -n "$out" ]; then
   echo "FAIL: 乾淨工單應 exit 0 且無輸出（rc=$rc out=$out）"; fail=1
 fi
 
+# 圍欄外的「預期：<路徑>」不能被當相對路徑判 STALE；且要在沒裝 wo-verify（走自收路徑，CI 就是）時也成立。
+printf '## 驗收\n```bash\ncd %s\nls collectors/real.py\n```\n預期：%s/nope/run-1.md 存在。\n' "$tmp" "$tmp" > "$tmp/expect.md"
+nolocal="$(printf '%s' "$PATH" | tr ':' '\n' | grep -v '/\.local/bin' | paste -sd: -)"
+out="$(PATH="$nolocal" "$lint" "$tmp/expect.md" 2>/dev/null)"; rc=$?
+if [ "$rc" != 0 ] || [ -n "$out" ]; then
+  echo "FAIL: 圍欄外「預期：」行不該被判過期（rc=${rc} out=${out}）"; fail=1
+fi
+
 [ "$fail" = 0 ] && echo OK
 exit "$fail"
