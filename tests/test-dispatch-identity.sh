@@ -57,7 +57,7 @@ assert m.THREAD_RE.fullmatch(tid), (res, tid)
 print("VALIDATE_OK")
 PY
 MYTHOS_DIR="$SB" MYTHOS_DISPATCH_DRYRUN=1 TBAD="$TBAD" \
-  python3 "$TMP/probe.py" "~/.hermes/profiles/mythos/plugins/mythos-tools/__init__.py" \
+  python3 "$TMP/probe.py" "$HOME/.hermes/profiles/mythos/plugins/mythos-tools/__init__.py" \
   || fail "(a) thread 驗參失敗"
 echo '(a) ok'
 

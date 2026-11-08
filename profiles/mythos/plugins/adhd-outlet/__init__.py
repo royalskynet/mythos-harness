@@ -20,7 +20,7 @@ from typing import Any, Optional
 MYTHOS = os.environ.get("MYTHOS_DIR", os.path.expanduser("~/bots/mythos"))
 FULL_DIR = os.path.join(MYTHOS, "state", "tg-full")
 LOG = os.environ.get("MYTHOS_ADHD_LOG", os.path.join(MYTHOS, "state", "adhd-outlet.log"))
-BIN = os.environ.get("MYTHOS_ADHD_BIN", "~/bots/mythos/bin/adhd-lint.mjs")
+BIN = os.environ.get("MYTHOS_ADHD_BIN", os.path.expanduser("~/bots/mythos/bin/adhd-lint.mjs"))
 TIMEOUT = 5
 RETRY_MSG = "剛剛那句我沒接好，你再說一次？"
 # profile 的 state.db：由本檔位置（<profile>/plugins/<外掛>）往上推。不看 HERMES_HOME：多 profile 共用的 gateway 行程裡

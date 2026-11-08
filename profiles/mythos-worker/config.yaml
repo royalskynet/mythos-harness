@@ -32,7 +32,7 @@ mcp_servers:
   claude-mem:
     command: /opt/homebrew/bin/node
     args:
-      - ~/.claude/plugins/marketplaces/thedotmack/plugin/scripts/mcp-server.cjs
+      - ${HOME}/.claude/plugins/marketplaces/thedotmack/plugin/scripts/mcp-server.cjs
     timeout: 30
 logging:
   level: DEBUG

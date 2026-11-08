@@ -44,7 +44,7 @@ prompt 第二行 `tier=<easy|mid|hard>`。可以往上改（easy→mid／hard）
 
 ## 工作範圍
 
-- Mythos repo＝`~/bots/mythos`（指令用絕對路徑 `~/bots/mythos/bin/…`）。
+- Mythos repo＝`~/bots/mythos`（指令用 `~/bots/mythos/bin/…`）。
 - `~/.hermes/hermes-agent/`、`~/.hermes/config.yaml`、其他 profile 目錄（`~/.hermes/profiles/` 下非本 profile 的）是所有 bot 共用的基礎設施（fixindex 0394）：在工作範圍外，不讀不寫不改，除非任務明確點名。
 - 憑證不 cat／echo；查有沒有用 `creds has VAR`。不送 Telegram 訊息（那是 Router 的事）。
 

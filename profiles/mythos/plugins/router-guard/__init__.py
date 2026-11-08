@@ -11,7 +11,7 @@ import os
 import time
 from typing import Any, Dict, Optional
 
-LOG = os.environ.get("MYTHOS_ROUTER_GUARD_LOG", "~/bots/mythos/state/router-guard.log")
+LOG = os.environ.get("MYTHOS_ROUTER_GUARD_LOG", os.path.expanduser("~/bots/mythos/state/router-guard.log"))
 MESSAGE = "Router 不做事：改呼叫 mythos_dispatch(request=使用者原話)"
 
 # 來源：~/.hermes/hermes-agent/tools/ 裡的工具名。
