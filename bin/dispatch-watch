@@ -575,6 +575,11 @@ while IFS="$(printf '\t')" read -r id tier task epoch status cwd thread backend;
         et="$(tail -c 300 "${hrcf%.rc}.err" 2>/dev/null | tr '\t\n' '  ')"
         if [ "$hrc" = 0 ]; then extra="hermes 結束碼 0 但沒有輸出"; else extra="hermes 結束碼 ${hrc}"; fi
         extra="$(printf '%s' "${extra}${et:+；stderr：$et}" | cut -c1-300)"
+        # 11-08 使用者定：worker 模型鏈全敗後接派of（dispatch-retry 的 hermes 分支＝easy／DCQ_ORDER=free），成功就靜默、不產生 FAIL 事件
+        if "$ROOT_DIR/bin/dispatch-retry" "$id" "上一位 worker 的模型全部失敗（${extra}）" >/dev/null 2>>"$WATCH_LOG"; then
+          log "hermes 全失敗，靜默重派 of：$id"
+          continue
+        fi
       elif [ -s "$rf" ]; then
         extra="$(tr '\t\n' '  ' < "$rf" | cut -c1-300)"
       else

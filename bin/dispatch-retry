@@ -38,6 +38,7 @@ case "$backend:$tier" in
   deep:*) tier=hard; export DISPATCH_HARD_BACKEND=deep ;;
   head:*) tier=hard; export DISPATCH_HARD_HEAD= ;;  # WO3g-r2：go flash 失敗的重派走 O 預設鏈  # 工單 D：hard 預設改 bg-hard，deep 票重派仍走 deep
   bg-hard:*) tier=hard; export DISPATCH_HARD_BACKEND=bg ;;
+  hermes:*) tier=easy ;;  # 11-08 使用者定：worker 模型鏈（glm-5.3-flash→beam-free）全敗後接派of（easy＝DCQ_ORDER=free）
   bg:*) echo "bg 票用 bin/dispatch-bg --thread <thread> <prompt檔> 續派，不走 dispatch-retry：$id" >&2; exit 2 ;;
 esac
 # deep 兜底（11-06，使用者定「派o 沒別的可派才 deep」）：原票是 dcq（mid／easy）、已在 ~/.dcq/failed（免費層全敗，
@@ -52,7 +53,7 @@ if [ "${DISPATCH_DEEP_FALLBACK:-1}" = 1 ] && [ "$backend" = dcq ] && [ -f "$HOME
   if [ "$_had" = 0 ] && [ -f "$task" ] && ! grep -q 'NO-DEEP' "$task" \
      && case "$task" in "$HOME"/.claude/*) false ;; *) true ;; esac; then
     DEEP_FB=1; tier=hard; export DISPATCH_HARD_BACKEND=deep
-    echo "deep 兜底：派o 免費層全敗（$id），這題改派 deep 一次" >&2
+    echo "deep 兜底：派o 免費層全敗（${id}），這題改派 deep 一次" >&2
   fi
 fi
 # 沿用原 thread（D）；沒有就 - ，同票重派才接得上
@@ -83,10 +84,24 @@ fi
 mkdir -p /tmp/dc-worker
 newtask="/tmp/dc-worker/${root}-r${N}.md"
 ts="$(date '+%Y-%m-%d %H:%M')"
+if [ "$backend" = hermes ]; then
+  # hermes 的 prompt 是聊天原話、沒有驗收段，dcq add 會拒收：包成工單，結論落在 cwd 內的檔（O 不能寫 cwd 外）
+  mkdir -p "$cwd/of-results"
+  res="$cwd/of-results/${root}-r${N}.md"
+  {
+    printf '## 任務\n\n%s。照下面原任務做完，最後把給使用者的結論（繁體中文，先講結果）寫進 %s。\n\n' "$extra" "$res"
+    if [ -f "$task" ]; then cat "$task"; else printf '%s\n' "$task"; fi
+    # 驗收寫 cd＋裸檔名：accept-paths-lint 會把還沒產出的絕對路徑判成 STALE 拒派
+    printf '\n## 驗收\n\n```sh\ncd %s && test -s %s\n```\n\n預期：exit 0\n\n' "$cwd/of-results" "${res##*/}"
+    printf '## 禁止\n\n- launchctl bootout/bootstrap/kickstart 必帶完整 gui/501/<label>；裸 domain 與 launchctl reboot 禁止\n'
+    printf -- '- 無頭機：禁止回報請使用者手動執行指令或貼 token；憑證讀不到就停手回報阻斷點與 key 名\n'
+  } > "$newtask"
+else
 {
   if [ -f "$task" ]; then cat "$task"; else printf '%s\n' "$task"; fi
   printf '\n\n## 追加指示（第 %s 次重派，%s）\n\n%s\n' "$N" "$ts" "$extra"
 } > "$newtask"
+fi
 
 DISPATCH_THREAD="$thread" "$ROOT_DIR/bin/dispatch" "$newtask" "$cwd" "$tier"
 rc=$?
