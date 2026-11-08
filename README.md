@@ -45,6 +45,7 @@ You talk to one Mythos. It always has time to answer because it never does the w
 - **併發**：同時最多 `MYTHOS_HERMES_SLOTS` 個 worker（預設 3），超出的依序排隊。
 - **喚醒**：worker 完成即觸發 dispatch-watch；撞鎖留下待掃旗標，持鎖者重掃並在釋鎖後交接，launchd 每 120 秒補掃。
 - **送達**：注入對話後確認真的落地，逾時直接發 Telegram。
+- **系統設定快查**：worker 先跑 `bin/system-facts`，零 LLM 讀出模型與派工設定，缺項才補查。
 - **口吻**：`bin/adhd-lint.mjs` 擋掉「派工、工單、代號」這類斷裂用語。
 
 - **Instant replies**: the Router runs no commands and reads no files. Its tool allowlist is enforced twice, by Hermes `platform_toolsets` and by the `router-guard` plugin.
@@ -53,6 +54,7 @@ You talk to one Mythos. It always has time to answer because it never does the w
 - **Status line**: a worker result starts with `狀態：完成|已轉交|受阻|失敗`. Blocked, failed or empty results are retried through the free-model dispatch chain.
 - **Wake-ups**: worker completion triggers dispatch-watch; lock contention persists a rescan marker for the owner and post-release handoff, with launchd sweeping every 120 seconds as a fallback.
 - **Delivery**: injected results are checked against the conversation log and sent to Telegram directly if they never land.
+- **System settings**: workers run zero-LLM `bin/system-facts` first and inspect only missing facts.
 - **Voice**: `bin/adhd-lint.mjs` rejects wording that exposes tickets, ids or hand-offs.
 
 ## 追問影子模式 / Follow-up shadow mode

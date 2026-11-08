@@ -5,6 +5,13 @@
 set -eu
 SRC="$(cd "$(dirname "$0")/worker" && pwd)"
 REPO="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+# linked worktree 不得默認同步到正式 worker；測試必須明確指定隔離目錄。
+GIT_DIR="$(git -C "$REPO" rev-parse --git-dir 2>/dev/null || true)"
+GIT_COMMON_DIR="$(git -C "$REPO" rev-parse --git-common-dir 2>/dev/null || true)"
+if [ "$GIT_DIR" != "$GIT_COMMON_DIR" ] && [ -z "${MYTHOS_WORKER_DIR:-}" ]; then
+  echo "worker-sync: linked worktree 必須明確設定 MYTHOS_WORKER_DIR，拒絕寫入正式 worker 目錄" >&2
+  exit 2
+fi
 DEST="${MYTHOS_WORKER_DIR:-$HOME/bots/mythos-worker}"
 case "$DEST" in "$REPO"|"$REPO"/*) echo "worker 目錄不能在 Mythos 底下（會往上載入 Router 的 CLAUDE.md）：${DEST}" >&2; exit 2 ;; esac
 mkdir -p "$DEST/.claude"

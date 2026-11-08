@@ -1,0 +1,70 @@
+#!/usr/bin/env node
+// 唯讀、零 LLM：解析設定與實際呼叫點，不執行派工工具。
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import { fileURLToPath } from 'node:url';
+const root = process.env.SYSTEM_FACTS_REPO || path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const home = path.join(os.homedir(), '.hermes', 'profiles');
+let failed = false;
+function capture(text, pattern) {
+  const found = text.match(pattern);
+  if (!found) throw Error('missing');
+  return found[1];
+}
+function item(label, file, parse) {
+  try {
+    const value = parse(fs.readFileSync(file, 'utf8'));
+    if (!value) throw Error('missing');
+    console.log(`${label}：${value}`);
+  } catch {
+    console.log(`${label}：讀不到（${file}）`);
+    failed = true;
+  }
+}
+// ponytail: 僅支援現有 block YAML 的純量欄位；其他格式拒絕解析，改格式時需擴充。
+function scalar(text, key) {
+  return capture(text, new RegExp(`^ +${key}: +([\\w./:-]+) *$`, 'm'));
+}
+function block(text, name) {
+  return capture(text, new RegExp(`^${name}: *\\n((?:[ \\t].*\\n|\\n|#.*\\n)*)`, 'm'));
+}
+for (const [label, dir] of [
+  ['Router（聊天與路由）', process.env.SYSTEM_FACTS_ROUTER_PROFILE || path.join(home, 'mythos')],
+  ['worker（背景執行）', process.env.SYSTEM_FACTS_WORKER_PROFILE || path.join(home, 'mythos-worker')],
+]) {
+  const file = path.join(dir, 'config.yaml');
+  item(`${label}模型`, file, text => {
+    const model = block(text, 'model');
+    return `${scalar(model, 'provider')}/${scalar(model, 'default')}`;
+  });
+  item(`${label} fallback`, file, text => {
+    const chain = block(text, 'fallback_providers').split(/^ +- provider: */m).slice(1);
+    if (!chain.length) throw Error('missing');
+    return chain.map(entry => `${capture(entry, /^([\w./:-]+) *\n/)}/${scalar(entry, 'model')}`).join(' → ');
+  });
+}
+item('派工順序（easy / mid / hard）', path.join(root, 'bin/dispatch'), text => {
+  const easy = capture(text, /^ +\*\) route=dcq; export DCQ_ORDER=([\w-]+) ;;/m);
+  const order = tier => capture(text, new RegExp(`^ +${tier}:\\*\\) route=dcq; export DCQ_ORDER="\\$\\{DISPATCH_${tier.toUpperCase()}_ORDER:-([\\w-]+)\\}" ;;`, 'm'));
+  return `easy=${easy}；mid=${order('mid')}；hard=${order('hard')}（DCQ_ORDER 預設值）`;
+});
+item('困難任務計畫（規劃入口；失敗換備援）', path.join(root, 'bin/opus-plan'), text => {
+  const primary = capture(text, /^"\$CLAUDE" -p --model ([\w./:-]+) /m);
+  const fallback = capture(text, /^"\$OC" run -m "\$\{OPUS_PLAN_FALLBACK_MODEL:-([\w./:-]+)\}"/m);
+  return `${primary} → ${fallback}`;
+});
+item('規劃單（mid / hard）', path.join(root, 'bin/plan-ticket'), text => {
+  capture(text, /exec "\$\{PLAN_TICKET_DISPATCH:-\$ROOT_DIR\/bin\/(dispatch)\}"/);
+  return '經 bin/dispatch，依上述難度順序派出';
+});
+item('唯讀快查模型來源', path.join(root, 'bin/quick'), text => {
+  const source = capture(text, /out = subprocess\.run\(\[os\.path\.join\(os\.path\.dirname\(os\.path\.abspath\(__file__\)\), "([\w-]+)"\)/);
+  capture(text, /return out\.split\(\) \+ \(\[PAID\] if PAID else \[\]\)/);
+  return `bin/${source}（依序試免費模型）；QUICK_PAID 明確指定時才附加備援`;
+});
+item('唯讀快查免費清單來源', path.join(root, 'bin/free-models'), text => {
+  const order = capture(text, /line="\$\(DCQ_ORDER=([\w-]+) "\$DCQ" plan/);
+  return `dcq plan，DCQ_ORDER=${order}；FREE_MODELS 可覆寫（不執行 dcq）`;
+});
+process.exitCode = failed ? 1 : 0;

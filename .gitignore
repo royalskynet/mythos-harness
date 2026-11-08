@@ -18,6 +18,7 @@
 !/bin/dispatch-gate.mjs
 !/bin/adhd-lint.mjs
 !/bin/quick
+!/bin/system-facts
 !/bin/recall
 !/bin/dispatch-retry
 !/bin/dispatch-close
@@ -49,6 +50,8 @@
 !/bin/followup-direct
 !/bin/followup-report
 /tests/*
+!/tests/test-system-facts.sh
+!/tests/test-worker-sync-worktree.sh
 !/tests/test-tg-send.sh
 !/tests/test-tg-send-inbox.sh
 !/tests/test-tg-plugin-patch.sh

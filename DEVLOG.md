@@ -3,6 +3,16 @@
 開發紀錄，新的在上面。只記做了什麼、為什麼；不含本機路徑、帳號與內部計畫。
 Development log, newest first. It records what changed and why, without local paths, accounts or internal plans.
 
+## 2026-11-08 — P6f 小派工省力 / P6f lighter small dispatches
+
+- Router 秒回改用短口語，一句結束並輪換說法。
+- 新增零 LLM 的 `bin/system-facts`，從原始設定與呼叫點解析角色模型、fallback、派工順序、規劃與唯讀快查來源；缺項明確報錯並回非零。worker 先查這份摘要，缺哪項才補查哪項。
+- Router 範本測試未隔離 worker 目錄，讓測試 checkout 路徑污染正式 worker 範本。測試改用暫存目錄；worker-sync 拒絕 linked worktree 未指定目標的同步。新增離線夾具與拒寫測試，並以突變驗證防護有效。
+
+- Router acknowledgements now use one short conversational sentence with varied wording.
+- Added zero-LLM `bin/system-facts` to parse role models, fallbacks, dispatch order, planning and read-only lookup sources from settings and call sites. Missing fields report their source and return nonzero. Workers consult this summary first, then inspect only missing facts.
+- The Router template test used the default worker destination, contaminating production templates with a test checkout path. It now uses a temporary destination, and worker-sync rejects linked worktrees without an explicit destination. Offline fixtures and refusal tests include mutation checks.
+
 ## 2026-11-08 — P6e observe 上線與接續 / P6e observe rollout and next steps
 
 - 2026-11-08 起，線上 Mythos gateway 以 `MYTHOS_FOLLOWUP_DIRECT=observe` 執行，由 gateway 的服務管理器環境變數注入。新版 mythos-tools 外掛已部署，`bin/hermes-contract` 無 FAIL。

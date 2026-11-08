@@ -35,7 +35,7 @@ grep -q advisor "$ROOT/router/ROUTER.md" || fail "ROUTER.md 沒寫何時叫 advi
 # 4. start.sh 帶對參數、打對 tmux socket
 mkdir -p "$TMP/path"
 printf '#!/bin/sh\necho "$*" >> "%s/tmux.log"\n[ "$3" = has-session ] && exit 1\nexit 0\n' "$TMP" > "$TMP/path/tmux"; chmod +x "$TMP/path/tmux"
-PATH="$TMP/path:$PATH" bash "$ROOT/router/start.sh" >/dev/null
+MYTHOS_WORKER_DIR="$TMP/worker" PATH="$TMP/path:$PATH" bash "$ROOT/router/start.sh" >/dev/null
 log="$(cat "$TMP/tmux.log")"
 case "$log" in *"-L mythos new-session"*) ;; *) fail "start.sh 沒用 tmux -L mythos：$log" ;; esac
 for a in "--settings" "router/settings.json" "--append-system-prompt-file" "router/ROUTER.md" "--channels" "plugin:telegram@claude-plugins-official"; do
