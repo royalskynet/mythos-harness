@@ -9,12 +9,14 @@ Development log, newest first. It records what changed and why, without local pa
 - Router 外掛每回合執行本機已安裝的 Genie `prefs.py context`，把輸出當本回合提示注入；不複製規則，Genie 更新就跟著更新。偏好檔放 runtime 目錄。找不到 Genie 或執行失敗就不注入，不擋對話。
 - 上限放寬為 500 字、12 行、每行 60 字；清單後可留一行不編號的收尾。SOUL 加一條：「那是什麼」的答案在這段對話裡就自己白話解釋，要查機器上的事實才派工。
 - 背景工作直接寄給使用者的摘要也套同一份規則：派工時把 Genie 輸出附在工作指示尾端，限定用在「摘要：」段。
+- 上線後她仍回「我查一下」，原因有兩個：舊規則「系統／專案問題一律派工」壓過新規則；Hermes 每段對話會凍結當時的系統提示，重啟也不會換。已把白話解釋那條移到最前面並寫明優先；外掛在使用者追問剛轉過的結果時，每回合加一行提醒；並用 `hermes sessions refresh-prompts` 讓進行中的對話改用新規則。
 - 新增 `tests/test-genie-context.py`；`test-adhd-lint` 加一則約 270 字、7 行的回覆，預設上限改回 220 時會失敗。舊測試釘住舊上限，照原意驗格式。
 
 - The user reported that the Router did not talk plainly and could not explain "what is that". Two causes: the Router had no plain-language rules, and the 220-character, 6-line cap with mandatory numbering after the first line left no room to explain anything.
 - The Router plugin now runs the locally installed Genie `prefs.py context` every turn and injects its output as turn context. The rules are not copied, so Genie updates apply automatically. The prefs file lives in the runtime directory. If Genie is missing or fails, nothing is injected and the chat continues.
 - Limits are now 500 characters, 12 lines and 60 characters per line, and a list may end with one unnumbered closing line. SOUL gained a rule: when the answer to "what is that" is already in the conversation, explain it plainly; dispatch only for facts on the machine.
 - Summaries that background workers send straight to the user follow the same rules: dispatch appends the Genie output to the worker prompt, scoped to the summary section.
+- After deploy she still answered "let me check". Two causes: the older "always dispatch system or project questions" rule outranked the new one, and Hermes freezes the system prompt per conversation, so a restart does not reload it. The explain rule now comes first and says it takes priority, the plugin adds a one-line hint when the user asks about a result just relayed, and `hermes sessions refresh-prompts` moved the running conversation to the new rules.
 - Added `tests/test-genie-context.py`. `test-adhd-lint` gained a reply of about 270 characters in 7 lines that fails if the default cap goes back to 220. Older tests pin the old limits so they still check format as intended.
 
 ## 2026-11-08 — 「詳細」全文送不出 / Full-text replies failed

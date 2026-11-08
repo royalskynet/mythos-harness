@@ -399,13 +399,36 @@ def _genie_context() -> str:
         return ""
 
 
-def _on_pre_llm_call(session_id: str = "", **_: Any) -> Optional[Dict[str, str]]:
+# 11-08：Ether 追問剛轉過的結果「那是什麼／目的／聽不懂」，免費模型照「系統問題一律派工」回「我查一下」。
+# 近幾則有［背景結果］且這句是在問意思，就加一行提醒：答案在對話裡，直接白話答。
+_EXPLAIN_RE = re.compile(r"什麼|啥|目的|意思|聽不懂|看不懂|在說|解釋|說明")
+_EXPLAIN_HINT = ("這句是在問上面剛轉過的［背景結果］，答案就在對話裡：直接用白話答兩三句"
+                 "（它是什麼、為什麼做、對 Ether 有什麼影響），不呼叫工具、不說「我查一下」。")
+
+
+def _asks_about_last_result(user_message: str, history: Any) -> bool:
+    if not _EXPLAIN_RE.search(user_message or "") or len(user_message) > 40:
+        return False
+    for m in (history or [])[-8:]:
+        c = m.get("content") if isinstance(m, dict) else None
+        if isinstance(c, list):
+            c = " ".join(p.get("text", "") for p in c if isinstance(p, dict))
+        if isinstance(c, str) and m.get("role") == "user" and c.lstrip().startswith("[背景結果]"):
+            return True
+    return False
+
+
+def _on_pre_llm_call(session_id: str = "", user_message: str = "", conversation_history: Any = None,
+                     **_: Any) -> Optional[Dict[str, str]]:
     global _recall_current
     if session_id:
         with _recall_lock:
             _recall_used.pop(session_id, None)
             _recall_current = session_id
-    ctx = _genie_context()
+    parts = [_genie_context()]
+    if _asks_about_last_result(user_message, conversation_history):
+        parts.append(_EXPLAIN_HINT)
+    ctx = "\n\n".join(p for p in parts if p)
     return {"context": ctx} if ctx else None
 
 

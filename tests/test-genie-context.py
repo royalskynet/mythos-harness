@@ -39,6 +39,15 @@ got = tools._on_pre_llm_call(session_id="s1")
 if got != {"context": "[genie prefs] fake genie-prefs.json"}:
     fail(f"應注入假 prefs 輸出，得到 {got!r}")
 
+HIST = [{"role": "user", "content": "[背景結果] 結論：測試補好了。"}, {"role": "assistant", "content": "測試補好了。"}]
+got = tools._on_pre_llm_call(session_id="s1", user_message="這些都是什麼專案什麼功能目的", conversation_history=HIST)
+if not got or tools._EXPLAIN_HINT not in got["context"] or "fake" not in got["context"]:
+    fail(f"追問剛轉過的結果應加白話提醒＋Genie，得到 {got!r}")
+for msg, hist in (("幫我看備份有沒有跑", HIST), ("那是什麼", [{"role": "user", "content": "哈囉"}])):
+    got = tools._on_pre_llm_call(session_id="s1", user_message=msg, conversation_history=hist)
+    if got and tools._EXPLAIN_HINT in got["context"]:
+        fail(f"{msg!r} 不該加白話提醒")
+
 write_fake("import sys\nsys.exit(1)\n", 2)
 got = tools._on_pre_llm_call(session_id="s1")
 if got is not None:
