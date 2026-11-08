@@ -73,3 +73,56 @@ last_ts_epoch() { # transcript
   [ -n "$draw" ] || return 1
   "${NODE_BIN:-node}" -e 'const e = Date.parse(process.argv[1]); if (isNaN(e)) process.exit(1); console.log(Math.floor(e / 1000));' "$draw" 2>/dev/null
 }
+
+# ---- P4 N03：同 repo 寫入序列化（hermes） ----
+# prompt 檔宣告目標 repo：一行 `repo=<絕對路徑>`；唯讀另加 `readonly=1`。兩者都取檔內最後一行（interrupt 的新指示在後面、覆蓋原需求）。
+# 沒宣告 repo ＝不參與序列化（現行行為）。唯讀不擋、也不被擋。
+prompt_repo_of() { # prompt 檔 → 印正規化後的 repo（空＝沒宣告）
+  local r
+  r="$(awk '/^repo=\//{v=substr($0,6)} END{print v}' "$1" 2>/dev/null)"
+  [ -n "$r" ] || return 0
+  if [ -d "$r" ]; then (cd "$r" 2>/dev/null && pwd -P) || printf '%s\n' "$r"; else printf '%s\n' "$r"; fi
+}
+prompt_readonly_of() { # prompt 檔 → 印 1＝唯讀，空＝寫入（預設）
+  awk '/^readonly=/{v=substr($0,10)} END{if (v=="1") print 1}' "$1" 2>/dev/null
+}
+# 有沒有 pending 的 hermes 寫入列已佔用同一 repo（唯讀列不算）。0＝有、1＝沒有。
+# 呼叫端：dispatch-bg 持 ledger 鎖時呼叫（權威）；dispatch-watch 不持鎖時只當預判，dispatch-bg 會再查一次。
+hermes_repo_busy() { # repo
+  local want="$1" tsv="$MYTHOS_DIR/state/dispatch-jobs.tsv" p
+  [ -f "$tsv" ] || return 1
+  while IFS=$'\t' read -r p; do
+    [ -n "$p" ] || continue
+    [ "$(prompt_repo_of "$p")" = "$want" ] || continue
+    [ -n "$(prompt_readonly_of "$p")" ] && continue
+    return 0
+  done < <(awk -F'\t' '$5=="pending" && $8=="hermes" {print $3}' "$tsv")
+  return 1
+}
+
+# ---- P4 N02：follow-up 直通的 generation 與收據 ----
+# generation：每次 --cancel／--interrupt 停掉 thread 就 +1（state/followup/gen-<thread>）。
+# 收據 state/followup/receipts.tsv 一行一事件：epoch event chat fmid thread gen job detail
+#   event＝queued（入列）／consumed（信箱派出）／stale（舊 generation，不消費）。同 chat+fmid 有 queued 即視為已入列（去重）。
+followup_gen() { # thread → 目前 generation（沒檔＝0）
+  local f="${MYTHOS_DIR:-$(cd "$LEDGER_LIB_DIR/.." && pwd)}/state/followup/gen-$1" n
+  if [ -f "$f" ]; then n="$(tr -dc '0-9' < "$f")"; fi
+  printf '%s\n' "${n:-0}"
+}
+followup_gen_bump() { # thread
+  local d="${MYTHOS_DIR:-$(cd "$LEDGER_LIB_DIR/.." && pwd)}/state/followup" n
+  mkdir -p "$d" || return 1
+  n=$(( $(followup_gen "$1") + 1 ))
+  printf '%s\n' "$n" > "$d/gen-$1.tmp" && mv -f "$d/gen-$1.tmp" "$d/gen-$1"
+}
+followup_receipt() { # event chat fmid thread gen job detail
+  local d="${MYTHOS_DIR:-$(cd "$LEDGER_LIB_DIR/.." && pwd)}/state/followup"
+  mkdir -p "$d" || return 1
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%s)" "$1" "$2" "$3" "$4" "$5" "${6:--}" "$(printf '%s' "${7:-}" | tr '\t\n' '  ')" >> "$d/receipts.tsv"
+}
+# 最後一筆 queued 收據的 generation（沒有＝空）
+followup_queued_gen() { # chat fmid thread
+  local f="${MYTHOS_DIR:-$(cd "$LEDGER_LIB_DIR/.." && pwd)}/state/followup/receipts.tsv"
+  [ -f "$f" ] || return 0
+  awk -F'\t' -v c="$1" -v m="$2" -v t="$3" '$2=="queued" && $3==c && $4==m && $5==t {g=$6} END{print g}' "$f"
+}

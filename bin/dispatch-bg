@@ -122,6 +122,8 @@ if [ -n "$mode" ]; then
       stopped="$stopped $aid"
     done
   fi
+  # P4 N02：停掉就換 generation；之後才到的、綁舊 generation 的 follow-up 不消費（dispatch-watch 比對）
+  followup_gen_bump "$thread" 2>/dev/null || true
   # 排在信箱的補充是對舊方向說的；不清掉，dispatch-watch 會在舊 worker 被停後把它當新單派出去
   rm -rf "$MYTHOS_DIR/state/mailbox/$thread" 2>/dev/null
   # 11-08（G11）：排隊中的（hermes 上限滿時排的）也一起丟掉；每項第一欄是 thread
@@ -137,12 +139,26 @@ if [ -n "$mode" ]; then
   # interrupt：原需求取 ledger 該 thread 最新一張的 prompt 檔（沒有就只用新指示）
   orig=''
   [ -f "$TSV0" ] && orig="$(awk -F'\t' -v th="$thread" '$7==th && ($8=="bg" || $8=="bg-hard" || $8=="hermes") {p=$3} END{print p}' "$TSV0")"
+  # P4 G08：前情＝上一輪（被停的那張）結果檔前 N 字（MYTHOS_PREV_RESULT_CHARS，預設 600）；沒有結果就不附
+  prev_sum=''
+  if [ -f "$TSV0" ]; then
+    prev_id="$(awk -F'\t' -v th="$thread" '$7==th && ($8=="bg" || $8=="bg-hard" || $8=="hermes") {id=$1} END{print id}' "$TSV0")"
+    prev_sid="${prev_id#bg-}"; prev_rf="$MYTHOS_DIR/state/bg/$prev_sid.result"
+    prev_rk="$(tr -d '[:space:]' < "$MYTHOS_DIR/state/bg/$prev_sid.rkey" 2>/dev/null)"
+    case "$prev_rk" in ''|*[!A-Za-z0-9._-]*) ;; *) [ -s "$MYTHOS_DIR/state/bg/r-$prev_rk.result" ] && prev_rf="$MYTHOS_DIR/state/bg/r-$prev_rk.result" ;; esac
+    if [ -n "$prev_sid" ] && [ -s "$prev_rf" ]; then
+      prev_sum="$(N="${MYTHOS_PREV_RESULT_CHARS:-600}" perl -CSD -0777 -ne 'print substr($_, 0, $ENV{N})' < "$prev_rf" 2>/dev/null)"
+    fi
+  fi
   mkdir -p "$MYTHOS_DIR/state/bg" || exit 1
   ipf="$MYTHOS_DIR/state/bg/$thread-interrupt-$(date +%s)-$$.md"
   {
     if [ -n "$orig" ] && [ -f "$orig" ]; then
       printf '【原需求（Ether 先前交辦，已被打斷、舊的做法作廢）】\n'
       cat "$orig"
+      if [ -n "$prev_sum" ]; then
+        printf '\n【上一輪結果摘要（被打斷前的結果，前 %s 字；僅供參考）】\n%s\n' "${MYTHOS_PREV_RESULT_CHARS:-600}" "$prev_sum"
+      fi
       printf '\n【Ether 改口，以這段新指示為準】\n'
     fi
     cat "$prompt"
@@ -234,12 +250,19 @@ if [ -n "$hb" ]; then
   # ponytail: 存活數＝ledger pending 列；worker 果真死掉時要等 dispatch-watch 一輪收尾才釋放。
   nlive=0
   [ -f "$MYTHOS_DIR/state/dispatch-jobs.tsv" ] && nlive="$(awk -F'\t' '$5=="pending" && $8=="hermes"' "$MYTHOS_DIR/state/dispatch-jobs.tsv" | wc -l | tr -d ' ')"
-  if [ "$nlive" -ge "$slots" ]; then
+  # P4 N03：宣告了 repo 的寫入任務，同 repo 已有 pending 寫入列就一樣排隊（唯讀不擋；沒宣告＝不查）。
+  # 持 ledger 鎖查，兩個同 repo 的派工不會都看到「沒人寫」。
+  wrepo="$(prompt_repo_of "$prompt")"
+  why=''
+  if [ "$nlive" -ge "$slots" ]; then why="hermes worker ${nlive}/${slots} 都在跑"
+  elif [ -n "$wrepo" ] && [ -z "$(prompt_readonly_of "$prompt")" ] && hermes_repo_busy "$wrepo"; then why="repo ${wrepo} 已有寫入任務在跑"
+  fi
+  if [ -n "$why" ]; then
     qd="$MYTHOS_DIR/state/hermes-queue"
     mkdir -p "$qd" || exit 1
     qf="$qd/$(date +%s)-$$"
     printf '%s\t%s\n' "$thread" "$prompt" > "$qf.tmp" && mv -f "$qf.tmp" "$qf" || { rm -f "$qf.tmp"; exit 1; }
-    echo "已排隊：hermes worker ${nlive}/${slots} 都在跑，thread ${thread} 排入佇列 ${qf##*/}" >&2
+    echo "已排隊：${why}，thread ${thread} 排入佇列 ${qf##*/}" >&2
     echo "queued-${qf##*/}"
     exit 0
   fi

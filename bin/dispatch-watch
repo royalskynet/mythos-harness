@@ -669,8 +669,18 @@ if [ -d "$hqd" ]; then
       continue
     fi
     if [ ! -f "$hp" ]; then rm -f "$hq"; log "hermes 排隊 ${qf}：prompt 檔不見了，丟掉 $hp"; continue; fi
+    # P4 N03：同 repo 還有寫入在跑就跳過這一項（不 break：後面不同 repo 的照常派）；dispatch-bg 會再持鎖查一次
+    wr="$(prompt_repo_of "$hp")"
+    if [ -n "$wr" ] && [ -z "$(prompt_readonly_of "$hp")" ] && hermes_repo_busy "$wr"; then
+      continue
+    fi
     if out="$(DISPATCH_BG_WORKER=hermes MYTHOS_DIR="$MYTHOS_DIR" bash "$DISPATCH_BG_BIN" --thread "$hth" "$hp" 9>&- 2>>"$WATCH_LOG")"; then
-      rm -f "$hq"; log "hermes 排隊起 worker：thread $hth → $out"
+      # 續排（queued-）時 dispatch-bg 已另寫一項新檔（只在 repo 競態才會發生，預判已先擋），這裡刪舊檔免得重複
+      rm -f "$hq"
+      case "$out" in
+        queued-*) log "hermes 排隊項 ${qf} 仍被 repo 擋，已改寫為 ${out}" ;;
+        *) log "hermes 排隊起 worker：thread $hth → $out" ;;
+      esac
     else
       log "hermes 排隊起 worker 失敗，留在佇列：$qf"
     fi
@@ -692,6 +702,16 @@ for mb in "$MYTHOS_DIR"/state/mailbox/*; do
   # 已存在的批次不混入新訊息；先前只移了一半就中斷，也仍保留所有檔。
   if [ ! -f "$batch/prompt-path" ]; then
     for msg in "$mb"/*.md; do [ -f "$msg" ] && mv "$msg" "$batch/"; done
+    # P4 N02：follow-up 訊息（fu-<chat>-<fmid>.md）只消費本 generation 的；thread 之後被取消、或收據對不上 → 不消費，移到 .stale/ 留存
+    for fm in "$batch"/fu-*.md; do
+      [ -f "$fm" ] || continue
+      fb="${fm##*/fu-}"; fb="${fb%.md}"; fch="${fb%-*}"; ffm="${fb##*-}"
+      if [ "$(followup_queued_gen "$fch" "$ffm" "$th")" != "$(followup_gen "$th")" ]; then
+        mkdir -p "$mb/.stale" && mv "$fm" "$mb/.stale/" || continue
+        followup_receipt stale "$fch" "$ffm" "$th" "$(followup_gen "$th")" "" "舊 generation 或收據對不上，不消費" 2>/dev/null
+        log "follow-up ${fb} 綁的 generation 已過期，不消費"
+      fi
+    done
     files=("$batch"/*.md)
     if [ ! -f "${files[0]}" ]; then ledger_unlock; continue; fi
     p="$(mktemp "$MYTHOS_DIR/state/bg/$th-mailbox-XXXXXX")" || { ledger_unlock; continue; }
@@ -712,7 +732,14 @@ for mb in "$MYTHOS_DIR"/state/mailbox/*; do
   ledger_unlock
   if DISPATCH_BG_EID="${p##*/}" MYTHOS_DIR="$MYTHOS_DIR" bash "$DISPATCH_BG_BIN" "${next_args[@]}" "$p" 9>&- >/dev/null 2>>"$WATCH_LOG"; then
     ledger_lock || continue
-    rm -rf "$batch"
+    # P4 G08：消費後的批次移到 .consumed/ 留存（不直接刪）；follow-up 另寫 consumed 收據
+    # ponytail: .consumed/ 與 .stale/ 只增不減（每批一個目錄，文字量小）；以後加 `find -mtime +30 -delete` 類定期清理即可
+    for fm in "$batch"/fu-*.md; do
+      [ -f "$fm" ] || continue
+      fb="${fm##*/fu-}"; fb="${fb%.md}"; fch="${fb%-*}"; ffm="${fb##*-}"
+      followup_receipt consumed "$fch" "$ffm" "$th" "$(followup_queued_gen "$fch" "$ffm" "$th")" "" "信箱派出" 2>/dev/null
+    done
+    mkdir -p "$mb/.consumed" && mv "$batch" "$mb/.consumed/$(date +%s)-$$-$RANDOM" 2>/dev/null || rm -rf "$batch"
     ledger_unlock
     log "mailbox 已續派 $th"
   fi

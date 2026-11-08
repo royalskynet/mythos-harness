@@ -365,6 +365,38 @@ function directFollowup(th, job, text, rid) {
   })
 }
 
+// P4 N02：follow-up 直通（MYTHOS_FOLLOWUP_DIRECT=1 才動；關著完全不走這段）。reply 對到的結果→bin/followup-direct 入列該 thread 的信箱。
+// 回 thread 代號＝已入列或重播去重（不再交 Router）；null＝交 Router 照舊流程（未綁定、歧義、新話題、舊 generation 都走這邊）。
+function followupDirect(chat, fmid, rmid, text) {
+  return new Promise(resolve => {
+    if (process.env.MYTHOS_FOLLOWUP_DIRECT !== '1' || chat == null || fmid == null || rmid == null) return resolve(null)
+    let out = ''
+    let child
+    try {
+      child = spawn(path.join(MYTHOS_ROOT, 'bin/followup-direct'), [String(chat), String(fmid), String(rmid)], {
+        env: { ...process.env, MYTHOS_DIR: MYTHOS_ROOT },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      })
+    } catch {
+      return resolve(null)
+    }
+    const timer = setTimeout(() => child.kill(), 15_000)
+    child.stdout.on('data', d => { out += d })
+    child.on('error', () => { clearTimeout(timer); resolve(null) })
+    child.on('close', code => {
+      clearTimeout(timer)
+      const m = /^(queued|dup) (t-[A-Za-z0-9-]+)$/m.exec(out)
+      if (code === 0 && m) {
+        log(`followup ${m[1]} thread=${m[2]} chat=${chat} mid=${fmid} rmid=${rmid}`)
+        return resolve(m[2])
+      }
+      if (code !== 3) log(`followup 交 Router（exit ${code}）chat=${chat} mid=${fmid} rmid=${rmid}`)
+      resolve(null)
+    })
+    child.stdin.end(String(text ?? ''))
+  })
+}
+
 const attachmentPromises = new Map()
 async function handleChannel(msg, line) {
   // 附件自動下載（借鏡 plugin）：channel 通知帶 attachment_file_id 時 proxy 自己向 plugin server 呼叫 download_attachment，把路徑寫進訊息
@@ -393,6 +425,14 @@ async function handleChannel(msg, line) {
   const orig = msg.params?.content
   if (compactLocked(MYTHOS_ROOT)) { queueMaintenance(msg, line); return false }
   if (intercept(msg.params)) return true
+  // P4 N02：flag 開才先試直通；已入列（或重播去重）就不再交 Router
+  const fu = typeof orig === 'string' ? await followupDirect(_meta?.chat_id, _meta?.message_id, _meta?.reply_to_message_id, orig) : null
+  if (fu) {
+    msg.params.content = `[已排入 worker thread=${fu}] ` + msg.params.content
+    if (compactLocked(MYTHOS_ROOT)) { queueMaintenance(msg, JSON.stringify(msg)); return false }
+    process.stdout.write(JSON.stringify(msg) + '\n')
+    return true
+  }
   const hit = replyTag(msg.params)
   // /fix、/wheel 展開會改 content：改過就送改過的（11-04 前送的是原始 line，展開內容被丟掉）；沒改才原樣轉發
   if (!hit) {

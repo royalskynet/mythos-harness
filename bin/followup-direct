@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# P4 N02：follow-up 直通（預設關；MYTHOS_FOLLOWUP_DIRECT=1 才動作，關著時完全不碰任何檔）。
+# 使用者對「已知結果訊息」的 Telegram reply → 直接排成該 thread 的 follow-up，下一輪 oneshot 消費（dispatch-watch 信箱）。
+# 用法：MYTHOS_FOLLOWUP_DIRECT=1 bin/followup-direct <chat> <fmid> <rmid> < 使用者原話
+#   chat／fmid：這則 follow-up 的 chat 與 message_id（去重鍵）；rmid：它 reply 的那則（去 state/tg-msg-thread.tsv 對照）。
+# stdout 一行、exit：
+#   0 queued <thread>  已入列（信箱 fu-<chat>-<fmid>.md；收據 state/followup/receipts.tsv）
+#   0 dup <thread>     同 chat+fmid 已入列過（重播），不再入列、不回 Router
+#   2 參數不對
+#   3 flag 關（沒動任何檔）
+#   4 不直通：rmid 不在對照表（來源偽造／未綁定）、對到的不是 bg 任務、thread 不合規
+#   5 不直通：歧義，同 chat+rmid 對到多個 thread
+#   6 不直通：像新話題（規則見下）
+#   7 不直通：對應任務已取消（舊 generation）
+# 4–7 一律交 Router 判斷（呼叫端照舊的 [回覆 bg …] 標註流程）。
+# 新話題規則（ponytail）：空白、以「新題／新的題／換一題／換個話題／另一題／另外一件」開頭、或內含別的 thread 代號 → 視為新話題。
+#   不做語意判斷；誤判會回 Router（安全側）。升級路徑：接 jev_evaluate 或小模型分類。
+set -u
+[ "${MYTHOS_FOLLOWUP_DIRECT:-}" = 1 ] || exit 3
+
+MYTHOS_DIR="${MYTHOS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+chat="${1:-}"; fmid="${2:-}"; rmid="${3:-}"
+case "$chat" in ''|*[!0-9-]*) exit 2 ;; esac
+case "$fmid" in ''|*[!0-9]*) exit 2 ;; esac
+case "$rmid" in ''|*[!0-9]*) exit 2 ;; esac
+. "$ROOT_DIR/bin/lib-ledger.sh"
+
+MAP="$MYTHOS_DIR/state/tg-msg-thread.tsv"
+TSV="$MYTHOS_DIR/state/dispatch-jobs.tsv"
+RCPT="$MYTHOS_DIR/state/followup/receipts.tsv"
+text="$(cat)"
+# 去重先於一切：同 chat+fmid 已入列就是重播，不論現在對照／任務狀態如何，都不再入列、不回 Router
+already_queued() { [ -f "$RCPT" ] && awk -F'\t' -v c="$chat" -v m="$fmid" '$2=="queued" && $3==c && $4==m {f=1} END{exit !f}' "$RCPT"; }
+if already_queued; then
+  echo "dup $(awk -F'\t' -v c="$chat" -v m="$fmid" '$2=="queued" && $3==c && $4==m {t=$5} END{print t}' "$RCPT")"
+  exit 0
+fi
+
+# 1) 對照：rmid 必須在對照表，且只對到一個 thread
+[ -f "$MAP" ] || exit 4
+hits="$(awk -F'\t' -v c="$chat" -v m="$rmid" '$1==c && $2==m && $3!="" {print $3"\t"$4}' "$MAP")"
+nthr="$(printf '%s\n' "$hits" | awk -F'\t' '$1!="" {print $1}' | sort -u | wc -l | tr -d ' ')"
+[ "$nthr" -eq 0 ] && exit 4
+[ "$nthr" -gt 1 ] && exit 5
+read -r th jb <<EOF
+$(printf '%s\n' "$hits" | awk -F'\t' '$1!="" {t=$1; j=$2} END{print t"\t"j}')
+EOF
+case "$th" in ''|-|*[!A-Za-z0-9-]*) exit 4 ;; esac
+case "$jb" in ''|-) exit 4 ;; esac
+
+# 2) 對應任務：要在帳本、同 thread、bg 系後端、未取消（已取消＝舊 generation，不直通）
+[ -f "$TSV" ] || exit 4
+jrow="$(awk -F'\t' -v j="$jb" '$1==j {st=$5; jt=$7; be=$8} END{if (st!="") print st"\t"jt"\t"be}' "$TSV")"
+[ -n "$jrow" ] || exit 4
+IFS=$'\t' read -r jst jth jbe <<EOF
+$jrow
+EOF
+[ "$jth" = "$th" ] || exit 4
+case "$jbe" in bg|bg-hard|hermes) ;; *) exit 4 ;; esac
+[ "$jst" = cancelled ] && exit 7
+
+# 3) 新話題 → Router
+trimmed="$(printf '%s' "$text" | tr -d '[:space:]')"
+[ -n "$trimmed" ] || exit 6
+case "$text" in
+  新題*|新的題*|換一題*|換個話題*|另一題*|另外一件*) exit 6 ;;
+esac
+other="$(printf '%s' "$text" | grep -oE 't-[a-z0-9][a-z0-9-]{3,30}' | grep -vxF -- "$th" || true)"
+[ -z "$other" ] || exit 6
+
+# 4) 入列：持 ledger 鎖（dispatch-watch 的信箱迴圈也持同一把鎖）；鎖內再查一次去重，兩個同時到的重播只會入列一次
+ledger_lock || exit 1
+if already_queued; then
+  ledger_unlock
+  echo "dup $th"
+  exit 0
+fi
+gen="$(followup_gen "$th")"
+mb="$MYTHOS_DIR/state/mailbox/$th"
+mkdir -p "$mb" || { ledger_unlock; exit 1; }
+tmp="$(mktemp "$mb/.incoming.XXXXXX")" || { ledger_unlock; exit 1; }
+{ printf '（回覆的是 %s 的結果）\n' "$jb"; printf '%s\n' "$text"; } > "$tmp" && mv "$tmp" "$mb/fu-$chat-$fmid.md" || { rm -f "$tmp"; ledger_unlock; exit 1; }
+followup_receipt queued "$chat" "$fmid" "$th" "$gen" "$jb" "" || { ledger_unlock; exit 1; }
+ledger_unlock
+echo "queued $th"
+exit 0

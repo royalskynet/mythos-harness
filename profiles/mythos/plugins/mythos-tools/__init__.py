@@ -118,6 +118,12 @@ def mythos_dispatch(args: Dict[str, Any], **_: Any) -> str:
         return _cancel(th)
     if not request:
         return "缺 request：把使用者原話放進來"
+    # P4 N03：宣告目標 repo（絕對路徑）；唯讀另標 readonly。先驗再動，不合規一個字都不寫。
+    repo = _text(args, "repo")
+    if repo and (not os.path.isabs(repo) or "\n" in repo or "\r" in repo):
+        return f"repo 要絕對路徑、單行：{repo[:80]}"
+    readonly = args.get("readonly") in (True, "true", "1", 1)
+    header = (f"repo={repo}\n" if repo else "") + ("readonly=1\n" if repo and readonly else "")
     thread = th or "t-" + "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
     epoch = int(time.time())
     if os.environ.get("MYTHOS_DISPATCH_DRYRUN") == "1":
@@ -126,7 +132,7 @@ def mythos_dispatch(args: Dict[str, Any], **_: Any) -> str:
     os.makedirs(os.path.join(STATE, "bg"), exist_ok=True)
     prompt = os.path.join(STATE, "bg", f"{thread}-{epoch}.md")
     with open(prompt, "w", encoding="utf-8") as f:
-        f.write(request + "\n")
+        f.write(header + request + "\n")
     _log(epoch, thread, request)
     cmd = [os.path.join(MYTHOS, "bin", "dispatch-bg")]
     if mode == "interrupt":
@@ -298,6 +304,8 @@ _DISPATCH_SCHEMA = {
         "properties": {
             "request": {"type": "string", "description": "使用者原話，可附一兩句必要脈絡"},
             "thread": {"type": "string", "description": "同一件事續派用的代號；新題目留空"},
+            "repo": {"type": "string", "description": "這件事要寫入的 repo 絕對路徑（同一 repo 的寫入一次只跑一件）；不改檔就留空"},
+            "readonly": {"type": "boolean", "description": "true＝只讀 repo、不寫（唯讀不排隊）；預設 false"},
             "mode": {"type": "string", "enum": ["queue", "cancel", "interrupt"],
                      "description": "queue（預設）＝照舊；cancel＝Ether 說算了／不用了／停，停掉還在跑的事（必帶 thread）；"
                                     "interrupt＝Ether 改方向（改成…／不對，要…），停掉舊的、帶原需求加新指示重做（必帶 thread，request 放新指示）"},
