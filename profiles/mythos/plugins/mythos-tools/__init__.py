@@ -393,6 +393,16 @@ _EXPLAIN_HINT = ("這句是在問上面剛轉過的［背景結果］，答案�
                  "（它是什麼、為什麼做、對 Ether 有什麼影響），不呼叫工具、不說「我查一下」。")
 
 
+# 11-09 修補：把「這回合是在追問剛轉過的結果」記下來，供 pre_tool_call 擋 mythos_dispatch，
+# 強制 Router 直接白話答，不再派工（HANDOFF open item #1 的 fallback）。按 session 計；拿不到
+# session_id 時用全域旗標兜底。
+_RESULT_ASK_SESSIONS = set()
+_RESULT_ASK_CURRENT = False
+_RESULT_ASK_LOCK = threading.Lock()
+_RESULT_ASK_BLOCK_MSG = ("這句是在問剛轉過的［背景結果］：答案就在對話裡，直接用白話答兩三句"
+                         "（它是什麼、為什麼做、對 Ether 有什麼影響），不呼叫 mythos_dispatch、不說「我查一下」。")
+
+
 def _asks_about_last_result(user_message: str, history: Any) -> bool:
     if not _EXPLAIN_RE.search(user_message or "") or len(user_message) > 40:
         return False
@@ -407,22 +417,40 @@ def _asks_about_last_result(user_message: str, history: Any) -> bool:
 
 def _on_pre_llm_call(session_id: str = "", user_message: str = "", conversation_history: Any = None,
                      **_: Any) -> Optional[Dict[str, str]]:
-    global _recall_current
+    global _recall_current, _RESULT_ASK_CURRENT
     if session_id:
         with _recall_lock:
             _recall_used.pop(session_id, None)
             _recall_current = session_id
+    asked = _asks_about_last_result(user_message, conversation_history)
+    with _RESULT_ASK_LOCK:
+        if session_id:
+            if asked:
+                _RESULT_ASK_SESSIONS.add(session_id)
+            else:
+                _RESULT_ASK_SESSIONS.discard(session_id)
+        _RESULT_ASK_CURRENT = asked
     parts = [_genie_context()]
-    if _asks_about_last_result(user_message, conversation_history):
+    if asked:
         parts.append(_EXPLAIN_HINT)
     ctx = "\n\n".join(p for p in parts if p)
     return {"context": ctx} if ctx else None
 
 
-def _on_pre_tool_call(tool_name: str = "", session_id: str = "", **_: Any) -> None:
+def _on_pre_tool_call(tool_name: str = "", session_id: str = "", **_: Any) -> Optional[Dict[str, str]]:
     global _recall_current
     if tool_name == "mythos_recall" and session_id:
         _recall_current = session_id
+    # 11-09 修補：追問剛轉過的結果時，擋 mythos_dispatch，強制 Router 直接白話答（HANDOFF open #1）。
+    if tool_name == "mythos_dispatch":
+        asked = False
+        with _RESULT_ASK_LOCK:
+            if session_id and session_id in _RESULT_ASK_SESSIONS:
+                asked = True
+            elif not session_id and _RESULT_ASK_CURRENT:
+                asked = True
+        if asked:
+            return {"action": "block", "message": _RESULT_ASK_BLOCK_MSG}
 
 
 def _num(args: Dict[str, Any], key: str) -> Optional[int]:
