@@ -3,6 +3,12 @@
 開發紀錄，新的在上面。只記做了什麼、為什麼；不含本機路徑、帳號與內部計畫。
 Development log, newest first. It records what changed and why, without local paths, accounts or internal plans.
 
+## 2026-11-08 — 「詳細」全文送不出 / Full-text replies failed
+
+- 使用者回「詳細」時，Router 回報「權限問題」。原因是外掛直接執行 `bin/tg-send`，這支腳本在 git 裡是 644，執行時拋出 PermissionError；Mythos 的權限設定與此無關。收件匣的 TG 退路也走同一支腳本。外掛測試用的假執行檔會自己 chmod，所以測試沒抓到。已補上執行權，並新增 `tests/test-plugin-bin-exec.sh`：外掛直接執行的 bin 在 git 裡必須是 100755。
+
+- Replying "詳細" (details) produced a "permission problem" message. The plugin executes `bin/tg-send` directly, but git stored the script as 644, so the call raised PermissionError; Mythos permission settings were not involved. The inbox Telegram fallback calls the same script. Plugin tests missed this because their fake executables chmod themselves. The script is now executable, and `tests/test-plugin-bin-exec.sh` requires every bin the plugin executes directly to be 100755 in git.
+
 ## 2026-11-08 — P6 決策備忘 / P6 decision notes
 
 - 不採用程式碼知識圖譜（Graphify 類）給 worker 找檔。實測一題系統提問 18 次模型呼叫，卡點在拼湊執行中設定（模型、派工順序、排程），不在找檔；圖譜只知道程式碼位置，查設定還指到過時文件。社群 360 次試驗（srijansriv.com/graphify-benchmark）與上游 issue（Graphify-Labs/graphify#985）也未見準確率或成本改善。改用 `bin/system-facts` 直接讀設定。
