@@ -51,6 +51,7 @@
 !/bin/followup-report
 /tests/*
 !/tests/test-system-facts.sh
+!/tests/test-plugin-bin-exec.sh
 !/tests/test-worker-sync-worktree.sh
 !/tests/test-tg-send.sh
 !/tests/test-tg-send-inbox.sh
