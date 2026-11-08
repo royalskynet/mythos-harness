@@ -63,6 +63,12 @@ for a in '--bg' '--model haiku' '--name mythos:t-a' '--allowedTools Bash Read Wr
   case "$call" in *"$a"*) ;; *) fail "argv 少了 ${a}：$call" ;; esac
 done
 case "$call" in *telegram*) fail "argv 帶了 telegram 工具：$call" ;; esac
+# 11-07 續派結果檔：prompt 帶本輪專用結果檔行，ledger 寫成後寫出 <sid>.rkey（內容＝rk，對上 argv 的路徑）
+case "$call" in *"結果檔：$MYTHOS_DIR/state/bg/r-"*) ;; *) fail "1：argv 沒帶結果檔行：$call" ;; esac
+[ -s "$MYTHOS_DIR/state/bg/0491f0d0.rkey" ] || fail '1：沒寫 <sid>.rkey'
+rk1="$(tr -d '[:space:]' < "$MYTHOS_DIR/state/bg/0491f0d0.rkey")"
+case "$rk1" in ''|*[!0-9-]*) fail "1：rkey 內容應是 <時間戳>-<pid>：$rk1" ;; esac
+grep -qF "結果檔：$MYTHOS_DIR/state/bg/r-$rk1.result" "$CLAUDE_LOG" || fail "1：argv 結果檔路徑跟 rkey 不一致：$rk1"
 echo '(1) ok'
 
 # 2) 白名單常數就是這六個
@@ -105,7 +111,9 @@ echo deadbeef-0000-0000-0000-000000000000 > "$FAKE_ID"
 : > "$CLAUDE_LOG"
 idh="$(bash "$ROOT/bin/dispatch-bg" --hard t-a "$TMP/p.md")"
 grep -q -- "--settings $MYTHOS_WORKER_DIR/.claude/hard.json" "$CLAUDE_LOG" || fail "--hard 沒帶 hard.json：$(cat "$CLAUDE_LOG")"
-grep -q -- '--model sonnet' "$CLAUDE_LOG" || fail "--hard 應維持 sonnet：$(cat "$CLAUDE_LOG")"
+grep -q -- "--model sonnet" "$CLAUDE_LOG" || fail "--hard 應維持 sonnet：$(cat "$CLAUDE_LOG")"
+# 11-07：bg-hard 的最後一步也改成本輪專用結果檔
+grep -qF "$MYTHOS_DIR/state/bg/r-" "$CLAUDE_LOG" || fail "4：bg-hard 最後一步沒改成本輪專用結果檔：$(cat "$CLAUDE_LOG")"
 field() { awk -F "\t" -v i="$1" -v n="$2" '$1==i {print $n; exit}' "$TSV"; }
 [ "$(field "$idh" 8)" = bg-hard ] || fail "--hard 的 backend 不是 bg-hard：$(cat "$TSV")"
 [ "$(field "$idh" 2)" = hard ] || fail "--hard 的 tier 不是 hard"

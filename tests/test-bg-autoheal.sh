@@ -33,7 +33,7 @@ printf '%s\n' '{"type":"user","message":{"content":"hi"}}' > "$MYTHOS_TRANSCRIPT
 TSV="$MYTHOS_DIR/state/dispatch-jobs.tsv"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 row() { printf '%s\tmid\t%s\t%s\tpending\t%s\t%s\t%s\n' "$1" "$2" "${4:-$(date +%s)}" "$TMP/w" "$3" "${5:-bg}" >> "$TSV"; }
-agents() { printf '[{"sessionId":"%s-1111-2222-3333-444455556666","kind":"background","state":"%s"}]' "$1" "$2" > "$FAKE_AGENTS"; }
+agents() { printf '[{"sessionId":"%s-1111-2222-3333-444455556666","kind":"background","state":"%s","pid":12345}]' "$1" "$2" > "$FAKE_AGENTS"; }
 ev() { jq -r --arg e "$1" "select(.event_id==\$e) | $2" "$MYTHOS_DIR/state/events.jsonl"; }
 watch() { : > "$CALLS"; : > "$TMUX_LOG"; bash "$ROOT/bin/dispatch-watch" 9>&- || fail "dispatch-watch 非零退出"; }
 P="$MYTHOS_DIR/state/bg/t-log-1.md"

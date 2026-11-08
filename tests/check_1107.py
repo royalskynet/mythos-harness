@@ -97,7 +97,7 @@ with open(p/'counter','a+') as f:
  sid='a%07x'%n
  with open(p/'calls.jsonl','a') as c:c.write(json.dumps(args)+'\\n')
  time.sleep(.2)
- state.write_text(json.dumps([{'sessionId':sid+'-1111-2222-3333-444455556666','state':'working'}]))
+ state.write_text(json.dumps([{'sessionId':sid+'-1111-2222-3333-444455556666','state':'working','pid':54321+n}]))
  print('backgrounded · '+sid+' · fixture')
 '''
 def bg_setup():

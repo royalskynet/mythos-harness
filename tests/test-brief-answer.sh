@@ -48,4 +48,28 @@ for pair in 1:7 2:8 0:0; do
   rc=0; echo x | "$TMP/b2/brief-answer" --not-found --kind recall --q q 2>/dev/null || rc=$?
   [ "$rc" = "${pair##*:}" ] || fail "5：tg-send ${pair%%:*} 應得 ${pair##*:}，得到 $rc"
 done
+
+# 6) adhd-lint：stub 第一次回廢話、第二次回合格 → 送出的是第二次
+cat > "$TMP/fa2" <<F
+#!/bin/sh
+cat >/dev/null
+n="$TMP/fa2.n"; c=0; [ -f "\$n" ] && c=\$(cat "\$n"); c=\$((c+1)); echo "\$c" > "\$n"
+if [ "\$c" = 1 ]; then
+  echo '老闆，這件事已經處理好了。您可以放心，後續有結果我再跟您回報。這句特別長讓檢查一定不通過用來觸發重寫。'
+else
+  printf '已完成，約 10 分鐘內可查。\\n1. 服務正常\\n2. 不用再等'
+fi
+F
+cp "$ROOT/bin/adhd-lint.mjs" "$TMP/adhd-lint.mjs"
+chmod +x "$TMP/fa2"; rm -f "$TMP/fa2.n"
+out="$( (env ADHD_LINT_BIN="$TMP/adhd-lint.mjs" BRIEF_SCRUB="$BRIEF_SCRUB" BRIEF_FREE_MODELS="$TMP/fm" BRIEF_FREE_ASK="$TMP/fa2" BRIEF_CLAUDE= BRIEF_FREE_MAX=1 "$ROOT/bin/brief-answer" --stdout --kind quick --q '狀況' < <(echo 資料)) )"
+case "$out" in *'您可以放心'*) fail "6：應送第二次合格：$out" ;; esac
+case "$out" in *'已完成'*) ;; *) fail "6：應含合格內容：$out" ;; esac
+# 7) 兩次都廢話 → 照送且 stderr 含 adhd-lint 仍不過
+printf '#!/bin/sh\ncat >/dev/null\necho "您可以放心，後續有結果我再跟您回報。這段話特別長特別囉嗦讓它一定不過檢查再長一點點。"\n' > "$TMP/fabad"
+chmod +x "$TMP/fabad"
+(env ADHD_LINT_BIN="$TMP/adhd-lint.mjs" BRIEF_SCRUB="$BRIEF_SCRUB" BRIEF_FREE_MODELS="$TMP/fm" BRIEF_FREE_ASK="$TMP/fabad" BRIEF_CLAUDE= BRIEF_FREE_MAX=1 "$ROOT/bin/brief-answer" --stdout --kind quick --q "狀況" < <(echo 資料) >"$TMP/bout7" 2>"$TMP/berr7") || true
+grep -q "adhd-lint 仍不過" "$TMP/berr7" || fail "7：stderr 應含仍不過：$(cat "$TMP/berr7")"
+[ -s "$TMP/bout7" ] || fail "7：仍應照送"
+
 echo 'BRIEF-ANSWER PASS'

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 驗收：watchdog v2（計畫「預防加固」7 條）。LLM、scrub、claude agents、tmux、canary 全用 stub，
 # PATH 前面再墊假的 curl／opencode：有人想出網就記一筆，最後檢查必須是空的。
+export MYTHOS_RUNTIME=claude
 # 用法：bash tests/test-watchdog.sh            （預設測 bin/watchdog）
 #       WD_BIN=<別份 watchdog> bash tests/test-watchdog.sh   （突變驗證用）
 set -euo pipefail
@@ -130,6 +131,7 @@ case_init() {
   export MYTHOS_DIR="$C/mythos" MYTHOS_BRIEF_DIR="$C/brief"
   BRIEF="$C/brief/mythos-watchdog.tsv"
   WLOG="$MYTHOS_DIR/logs/watchdog.log"
+  : > "$BRIEF"   # 沒告警的情境也要有檔，才能確認「沒寫進來」
   rm -f "$TMP/llm-calls" "$TMP/llm-prompts" "$TMP/canary-in" "$TMP/scrub-calls" "$TMP/scrub-item-calls" "$TMP/agents.json" "$TMP/tmux-sessions"
   : > "$MYTHOS_DIR/logs/app.log"
   export WATCHDOG_LLM_LEGS="$S/llm-a"
@@ -160,9 +162,10 @@ printf 'deep-%s\trunning-deep\t/x/deep.md\t%s\trunning\t/work/proj\t-\tdeep\n' 7
 printf 'pid=1\ndeep_pid=4242\nsession=deep-%s-4242\n' "$now" > "$MYTHOS_DIR/state/deep/deep-77.handle"
 mkdir -p "$CLAUDE_PROJECTS_DIR/-work-proj"
 : > "$CLAUDE_PROJECTS_DIR/-work-proj/t.jsonl"; touch -t "$(ago 1200)" "$CLAUDE_PROJECTS_DIR/-work-proj/t.jsonl"
-# 背景 worker blocked，第一次看到是 11 分鐘前
-printf '[{"id":"bg1","kind":"background","state":"blocked","name":"x"},{"id":"bg2","kind":"background","state":"stopped"}]' > "$TMP/agents.json"
-printf '{"alerted":{},"bg_blocked":{"bg1":%s}}\n' $((now - 660)) > "$MYTHOS_DIR/state/watchdog.json"
+# 背景 worker waitingFor=permission prompt，第一次看到是 11 分鐘前；
+# bg3 是 state=blocked 但 waitingFor 不是 permission prompt（已完成收尾的 worker 也是 blocked）→ 不告警
+printf '[{"id":"bg1","kind":"background","state":"blocked","waitingFor":"permission prompt","name":"x"},{"id":"bg2","kind":"background","state":"stopped"},{"id":"bg3","kind":"background","state":"blocked","waitingFor":"review","name":"z"}]' > "$TMP/agents.json"
+printf '{"alerted":{},"bg_blocked":{"bg1":%s,"bg3":%s}}\n' $((now - 660)) $((now - 660)) > "$MYTHOS_DIR/state/watchdog.json"
 addlog "INFO all good"
 run_wd
 addlog "INFO still fine"
@@ -172,8 +175,41 @@ grep -q '卡在 pending' "$BRIEF" || fail "1：pending 沒告警"
 grep -q 'deep session deep-' "$BRIEF" || fail "1：deep 停滯沒告警：$(cat "$BRIEF")"
 grep -q '背景 agent bg1' "$BRIEF" || fail "1：bg blocked 沒告警"
 grep -q 'bg2' "$BRIEF" && fail "1：stopped 的 bg 不該告警"
+grep -q 'bg3' "$BRIEF" && fail "1：waitingFor 不是 permission prompt 的 bg3 不該告警：$(cat "$BRIEF")"
 [ ! -s "$MYTHOS_DIR/state/watchdog-pending.jsonl" ] || fail "1：沒有錯誤行卻進了待判"
 [ "$(wc -l < "$BRIEF" | tr -d ' ')" = 3 ] || fail "1：第二輪重複告警：$(cat "$BRIEF")"
+[ "$(jq -r '.bg_blocked | keys | length' "$MYTHOS_DIR/state/watchdog.json")" = 1 ] && jq -r '.bg_blocked | has("bg1")' "$MYTHOS_DIR/state/watchdog.json" | grep -q true || fail "1：bg_blocked 沒收斂到 bg1"
+
+# =============== 1b. bg blocked：無 waitingFor 不告警；waitingFor=permission prompt 告警 ===============
+case_init bgi
+mk_llm llm-a "1 NOISE"
+now=$(date +%s)
+# (i) state=blocked 但 waitingFor 不是 permission prompt → 不告警
+printf 'bg9\tmid\t/x/i.md\t%s\trunning\t/x\t-\tbg\n' $((now - 100)) > "$MYTHOS_DIR/state/dispatch-jobs.tsv"
+printf '[{"id":"bg9","kind":"background","state":"blocked","waitingFor":"review","name":"y"}]' > "$TMP/agents.json"
+printf '{"alerted":{},"bg_blocked":{"bg9":%s}}\n' $((now - 660)) > "$MYTHOS_DIR/state/watchdog.json"
+run_wd
+grep -q 'bg9' "$BRIEF" && fail "1b(i)：blocked 無 permission prompt 也告警了：$(cat "$BRIEF")"
+# (ii) waitingFor=permission prompt 超過 BG_STALL_MIN → 告警
+printf '[{"id":"bg9","kind":"background","state":"blocked","waitingFor":"permission prompt","name":"y"}]' > "$TMP/agents.json"
+printf '{"alerted":{},"bg_blocked":{"bg9":%s}}\n' $((now - 660)) > "$MYTHOS_DIR/state/watchdog.json"
+run_wd
+grep -q '背景 agent bg9' "$BRIEF" || fail "1b(ii)：waitingFor=permission prompt 沒告警：$(cat "$BRIEF")"
+
+# =============== 1c. deep transcript：尾端中繼列刷 mtime、最後 timestamp 很舊 → 照樣判 deep-stall ===============
+case_init dep
+mk_llm llm-a "1 NOISE"
+now=$(date +%s)
+printf 'deep-%s-4242\n' "$now" > "$TMP/tmux-sessions"
+printf 'deep-88\trunning-deep\t/x/deep.md\t%s\trunning\t/work/proj\t-\tdeep\n' "$now" > "$MYTHOS_DIR/state/dispatch-jobs.tsv"
+printf 'pid=1\ndeep_pid=4242\nsession=deep-%s-4242\n' "$now" > "$MYTHOS_DIR/state/deep/deep-88.handle"
+mkdir -p "$CLAUDE_PROJECTS_DIR/-work-proj"
+ts="$(date -u -r $((now - 1200)) '+%Y-%m-%dT%H:%M:%S.000Z')"
+printf '{"type":"assistant","timestamp":"%s"}\n' "$ts" > "$CLAUDE_PROJECTS_DIR/-work-proj/t.jsonl"
+touch "$CLAUDE_PROJECTS_DIR/-work-proj/t.jsonl"   # mtime 剛被中繼列刷到現在
+run_wd
+grep -q 'transcript 20 分鐘沒動' "$BRIEF" || fail "1c(iii)：deep transcript mtime 很新但最後 timestamp 很舊，沒判 deep-stall：$(cat "$BRIEF")"
+[ "$(calls)" = 0 ] || fail "1c：L0 情境叫了模型"
 
 # =============== 2. 待判非空 → 呼叫一次；每小時上限生效 ===============
 case_init cap

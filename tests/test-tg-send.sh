@@ -163,9 +163,9 @@ grep -q 'event_id=bg-jjjj0011-PASS' "$TMUX_LOG" || fail '(j) 缺細節標記沒�
 [ "$(ev bg-jjjj0010-PASS .direct)" = null ] || fail "(j) 不該有 direct 狀態：$(ev bg-jjjj0010-PASS .direct)"
 echo '(j) ok'
 
-# (f) 截斷
+# (f) 截斷（#full 保留舊截斷行為，既有契約）
 : > "$STUB_CALLS"
-head -c 5000 /dev/zero | tr '\0' 'x' | node "$ROOT/bin/tg-send" --thread t-f --job bg-ffff0006 >/dev/null || fail '(f) tg-send 失敗'
+{ printf '#full\n'; head -c 5000 /dev/zero | tr '\0' 'x'; } | node "$ROOT/bin/tg-send" --thread t-f --job bg-ffff0006 >/dev/null || fail '(f) tg-send 失敗'
 txt="$(head -1 "$STUB_CALLS" | jq -r .text)"
 len="$(head -1 "$STUB_CALLS" | jq -r '.text | length')"   # 用 jq 算字數；bash ${#} 在 C locale 算的是位元組
 [ "$len" -le 3500 ] || fail "(f) 沒截到 3500 內：$len"
@@ -199,4 +199,24 @@ mkdir -p "$TMP/repo/bin"; cp "$ROOT/bin/tg-send" "$ROOT/bin/lib-request.mjs" "$R
 grep -q 'bg-hhhh0008' "$TMP/repo/state/tg-msg-thread.tsv" || fail '(h) 對照表沒寫到 repo/state'
 echo '(h) ok'
 
-echo 'TG-SEND PASS'
+# (k) 長文 → 送出 ≤ 220 字＋含「回「詳細」看全文」；全文存 tg-full/<id>.txt；代號刪掉；#full 跳過
+: > "$STUB_CALLS"
+longmsg="待辦搬出的規劃單第三次成功了。這次改在獨立的工作副本跑，工單已寫好並通過派工前檢查，之後會自動派出執行單。查證結果：交接已送出，但蛋博士那邊的審核欄仍是空白，還沒有裁決。t-dcq-fix-plan-fail wo fix-20261107-abc 1772900000-123-x"
+midk=$(printf '%s' "$longmsg" | node "$ROOT/bin/tg-send" --thread t-k --job bg-kkkk0012) || fail "(k) tg-send 失敗"
+ktxt="$(head -1 "$STUB_CALLS" | jq -r .text)"
+klen="$(printf '%s' "$ktxt" | python3 -c 'import sys;print(len("".join(sys.stdin.read().split())))')"
+[ "$klen" -le 220 ] || fail "(k) 送出應 ≤ 220 字：$klen"
+case "$ktxt" in *'回「詳細」看全文'*) ;; *) fail "(k) 缺詳細提示：$ktxt" ;; esac
+[ -f "$MYTHOS_DIR/state/tg-full/$midk.txt" ] || fail "(k) tg-full 沒存：$midk"
+if printf '%s' "$ktxt" | grep -q 't-dcq-fix-plan-fail'; then fail "(k) 代號未刪"; fi
+: > "$STUB_CALLS"
+# #full 仍過 --sanitize-only（4709759），含工單／派工類用語的句子會被刪；長文用不會被淨化的句子
+fullmsg="$(for i in 1 2 3 4 5 6 7 8; do printf '查證結果：交接已送出，但蛋博士那邊的審核欄仍是空白，還沒有裁決。'; done)"
+midf=$(printf '#full\n%s' "$fullmsg" | node "$ROOT/bin/tg-send" --thread t-k --job bg-kkkk0013) || fail "(k2) #full 失敗"
+ftxt="$(head -1 "$STUB_CALLS" | jq -r .text)"
+flen="$(printf '%s' "$ftxt" | python3 -c 'import sys;print(len("".join(sys.stdin.read().split())))')"
+[ "$flen" -gt 220 ] || fail "(k2) #full 應照送長文（不縮到 220 字）：$flen"
+[ ! -f "$MYTHOS_DIR/state/tg-full/$midf.txt" ] || fail "(k2) #full 不應寫 tg-full"
+echo '(k) ok'
+
+echo 'TG-SEND PASS' 

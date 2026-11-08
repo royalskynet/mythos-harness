@@ -329,3 +329,23 @@ test('子代理只用 haiku：主 session 與 worker 派的 Agent 一律改寫�
   assert.equal(w.model, 'haiku')
   assert.equal(w.prompt, 'y')
 })
+
+const ADHD_BAD = '老闆，這件事已經交給規劃處理，也排進派工了。您可以先放心，後續有結果我再跟您回報。'
+const ADHD_OK = '已完成兩件，剩一件今晚 02:00 跑。\n1. 計數腳本已上線\n2. 誤報已修\n3. 帳本改寫今晚 02:00'
+
+test('ADHD：reply 廢話實例 deny 且 reason 含 ADHD', () => {
+  const tp = transcript('幫我處理')
+  const out = pre('mcp__telegram__reply', { text: ADHD_BAD }, tp)
+  assert.equal(decision(out), 'deny')
+  assert.match(JSON.parse(out).hookSpecificOutput.permissionDecisionReason, /ADHD/)
+})
+
+test('ADHD：reply 合格範例不 deny', () => {
+  const tp = transcript('幫我處理')
+  assert.equal(decision(pre('mcp__telegram__reply', { text: ADHD_OK }, tp)), null)
+})
+
+test('ADHD：lastUserText 含「完整」時廢話不擋', () => {
+  const tp = transcript('給我完整內容')
+  assert.equal(decision(pre('mcp__telegram__reply', { text: ADHD_BAD }, tp)), null)
+})

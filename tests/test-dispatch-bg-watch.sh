@@ -62,7 +62,8 @@ agents() { # session 前綴 state…
   local out='[' sep='' p s
   while [ $# -gt 1 ]; do
     p="$1"; s="$2"; shift 2
-    out="$out$sep{\"sessionId\":\"$p-1111-2222-3333-444455556666\",\"kind\":\"background\",\"state\":\"$s\"}"; sep=','
+    # 真的 claude agents 對活著的行程會帶 pid 欄；stub 一律補上（沒 pid 的狀況另見案例 10-2）
+    out="$out$sep{\"sessionId\":\"$p-1111-2222-3333-444455556666\",\"kind\":\"background\",\"state\":\"$s\",\"pid\":12345}"; sep=','
   done
   printf '%s]' "$out" > "$FAKE_AGENTS"
 }
@@ -175,7 +176,7 @@ row bg-c8c80003 bg $((now - 360));  row bg-d8d80004 bg $((now - 120))
 touch -t "$(date -r $((now - 4000)) +%Y%m%d%H%M.%S)" "$P8/b8b80002-1111-2222-3333-444455556666.jsonl"
 o='['; sep=''
 for p in a8a80001 b8b80002 c8c80003 d8d80004; do
-  o="$o$sep{\"sessionId\":\"$p-1111-2222-3333-444455556666\",\"cwd\":\"$W8\",\"kind\":\"background\",\"state\":\"working\"}"; sep=','
+  o="$o$sep{\"sessionId\":\"$p-1111-2222-3333-444455556666\",\"cwd\":\"$W8\",\"kind\":\"background\",\"state\":\"working\",\"pid\":12345}"; sep=','
 done
 printf '%s]' "$o" > "$FAKE_AGENTS"
 printf 'BG_STALL_MIN=60\n' > "$MYTHOS_DIR/state/watchdog-knobs.env"
@@ -191,7 +192,7 @@ echo '(8) ok'
 # 9) 對帳不得把 bg 單當 dcq 單（11-06 bg-2157532a 誤判）：進行中、worker 在清單、超過 GONE_MIN → 不轉 FAIL
 now="$(date +%s)"
 row bg-99990009 bg $((now - 7200))
-printf '[{"sessionId":"99990009-1111-2222-3333-444455556666","kind":"background","state":"working"}]' > "$FAKE_AGENTS"
+printf '[{"sessionId":"99990009-1111-2222-3333-444455556666","kind":"background","state":"working","pid":12345}]' > "$FAKE_AGENTS"
 printf 'BG_STALL_MIN=600\n' > "$MYTHOS_DIR/state/watchdog-knobs.env"
 : > "$TMUX_LOG"
 GONE_MIN=1 bash "$ROOT/bin/dispatch-watch" 9>&- || fail '9：非零退出'
@@ -202,7 +203,7 @@ now="$(date +%s)"
 row bg-idle1001 bg "$now"
 printf '摘要：done\n---細節---\nx\n' > "$MYTHOS_DIR/state/bg/idle1001.result"
 touch -t "$(date -r $((now - 600)) +%Y%m%d%H%M.%S)" "$MYTHOS_DIR/state/bg/idle1001.result"
-printf '[{"sessionId":"idle1001-1111-2222-3333-444455556666","kind":"background","state":"working","status":"idle","waitingFor":null}]' > "$FAKE_AGENTS"
+printf '[{"sessionId":"idle1001-1111-2222-3333-444455556666","kind":"background","state":"working","status":"idle","waitingFor":null,"pid":12345}]' > "$FAKE_AGENTS"
 : > "$TMUX_LOG"
 bash "$ROOT/bin/dispatch-watch" 9>&- || fail 'idle-with-result：非零退出'
 [ "$(status_of bg-idle1001)" != pending ] || fail "idle-with-result：ledger 仍是 pending：$(status_of bg-idle1001)"
@@ -214,11 +215,74 @@ now="$(date +%s)"
 row bg-idle2002 bg "$now"
 printf '摘要：done\n---細節---\nx\n' > "$MYTHOS_DIR/state/bg/idle2002.result"
 touch -t "$(date -r $((now - 600)) +%Y%m%d%H%M.%S)" "$MYTHOS_DIR/state/bg/idle2002.result"
-printf '[{"sessionId":"idle2002-1111-2222-3333-444455556666","kind":"background","state":"working","status":"idle","waitingFor":"permission prompt"}]' > "$FAKE_AGENTS"
+printf '[{"sessionId":"idle2002-1111-2222-3333-444455556666","kind":"background","state":"working","status":"idle","waitingFor":"permission prompt","pid":12345}]' > "$FAKE_AGENTS"
 : > "$TMUX_LOG"
 bash "$ROOT/bin/dispatch-watch" 9>&- || fail 'waiting-permission：非零退出'
 [ "$(status_of bg-idle2002)" = pending ] || fail "waiting-permission：ledger 不是 pending：$(status_of bg-idle2002)"
 if jq -e 'select(.job_id=="bg-idle2002" and .status=="PASS")' "$MYTHOS_DIR/state/events.jsonl" >/dev/null 2>&1; then fail 'waiting-permission：誤發 PASS'; fi
 echo '(waiting-permission) ok'
+
+# 10) last_ts_epoch（11-07 bg-e328eb79）：尾端追加無 timestamp 的中繼列刷 mtime，不得掩蓋真卡死
+mkdir -p "$BG_PROJECTS_DIR/-tmp-w10-x"
+W10="/tmp/w10.x"; P10="$BG_PROJECTS_DIR/-tmp-w10-x"
+now="$(date +%s)"
+row bg-ts100001 bg $((now - 7200))
+tf10="$P10/ts100001-1111-2222-3333-444455556666.jsonl"
+oldts="$(date -u -r $((now - 3600)) +%Y-%m-%dT%H:%M:%SZ)"
+printf '{"type":"user","timestamp":"%s"}\n' "$oldts" > "$tf10"
+i=1; while [ "$i" -le 30 ]; do printf '{"type":"progress","lastPrompt":"x %s"}\n' "$i" >> "$tf10"; i=$((i + 1)); done
+touch -t "$(date -r "$now" +%Y%m%d%H%M.%S)" "$tf10"
+printf '[{"sessionId":"ts100001-1111-2222-3333-444455556666","cwd":"%s","kind":"background","state":"working","pid":12345}]' "$W10" > "$FAKE_AGENTS"
+printf 'BG_STALL_MIN=60\n' > "$MYTHOS_DIR/state/watchdog-knobs.env"
+: > "$TMUX_LOG"
+bash "$ROOT/bin/dispatch-watch" 9>&- || fail '10：非零退出'
+grep -q 'event_id=bg-ts100001-STALL' "$TMUX_LOG" || fail "10a：最後 timestamp 超過 BG_STALL_MIN 沒判 STALL：$(cat "$TMUX_LOG")"
+grep -q '分鐘沒動' "$TMUX_LOG" || fail "10a：STALL 沒附停滯分鐘：$(cat "$TMUX_LOG")"
+echo '(10) ok'
+
+# 10-2) 沒有 pid 欄（行程已結束，bg-97f17c4d）：有 result → 当 done；沒有 result → FAIL
+now="$(date +%s)"
+row bg-np300003 bg $((now - 7200))
+printf '摘要：做完了\n---細節---\ntest\n' > "$MYTHOS_DIR/state/bg/np300003.result"
+touch -t "$(date -r $((now - 600)) +%Y%m%d%H%M.%S)" "$MYTHOS_DIR/state/bg/np300003.result"
+row bg-np400004 bg $((now - 7200))
+printf '[{"sessionId":"np300003-1111-2222-3333-444455556666","kind":"background","state":"blocked"},{"sessionId":"np400004-1111-2222-3333-444455556666","kind":"background","state":"working"}]' > "$FAKE_AGENTS"
+printf 'BG_STALL_MIN=600\nBG_PERM_MIN=5\n' > "$MYTHOS_DIR/state/watchdog-knobs.env"
+: > "$TMUX_LOG"
+bash "$ROOT/bin/dispatch-watch" 9>&- || fail '10-2：非零退出'
+jq -e 'select(.job_id=="bg-np300003" and .status=="PASS")' "$MYTHOS_DIR/state/events.jsonl" >/dev/null || fail "10-2a：沒 pid 但有 result 沒判 done：$(cat "$TMUX_LOG")"
+jq -e 'select(.job_id=="bg-np300003" and .status=="PASS") | .extra | contains("做完了")' "$MYTHOS_DIR/state/events.jsonl" >/dev/null || fail "10-2a：PASS 沒帶 result"
+grep -q 'event_id=bg-np400004-FAIL' "$TMUX_LOG" || fail "10-2b：沒 pid 且沒 result 沒出 FAIL：$(cat "$TMUX_LOG")"
+[ "$(jq -s '[.[] | select(.job_id=="bg-np400004" and .status=="FAIL")] | length' "$MYTHOS_DIR/state/events.jsonl")" = 1 ] || fail '10-2b：FAIL 事件不是恰好一筆'
+echo '(10-2) ok'
+
+# 11) waitingFor=permission prompt 超過 BG_PERM_MIN → STALL 且 extra 含「權限詢問」（bg-e328eb79 卡 7 小時）
+now="$(date +%s)"
+row bg-rm200002 bg $((now - 600))
+printf '[{"sessionId":"rm200002-1111-2222-3333-444455556666","kind":"background","state":"working","waitingFor":"permission prompt","pid":12345}]' > "$FAKE_AGENTS"
+printf 'BG_STALL_MIN=600\nBG_PERM_MIN=5\n' > "$MYTHOS_DIR/state/watchdog-knobs.env"
+: > "$TMUX_LOG"
+bash "$ROOT/bin/dispatch-watch" 9>&- || fail '11：非零退出'
+grep -q 'event_id=bg-rm200002-STALL' "$TMUX_LOG" || fail "11：卡權限詢問沒出 STALL：$(cat "$TMUX_LOG")"
+grep -q '卡在權限詢問（背景 worker 無人可按）' "$TMUX_LOG" || fail "11：STALL 沒寫權限詢問：$(cat "$TMUX_LOG")"
+# 未滿 BG_PERM_MIN 不發
+: > "$TMUX_LOG"
+row bg-rm300003 bg "$(date +%s)"
+printf '[{"sessionId":"rm300003-1111-2222-3333-444455556666","kind":"background","state":"working","waitingFor":"permission prompt","pid":12345}]' > "$FAKE_AGENTS"
+bash "$ROOT/bin/dispatch-watch" 9>&- || fail '11b：非零退出'
+grep -q 'rm300003-STALL' "$TMUX_LOG" && fail '11b：剛問權限就判 STALL'
+echo '(11) ok'
+
+# 12) rkey（11-07 bg-97f17c4d）：續派 worker 只寫題目指定的 r-<rk>.result、沒有 <sid>.result，done 照樣 PASS 且 extra 是 r- 檔內容
+row bg-rk10001 bg "$(date +%s)"
+printf '%s\n' '1600000000-4321' > "$MYTHOS_DIR/state/bg/rk10001.rkey"
+printf '[rk case] 本輪結果寫進 r- 檔\n' > "$MYTHOS_DIR/state/bg/r-1600000000-4321.result"
+agents rk10001 done
+printf 'BG_STALL_MIN=600\n' > "$MYTHOS_DIR/state/watchdog-knobs.env"
+: > "$TMUX_LOG"
+bash "$ROOT/bin/dispatch-watch" 9>&- || fail '12：非零退出'
+grep -q 'event_id=bg-rk10001-PASS' "$TMUX_LOG" || fail "12：只有 r-<rk>.result 沒出 PASS：$(cat "$TMUX_LOG")"
+jq -e 'select(.job_id=="bg-rk10001" and .status=="PASS") | .extra | contains("本輪結果寫進 r- 檔")' "$MYTHOS_DIR/state/events.jsonl" >/dev/null || fail "12：PASS extra 不是 r- 檔內容"
+echo '(12) ok'
 
 echo 'DISPATCH-BG-WATCH PASS'
