@@ -121,3 +121,4 @@ __pycache__/
 !/tests/test-adhd-truncate.sh
 !/tests/test-dispatch-watch-hermes-alive.sh
 !/tests/test-dispatch-bg-hermes-dedupe.sh
+!/tests/test-hermes-to-of.sh
