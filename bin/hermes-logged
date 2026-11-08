@@ -1,0 +1,26 @@
+#!/bin/sh
+# worker 用的 hermes 入口：`hermes -z` 會 logging.disable(CRITICAL)（hermes_cli/oneshot.py:259），連 agent.log 的檔案
+# handler 都收不到，worker 跑的每一輪在 log 裡都是空白。這層把 logging.disable 換成 no-op 再進 hermes 主程式，
+# 不改 hermes-agent；run 期間 stderr 仍由 oneshot 導去 devnull，stdout 結果不受影響。
+# 由 dispatch-bg 以 DISPATCH_BG_HERMES_BIN 指過來。python 路徑讀官方 launcher 第一行 exec，hermes 升版換 python 也跟著走。
+ROOT="${HERMES_AGENT_ROOT:-$HOME/.hermes/hermes-agent}"
+LAUNCHER="$ROOT/.hermes/bin/hermes"
+PY="$(sed -n 's/^exec \([^ ]*python3\) .*/\1/p' "$LAUNCHER" 2>/dev/null | head -1)"
+if [ -z "$PY" ] || [ ! -x "$PY" ]; then
+  echo "hermes-logged: 從 $LAUNCHER 解析不到 python，改走原 launcher（log 會是空的）" >&2
+  exec "$HOME/.local/bin/hermes" "$@"
+fi
+exec "$PY" -I -c '
+import os, sys
+os.environ.pop("PYTHONHOME", None)
+os.environ.pop("PYTHONPATH", None)
+sys.path.insert(0, sys.argv.pop(1))
+from hermes_constants import get_default_hermes_root
+os.environ["HERMES_HOME"] = os.environ.get("HERMES_HOME") or str(get_default_hermes_root())
+import hermes_bootstrap
+import logging
+logging.disable = lambda *a, **k: None
+from hermes_cli.main import main
+sys.argv[0] = "hermes"
+sys.exit(main())
+' "$ROOT" "$@"
