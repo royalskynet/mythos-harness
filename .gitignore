@@ -47,6 +47,7 @@
 !/bin/smoke-router-model
 !/bin/ctx-guard
 !/bin/followup-direct
+!/bin/followup-report
 /tests/*
 !/tests/test-tg-send.sh
 !/tests/test-tg-send-inbox.sh
@@ -54,6 +55,9 @@
 !/tests/test-tg-reply-thread.sh
 !/tests/test-small-residuals.sh
 !/tests/test-thread-routing.py
+!/tests/test-dispatch-metadata.py
+!/tests/test-followup-recovery.py
+!/tests/test-followup-shadow.py
 !/tests/test-superagent-replay.py
 !/tests/test_tg_commands.mjs
 !/tests/test_dispatch_gate.mjs

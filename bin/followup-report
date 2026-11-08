@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""P6 ②：影子模式報表。讀 state/followup/observations.jsonl（bin/followup-direct 在 MYTHOS_FOLLOWUP_DIRECT=observe 時寫入）。
+同一事件鍵（chat:message_id）只算最後一筆。
+用法：
+  bin/followup-report                    印候選數、would_queue 數、各 reason 計數
+  bin/followup-report --routed <tsv>     另印「影子判定 thread 與 Router 實際 thread 一致率」
+      <tsv> 每行：event_key<TAB>thread（event_key＝chat:message_id；thread 空白的列不比對）
+輸出只含計數與代號，不含使用者原文（observations 本來就不存原文）。"""
+import collections
+import json
+import os
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MYTHOS_DIR = os.environ.get("MYTHOS_DIR") or ROOT
+OBS = os.path.join(MYTHOS_DIR, "state", "followup", "observations.jsonl")
+
+
+def usage(msg=None):
+    if msg:
+        sys.stderr.write(msg + "\n")
+    sys.stderr.write("用法：followup-report [--routed <tsv>]\n")
+    sys.exit(2)
+
+
+def main(argv):
+    routed_path = None
+    if argv:
+        if len(argv) != 2 or argv[0] != "--routed":
+            usage()
+        routed_path = argv[1]
+
+    latest = collections.OrderedDict()  # event_key → 最後一筆觀察
+    bad = 0
+    if os.path.exists(OBS):
+        with open(OBS, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    o = json.loads(line)
+                except ValueError:
+                    bad += 1
+                    continue
+                key = o.get("event_key")
+                if not key:
+                    bad += 1
+                    continue
+                latest.pop(key, None)  # 重新插入，保留「最後一筆」的順序
+                latest[key] = o
+
+    reasons = collections.Counter(o.get("reason", "?") for o in latest.values())
+    would = sum(1 for o in latest.values() if o.get("would_queue") is True)
+    print(f"候選數 candidates={len(latest)}")
+    print(f"would_queue={would}")
+    for r in sorted(reasons):
+        print(f"reason {r}={reasons[r]}")
+    if bad:
+        print(f"略過壞行 bad_lines={bad}")
+
+    if routed_path is not None:
+        compared = agree = 0
+        with open(routed_path, encoding="utf-8") as f:
+            for line in f:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 2 or not parts[0]:
+                    continue
+                key, routed_thread = parts[0], parts[1]
+                o = latest.get(key)
+                if o is None or not o.get("thread") or not routed_thread:
+                    continue
+                compared += 1
+                if o.get("thread") == routed_thread:
+                    agree += 1
+        rate = f"{100.0 * agree / compared:.1f}%" if compared else "n/a"
+        print(f"routed_compared={compared} thread_agree={agree} agree_rate={rate}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

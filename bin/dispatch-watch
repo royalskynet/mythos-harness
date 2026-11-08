@@ -687,6 +687,8 @@ if [ -d "$hqd" ]; then
   done
 fi
 
+# P6 重啟對帳：上次 rename 後、收據前中斷的追問，補標 queued（不重複入列），再交下面的 generation 比對。
+if ledger_lock; then followup_reconcile; ledger_unlock; fi
 # 同 thread 只派一個信箱批次。先把本輪訊息移到 .batch，新的 incoming 留給下輪；中斷後重用同 prompt。
 for mb in "$MYTHOS_DIR"/state/mailbox/*; do
   [ -d "$mb" ] || continue
@@ -701,7 +703,7 @@ for mb in "$MYTHOS_DIR"/state/mailbox/*; do
   mkdir -p "$batch" || { ledger_unlock; continue; }
   # 已存在的批次不混入新訊息；先前只移了一半就中斷，也仍保留所有檔。
   if [ ! -f "$batch/prompt-path" ]; then
-    for msg in "$mb"/*.md; do [ -f "$msg" ] && mv "$msg" "$batch/"; done
+    for msg in "$mb"/*.md; do [ -f "$msg" ] && { mv "$msg" "$batch/"; [ -f "$msg.meta.json" ] && mv "$msg.meta.json" "$batch/"; }; done
     # P4 N02：follow-up 訊息（fu-<chat>-<fmid>.md）只消費本 generation 的；thread 之後被取消、或收據對不上 → 不消費，移到 .stale/ 留存
     for fm in "$batch"/fu-*.md; do
       [ -f "$fm" ] || continue
@@ -715,6 +717,9 @@ for mb in "$MYTHOS_DIR"/state/mailbox/*; do
     files=("$batch"/*.md)
     if [ ! -f "${files[0]}" ]; then ledger_unlock; continue; fi
     p="$(mktemp "$MYTHOS_DIR/state/bg/$th-mailbox-XXXXXX")" || { ledger_unlock; continue; }
+    # P6：批次沿用同 thread 最近一張 job 的 repo／readonly；批次裡有訊息自己宣告了，以最後宣告的為準（meta 寫在 prompt-path 之前）
+    inh="$(awk -F'\t' -v th="$th" '$7==th && ($8=="bg" || $8=="bg-hard" || $8=="hermes") {p=$3} END{print p}' "$TSV")"
+    prompt_meta_inherit "$p" ${inh:+"$inh"} "$batch"/*.md || { ledger_unlock; continue; }
     printf '%s\n' "$p" > "$batch/prompt-path.tmp" && mv "$batch/prompt-path.tmp" "$batch/prompt-path" || { ledger_unlock; continue; }
   fi
   p="$(cat "$batch/prompt-path")"

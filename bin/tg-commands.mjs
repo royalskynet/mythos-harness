@@ -365,11 +365,45 @@ function directFollowup(th, job, text, rid) {
   })
 }
 
-// P4 N02：follow-up 直通（MYTHOS_FOLLOWUP_DIRECT=1 才動；關著完全不走這段）。reply 對到的結果→bin/followup-direct 入列該 thread 的信箱。
+// P4 N02：follow-up 直通。P6：MYTHOS_FOLLOWUP_DIRECT 三值 off（預設）／observe（只寫觀察、交 Router）／auto（舊值 1 同 auto）。
+// 只有 auto 才真的入列；observe 也會呼叫 bin/followup-direct（寫 observations.jsonl），但對 Router 的行為同 off。
 // 回 thread 代號＝已入列或重播去重（不再交 Router）；null＝交 Router 照舊流程（未綁定、歧義、新話題、舊 generation 都走這邊）。
+function followupMode() {
+  const v = process.env.MYTHOS_FOLLOWUP_DIRECT
+  return v === 'observe' ? 'observe' : (v === 'auto' || v === '1') ? 'auto' : 'off'
+}
+// P6：Router 路徑先查：同事件已由直通入列（queued 收據）就不再交 Router 重派。只在 auto 查。
+function followupSeen(chat, fmid) {
+  return new Promise(resolve => {
+    if (followupMode() !== 'auto' || chat == null || fmid == null) return resolve(null)
+    let out = ''
+    let child
+    try {
+      child = spawn(path.join(MYTHOS_ROOT, 'bin/followup-direct'), ['--seen', String(chat), String(fmid)], {
+        env: { ...process.env, MYTHOS_DIR: MYTHOS_ROOT },
+        stdio: ['ignore', 'pipe', 'ignore'],
+      })
+    } catch {
+      return resolve(null)
+    }
+    const timer = setTimeout(() => child.kill(), 5_000)
+    child.stdout.on('data', d => { out += d })
+    child.on('error', () => { clearTimeout(timer); resolve(null) })
+    child.on('close', code => {
+      clearTimeout(timer)
+      const m = /^seen (t-[A-Za-z0-9-]+)$/m.exec(out)
+      if (code === 0 && m) {
+        log(`followup seen thread=${m[1]} chat=${chat} mid=${fmid}（已直通，不再交 Router）`)
+        return resolve(m[1])
+      }
+      resolve(null)
+    })
+  })
+}
+
 function followupDirect(chat, fmid, rmid, text) {
   return new Promise(resolve => {
-    if (process.env.MYTHOS_FOLLOWUP_DIRECT !== '1' || chat == null || fmid == null || rmid == null) return resolve(null)
+    if (followupMode() === 'off' || chat == null || fmid == null || rmid == null) return resolve(null)
     let out = ''
     let child
     try {
@@ -426,7 +460,9 @@ async function handleChannel(msg, line) {
   if (compactLocked(MYTHOS_ROOT)) { queueMaintenance(msg, line); return false }
   if (intercept(msg.params)) return true
   // P4 N02：flag 開才先試直通；已入列（或重播去重）就不再交 Router
-  const fu = typeof orig === 'string' ? await followupDirect(_meta?.chat_id, _meta?.message_id, _meta?.reply_to_message_id, orig) : null
+  const fu = typeof orig === 'string'
+    ? ((await followupDirect(_meta?.chat_id, _meta?.message_id, _meta?.reply_to_message_id, orig)) ?? (await followupSeen(_meta?.chat_id, _meta?.message_id)))
+    : null
   if (fu) {
     msg.params.content = `[已排入 worker thread=${fu}] ` + msg.params.content
     if (compactLocked(MYTHOS_ROOT)) { queueMaintenance(msg, JSON.stringify(msg)); return false }

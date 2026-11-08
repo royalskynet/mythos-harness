@@ -26,7 +26,7 @@ cat > "$task" <<'EOF'
 ## 驗收
 bash tests/test-foo.sh
 EOF
-progress="Edit /Users/x/foo.mjs；Bash bash tests/test-foo.sh"
+progress="Edit /tmp/work/foo.mjs；Bash bash tests/test-foo.sh"
 
 # 1. ON_TRACK
 mk_llm "$TMP/llm1" "ON_TRACK"
@@ -93,7 +93,7 @@ MD="$TMP/mythos"; mkdir -p "$MD/state/deep" "$MD/bin"
 cwd="$TMP/work"; mkdir -p "$cwd"
 slug="$(printf '%s' "$cwd" | sed 's/[\/.]/-/g')"
 PROJ="$TMP/projects"; mkdir -p "$PROJ/$slug"
-printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"/Users/x/foo.mjs"}}]}}' \
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"/tmp/work/foo.mjs"}}]}}' \
   > "$PROJ/$slug/s.jsonl"
 
 old=$(( $(date +%s) - 3600 ))

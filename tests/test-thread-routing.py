@@ -315,6 +315,22 @@ if any(r[3] in ("2003", "2004", "2005") for r in receipts("queued")):
     fail("被交 Router 的訊息不該有 queued 收據")
 print("N02 ok: flag_off_untouched dedupe forged_to_router ambiguous_to_router new_topic_to_router")
 
+# ① 取消競態：預檢通過後、取鎖前取消 → 鎖內重判（generation 已變）→ exit 7，不入列、不建信箱、不寫 queued／pending
+add_row("bg-fu3", write_prompt("t-fu03", "原需求：查 C 服務\n"), "done", "t-fu03")
+add_map(555, 5000, "t-fu03", "bg-fu3")
+CANCEL_HOOK = os.path.join(TMP, "cancel-hook.sh")
+with open(CANCEL_HOOK, "w", encoding="utf-8") as f:
+    f.write(f'bash "{DISPATCH_BG}" --cancel t-fu03 >/dev/null 2>&1\n')
+rc, out, err = run([FOLLOWUP, "555", "2010", "5000"],
+                   env_for(MYTHOS_FOLLOWUP_DIRECT="1", FOLLOWUP_TEST_BEFORE_LOCK=CANCEL_HOOK), stdin="補充 C")
+if rc != 7:
+    fail(f"預檢後取消應 exit 7，實際 {rc} out={out} err={err}")
+if any(r[3] == "2010" and r[1] in ("queued", "pending") for r in receipts()):
+    fail("取消競態下不得寫 queued／pending 收據")
+if glob.glob(os.path.join(MB, "t-fu03", "fu-*.md")) or os.path.exists(os.path.join(MB, "t-fu03", ".incoming")):
+    fail("取消競態下不得產生信箱檔")
+print("RACE ok: cancel_between_precheck_and_lock_no_queue")
+
 # 取消後舊 generation 不消費：cancel 換 generation、清信箱；之後仍留著的舊 generation 項要進 .stale/
 rc, out, err = run([DISPATCH_BG, "--cancel", "t-fu01"], env_for())
 if rc != 0:

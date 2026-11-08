@@ -26,6 +26,7 @@ os.environ.update(MYTHOS_DIR=TMP, TG_LOG=TG_LOG, TG_RC=TG_RC,
 with open(TG_RC, "w") as f:
     f.write("0")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.modules.pop("__init__", None)  # discover 時 test_dispatch 可能已快取另一份 MYTHOS_DIR
 import __init__ as tools  # noqa: E402
 
 tools.WARN_TSV = os.path.join(os.environ["BRIEF_LINES_DIR"], "mythos-inbox.tsv")

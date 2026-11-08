@@ -53,6 +53,16 @@ You talk to one Mythos. It always has time to answer because it never does the w
 - **Delivery**: injected results are checked against the conversation log and sent to Telegram directly if they never land.
 - **Voice**: `bin/adhd-lint.mjs` rejects wording that exposes tickets, ids or hand-offs.
 
+## 追問影子模式 / Follow-up shadow mode
+
+`MYTHOS_FOLLOWUP_DIRECT` 支援 `off`（預設，關閉）、`observe`（只觀察）、`auto`（舊值 `1` 同義）。Hermes 本輪尚未接自動入列；即使設為 `auto`，入站 hook 仍只做 `observe` 並記錄一行 log。只觀察 allowlist 內帶 reply 的 Telegram 訊息，不擋訊息、不把原文寫入觀察檔。`bin/followup-report` 統計候選與接受數；`bin/followup-report --routed <tsv>` 可比對 Router 的 thread 提案一致率，TSV 每列為 `event_key<TAB>thread`，事件鍵為 `chat_id:message_id`。
+
+repo 與唯讀旗標由派工工具寫入 `<prompt>.meta.json`（`repo`、`readonly`），續派沿用同 thread 前一張 job 的設定。舊檔沒有 meta 時只讀開頭 5 行的 `repo=`／`readonly=1` 標頭；meta 的 repo 空時也保留此相容行為。正文中段的同名文字不影響排程。自動入列與 Router 派工競態、跨 session 事件鍵綁定仍待完成，詳見 [DEVLOG.md](DEVLOG.md)。
+
+`MYTHOS_FOLLOWUP_DIRECT` supports `off` (default), `observe` and `auto` (legacy `1` is equivalent). Automatic queueing is not wired into Hermes in this release: even in `auto`, the inbound hook only observes and logs that limitation. It only observes allowlisted Telegram replies, never blocks delivery and omits the original text from observations. `bin/followup-report` reports candidate and acceptance counts; `bin/followup-report --routed <tsv>` compares proposed threads with Router decisions. Each TSV row is `event_key<TAB>thread`, where the event key is `chat_id:message_id`.
+
+The dispatch tool writes repo and read-only settings to `<prompt>.meta.json` (`repo`, `readonly`); follow-ups inherit the previous job's settings in the same thread. Legacy files without metadata only read `repo=` / `readonly=1` headers in the first 5 lines; an empty repo in metadata preserves this fallback too. Matching text in the middle of the body does not affect scheduling. The automatic queueing / Router race and session-bound event keys remain unfinished; see [DEVLOG.md](DEVLOG.md).
+
 ## 安裝 / Install
 
 需求：macOS、bash、Python 3、Node ≥ 20、[Hermes](https://github.com/NousResearch/Hermes-Agent)。

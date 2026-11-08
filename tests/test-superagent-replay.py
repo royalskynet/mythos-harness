@@ -129,6 +129,7 @@ class Sim:
         self.term, self.arrived = {}, {}
         self.waiting, self.new_job, self.tinfo = {}, {}, {}
         self.replay_map, self.delivered_fmid = {}, set()
+        self.routed_fmid = set()   # S3 已交 Router 的 fmid（--seen 只認已直通；這裡記已派 = 防重複派）
         self.ctrl, self.target_of = {}, {}
         self.resp, self.cancel_eff, self.qwait, self.batch = [], [], [], []
         self.misroute, self.dup = 0, 0
@@ -211,6 +212,10 @@ class Sim:
             if code == "queue":
                 self.mailbox_add(e)
                 return
+            if e.get("replay_of") or e["fmid"] in self.routed_fmid:
+                self.term[eid] = ("dedup", self.now)   # 直通路：Router 派工前先查 --seen，重播不再派
+                return
+            self.routed_fmid.add(e["fmid"])
         elif e.get("replay_of"):
             self.term[eid] = ("dedup", self.now)   # S1／S2：假設 TG 層已去重
             return

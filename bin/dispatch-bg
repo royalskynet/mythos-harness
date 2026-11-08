@@ -109,6 +109,7 @@ if [ "$mode" != cancel ]; then
   [ -n "$prompt" ] && [ -f "$prompt" ] || { echo "prompt 檔不存在：${prompt}" >&2; exit 2; }
   case "$prompt" in /*) ;; *) prompt="$PWD/$prompt" ;; esac  # ledger 記絕對路徑（Router 給的是 state/bg/ 相對路徑）
 fi
+declsrc="$prompt"  # P6：這次 prompt 自己宣告的 repo／readonly（interrupt 會改寫 prompt，所以先記下）
 
 # 11-08b dsh 差距 #2：停該 thread 進行中的 worker。停的動作交 bin/dispatch-cancel（hermes＝殺整個行程樹、claude＝claude stop，
 # 兩者都把 ledger 標 cancelled，dispatch-watch 對 cancelled 不 deliver）。必須在取 ledger 鎖之前做（dispatch-cancel 自己拿鎖）。
@@ -122,15 +123,24 @@ if [ -n "$mode" ]; then
       stopped="$stopped $aid"
     done
   fi
+  # cancel helper 自己拿鎖；停完才鎖住 generation／信箱／佇列，與 followup-direct 互斥。
+  ledger_lock || { echo "拿不到 ledger 鎖，未清理取消狀態" >&2; exit 1; }
+  trap ledger_unlock EXIT
+  trap 'exit 143' TERM HUP INT
   # P4 N02：停掉就換 generation；之後才到的、綁舊 generation 的 follow-up 不消費（dispatch-watch 比對）
-  followup_gen_bump "$thread" 2>/dev/null || true
+  followup_gen_bump "$thread" || exit 1
   # 排在信箱的補充是對舊方向說的；不清掉，dispatch-watch 會在舊 worker 被停後把它當新單派出去
-  rm -rf "$MYTHOS_DIR/state/mailbox/$thread" 2>/dev/null
+  rm -rf "$MYTHOS_DIR/state/mailbox/$thread" || exit 1
   # 11-08（G11）：排隊中的（hermes 上限滿時排的）也一起丟掉；每項第一欄是 thread
   qn=''
   for qf in $(awk -F'\t' -v th="$thread" '$1==th {print FILENAME}' "$MYTHOS_DIR"/state/hermes-queue/* 2>/dev/null); do
-    [ -f "$qf" ] && rm -f -- "$qf" && qn="$qn $qf"
+    if [ -f "$qf" ]; then
+      rm -f -- "$qf" || exit 1
+      qn="$qn $qf"
+    fi
   done
+  ledger_unlock
+  trap - EXIT TERM HUP INT
   [ -n "$qn" ] && echo "已丟掉排隊項：$(for f in $qn; do printf '%s ' "${f##*/}"; done)"
   if [ "$mode" = cancel ]; then
     if [ -n "$stopped" ]; then echo "已停${stopped}"; else echo "thread ${thread} 沒有進行中的事"; fi
@@ -165,6 +175,13 @@ if [ -n "$mode" ]; then
   } > "$ipf" || exit 1
   prompt="$ipf"
   thflag=1
+fi
+# P6 追問繼承原 meta：續派（--thread／--interrupt）的 prompt 自己宣告了 repo 就用它，沒宣告沿用同 thread 最近一張 job 的 repo／readonly。
+# 寫在 prompt.meta.json，之後排程（hermes_repo_busy）、信箱、hermes 佇列都只讀這份。
+if [ "$thread" != - ] && [ -f "$prompt" ]; then
+  inh=''
+  [ -f "$MYTHOS_DIR/state/dispatch-jobs.tsv" ] && inh="$(awk -F'\t' -v th="$thread" '$7==th && ($8=="bg" || $8=="bg-hard" || $8=="hermes") {p=$3} END{print p}' "$MYTHOS_DIR/state/dispatch-jobs.tsv")"
+  prompt_meta_inherit "$prompt" --legacy-first "$inh" "$declsrc" || { echo "寫 ${prompt}.meta.json 失敗" >&2; exit 1; }
 fi
 
 WORKER_DIR="${MYTHOS_WORKER_DIR:-$HOME/bots/mythos-worker}"
@@ -208,6 +225,8 @@ if [ "$thread" != - ] && [ -f "$MYTHOS_DIR/state/dispatch-jobs.tsv" ]; then
         cat "$prompt" > "$tmp" || { rm -f "$tmp"; exit 1; }
         dest="$mb/${eid:-${tmp##*.}}.md"
         mv "$tmp" "$dest" || exit 1
+        # P6：信箱訊息帶著自己的 meta，批次組裝時才能看見它宣告的 repo
+        [ -f "$prompt.meta.json" ] && cp "$prompt.meta.json" "$dest.meta.json"
         "${NODE_BIN:-node}" "$ROOT_DIR/bin/lib-request.mjs" log "$MYTHOS_DIR" queued "$prompt" "$active" 9>&- || echo "信箱已存，但 request 紀錄寫入失敗" >&2
         echo "thread ${thread} 已有 worker，訊息已存信箱" >&2
         echo "$active"; exit 0 ;;

@@ -75,16 +75,52 @@ last_ts_epoch() { # transcript
 }
 
 # ---- P4 N03：同 repo 寫入序列化（hermes） ----
-# prompt 檔宣告目標 repo：一行 `repo=<絕對路徑>`；唯讀另加 `readonly=1`。兩者都取檔內最後一行（interrupt 的新指示在後面、覆蓋原需求）。
+# 目標 repo 與唯讀旗標不放在使用者正文裡，改放與 prompt 同名的 <prompt>.meta.json（P6）：
+#   {"v":1,"repo":"<絕對路徑或空>","readonly":true|false}
+# 沒有 meta.json、且 meta 也沒宣告 repo 時，才退回讀 prompt 開頭 5 行的 `repo=<絕對路徑>`／`readonly=1`（舊檔相容）；正文中段出現的同名行一律當正文。
+# （meta 是 dispatch-bg 自動寫的繼承檔，repo 空只代表「這輪沒宣告」，不代表要忽略舊檔自己的標頭。）
 # 沒宣告 repo ＝不參與序列化（現行行為）。唯讀不擋、也不被擋。
+prompt_decl() { # prompt 檔 → 印 "repo<TAB>readonly"（readonly 為 1 或空；repo 空＝沒宣告）
+  local f="$1" m="$1.meta.json"
+  if [ -f "$m" ] && jq -e 'select(.repo // "" | length > 0)' "$m" >/dev/null 2>&1; then
+    jq -r '[(.repo // ""), (if .readonly == true then "1" else "" end)] | @tsv' "$m"
+    return 0
+  fi
+  head -n 5 "$f" 2>/dev/null | awk 'BEGIN{r=""; v=""} /^repo=\//{r=substr($0,6)} /^readonly=/{v=substr($0,10)} END{printf "%s\t%s\n", r, (v=="1" ? "1" : "")}'
+}
 prompt_repo_of() { # prompt 檔 → 印正規化後的 repo（空＝沒宣告）
   local r
-  r="$(awk '/^repo=\//{v=substr($0,6)} END{print v}' "$1" 2>/dev/null)"
+  r="$(prompt_decl "$1" | cut -f1)"
   [ -n "$r" ] || return 0
   if [ -d "$r" ]; then (cd "$r" 2>/dev/null && pwd -P) || printf '%s\n' "$r"; else printf '%s\n' "$r"; fi
 }
 prompt_readonly_of() { # prompt 檔 → 印 1＝唯讀，空＝寫入（預設）
-  awk '/^readonly=/{v=substr($0,10)} END{if (v=="1") print 1}' "$1" 2>/dev/null
+  [ "$(prompt_decl "$1" | cut -f2)" = 1 ] && printf '1\n'
+  return 0
+}
+# meta 沿用（P6）：dst 的 repo／readonly 取自 src 們（依序），後面有宣告 repo 的覆蓋前面（最後宣告者勝）；全都沒宣告就寫空 meta。
+# 只沿用已存在的 meta，不從正文重掃：正文開頭有 repo= 不代表這份 prompt 宣告了它（dispatch-watch 組出的批次正文本來就會帶原需求）。
+# --legacy-first 僅允許第一個來源（ledger 上一張 job）無 meta 時讀舊格式標頭。
+prompt_meta_inherit() { # dst [--legacy-first] src...
+  local dst="$1" s d r='' ro='' noop=0 legacy='' allow
+  shift
+  if [ "${1:-}" = --legacy-first ]; then legacy=1; shift; fi
+  [ "$dst" -ef "$1" ] && noop=1  # dst 自己就是第一個 src：已有 meta 就保留，別拿空 meta 蓋掉
+  for s in "$@"; do
+    allow="$legacy"; legacy=''
+    [ -n "$s" ] || continue
+    if [ ! -f "$s.meta.json" ]; then
+      [ "$allow" = 1 ] && [ -f "$s" ] || continue
+    fi
+    d="$(prompt_decl "$s")"
+    if [ -n "$(printf '%s' "$d" | cut -f1)" ]; then
+      r="$(printf '%s' "$d" | cut -f1)"; ro="$(printf '%s' "$d" | cut -f2)"
+    fi
+  done
+  [ "$noop" = 1 ] && [ -f "$dst.meta.json" ] && return 0
+  local tmp="$dst.meta.json.tmp.$$"
+  jq -n --arg r "$r" --argjson ro "$([ "$ro" = 1 ] && echo true || echo false)" '{v:1, repo:$r, readonly:$ro}' > "$tmp" \
+    && mv -f "$tmp" "$dst.meta.json" || { rm -f "$tmp"; return 1; }
 }
 # 有沒有 pending 的 hermes 寫入列已佔用同一 repo（唯讀列不算）。0＝有、1＝沒有。
 # 呼叫端：dispatch-bg 持 ledger 鎖時呼叫（權威）；dispatch-watch 不持鎖時只當預判，dispatch-bg 會再查一次。
@@ -125,4 +161,27 @@ followup_queued_gen() { # chat fmid thread
   local f="${MYTHOS_DIR:-$(cd "$LEDGER_LIB_DIR/.." && pwd)}/state/followup/receipts.tsv"
   [ -f "$f" ] || return 0
   awk -F'\t' -v c="$1" -v m="$2" -v t="$3" '$2=="queued" && $3==c && $4==m && $5==t {g=$6} END{print g}' "$f"
+}
+# P6 恢復對帳（持 ledger 鎖呼叫）：收據有 pending、同 chat+fmid 沒有 queued，而且 mailbox 底下（含 .batch／.consumed／.stale）
+# 找得到 fu-<chat>-<fmid>.md → 代表 rename 已完成、只差收據，補一行 queued（沿用 pending 的 generation），不重複入列。
+# 找不到檔＝rename 前就中斷，什麼都不補；同事件重播時會重新入列。
+followup_reconcile() {
+  local d="${MYTHOS_DIR:-$(cd "$LEDGER_LIB_DIR/.." && pwd)}" f mb c m t g j hit
+  f="$d/state/followup/receipts.tsv"; mb="$d/state/mailbox"
+  [ -f "$f" ] || return 0
+  awk -F'\t' '$2=="pending" {print $3"\t"$4"\t"$5"\t"$6"\t"$7}' "$f" | sort -u | while IFS=$'\t' read -r c m t g j; do
+    case "$t" in ''|*[!A-Za-z0-9-]*) continue ;; esac
+    case "$c" in ''|*[!0-9-]*) continue ;; esac
+    case "$m" in ''|*[!0-9]*) continue ;; esac
+    awk -F'\t' -v c="$c" -v m="$m" '$2=="queued" && $3==c && $4==m {f=1} END{exit !f}' "$f" && continue
+    awk -F'\t' -v c="$c" -v m="$m" '$2=="stale" && $3==c && $4==m {f=1} END{exit !f}' "$f" && continue
+    hit="$(find "$mb/$t" -type f -name "fu-$c-$m.md" 2>/dev/null | head -n 1)"
+    [ -n "$hit" ] || continue
+    # generation 已經不是 pending 當時那個（取消／改派過）：不補 queued（會讓 --seen／dup 誤報已直通），只記 stale，檔交 dispatch-watch 當舊 generation 丟 .stale
+    if [ "$g" != "$(followup_gen "$t")" ]; then
+      followup_receipt stale "$c" "$m" "$t" "$(followup_gen "$t")" "${j:--}" "對帳：pending 後 generation 已變，不補 queued"
+      continue
+    fi
+    followup_receipt queued "$c" "$m" "$t" "$g" "${j:--}" "對帳補標（rename 已完成）"
+  done
 }

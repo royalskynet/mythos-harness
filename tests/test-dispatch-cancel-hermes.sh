@@ -51,6 +51,46 @@ rc=0; bash "$ROOT/bin/dispatch-bg" --interrupt "$TMP/n.md" >/dev/null 2>&1 </dev
 [ "$rc" = 2 ] || fail "(d) --interrupt 沒 thread 應 exit 2，實際 $rc"
 echo '(d) ok'
 
+# (e) 清理必須等待 ledger 鎖；cancel stub 的標記證明已到停 worker 之後。
+. "$ROOT/bin/lib-ledger.sh"
+mkdir -p "$MYTHOS_DIR/state/mailbox/t-lock" "$MYTHOS_DIR/state/hermes-queue" "$MYTHOS_DIR/state/followup"
+printf 'queued\n' > "$MYTHOS_DIR/state/mailbox/t-lock/fu-old.md"
+printf '7\n' > "$MYTHOS_DIR/state/followup/gen-t-lock"
+printf 't-lock\tqueued\n' > "$MYTHOS_DIR/state/hermes-queue/lock-item"
+printf 'bg-lock\tmid\t%s\t1\tpending\t-\tt-lock\thermes\n' "$TMP/n.md" > "$TSV"
+printf '#!/bin/sh\ntouch "$MYTHOS_TEST_SANDBOX/cancel-entered"\n' > "$TMP/cancel-stub"
+(
+  ledger_lock || exit 1
+  touch "$TMP/lock-held"
+  for i in $(seq 1 100); do
+    [ -f "$TMP/lock-release" ] && break
+    sleep 0.1
+  done
+  ledger_unlock
+) 9>&- &
+lpid=$!
+for i in $(seq 1 50); do [ -f "$TMP/lock-held" ] && break; sleep 0.1; done
+[ -f "$TMP/lock-held" ] || fail '(e) 背景程序拿不到 ledger 鎖'
+DISPATCH_CANCEL_BIN="$TMP/cancel-stub" bash "$ROOT/bin/dispatch-bg" --cancel t-lock 9>&- >"$TMP/lock.out" 2>"$TMP/lock.err" </dev/null &
+cpid=$!
+for i in $(seq 1 50); do [ -f "$TMP/cancel-entered" ] && break; sleep 0.1; done
+sleep 0.6
+violations=''
+[ -f "$TMP/cancel-entered" ] || violations="$violations 未到 cancel helper"
+[ "$(cat "$MYTHOS_DIR/state/followup/gen-t-lock")" = 7 ] || violations="$violations generation 在持鎖期間改變"
+[ -f "$MYTHOS_DIR/state/mailbox/t-lock/fu-old.md" ] || violations="$violations 信箱在持鎖期間被刪"
+[ -f "$MYTHOS_DIR/state/hermes-queue/lock-item" ] || violations="$violations 佇列在持鎖期間被刪"
+touch "$TMP/lock-release"
+wait "$lpid" || fail '(e) 持鎖程序失敗'
+rc=0; wait "$cpid" || rc=$?
+[ -z "$violations" ] || fail "(e)$violations"
+[ "$rc" = 0 ] || fail "(e) 放鎖後取消失敗 rc=$rc：$(cat "$TMP/lock.err")"
+[ "$(cat "$MYTHOS_DIR/state/followup/gen-t-lock")" = 8 ] || fail '(e) 放鎖後 generation 未增加'
+[ ! -e "$MYTHOS_DIR/state/mailbox/t-lock" ] || fail '(e) 放鎖後信箱未刪'
+[ ! -e "$MYTHOS_DIR/state/hermes-queue/lock-item" ] || fail '(e) 放鎖後佇列未刪'
+: > "$TSV"
+echo '(e) ok'
+
 # (a) cancel
 printf '把 ORIGINAL-REQ 做完\n' > "$TMP/p.md"
 DISPATCH_BG_WORKER=hermes bash "$ROOT/bin/dispatch-bg" t-cx "$TMP/p.md" >"$TMP/id.out" 2>/dev/null </dev/null
