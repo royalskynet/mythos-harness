@@ -242,8 +242,22 @@ asks_permission() { # 摘要檔；0＝含請示句
     'import(process.env.GATE).then(m => process.exit(m.ASK_PERMISSION.test(require("fs").readFileSync(process.argv[1], "utf8")) ? 0 : 1), () => process.exit(1))' "$1" </dev/null 2>/dev/null
 }
 direct_send() { # job eid thread 摘要檔 task
-  local rc text
+  local rc text guard guard_rc guard_cwd claim_text
   mkdir -p "$(dirname "$WATCH_LOG")" 2>/dev/null
+  guard="${CLAIM_GUARD_BIN:-$ROOT_DIR/bin/claim-guard}"
+  guard_cwd="$(awk -F'\t' -v j="$1" '$1==j {print $6; exit}' "$TSV")"
+  MYTHOS_DIR="$MYTHOS_DIR" "$guard" --free-only "$4" "$1" "${guard_cwd:-$MYTHOS_DIR}" 9>&- >>"$WATCH_LOG" 2>&1
+  guard_rc=$?
+  case "$guard_rc" in
+    0) ;;
+    3)
+      ledger_events set "$EVENTS_FILE" "$2" '{"direct":"failed","guide":"這份結果裡有查不到的 commit 或網址，先別當真；改由 Router 轉述"}' >/dev/null
+      mkdir -p "$BRIEF_LINES_DIR"
+      printf '%s\tMythos claim-guard：⚠ %s 結果含查不到的 commit/網址\n' "$(date +%F)" "$1" >> "$BRIEF_LINES_DIR/mythos-claimguard.tsv"
+      log "claim-guard blocked $1, Router 轉述"
+      return 0 ;;
+    *) log "claim-guard fail-open rc=$guard_rc $1" ;;
+  esac
   ledger_events set "$EVENTS_FILE" "$2" '{"direct":"sending"}' >/dev/null || return 0
   if [ "$(deliver_mode)" = hermes ]; then
     # 11-08b dsh 差距 #3：inbox 路徑結果是交 Router 轉述（Router 自己會改成口語），不再先經 brief-answer 改寫一次；直送 TG 才改寫
@@ -255,6 +269,11 @@ direct_send() { # job eid thread 摘要檔 task
   printf '%s\n' "$text" \
     | MYTHOS_DIR="$MYTHOS_DIR" "${NODE_BIN:-node}" "$TG_SEND_BIN" --thread "$3" --job "$1" 9>&- >/dev/null 2>>"$WATCH_LOG"
   rc=${PIPESTATUS[1]}
+  # 先讀摘要快照，再背景記錄；不握 watch 鎖 fd。
+  if [ "$rc" = 0 ]; then
+    claim_text="$(cat "$4")"
+    (printf '%s\n' "$claim_text" | MYTHOS_DIR="$MYTHOS_DIR" "$guard" --observe /dev/stdin "$1" "${guard_cwd:-$MYTHOS_DIR}") 9>&- >>"$WATCH_LOG" 2>&1 &
+  fi
   case "$rc" in
     0) ledger_events set "$EVENTS_FILE" "$2" "{\"direct\":\"sent\",\"acked_at\":$now}" >/dev/null; log "direct sent $2" ;;
     1|97) ledger_events set "$EVENTS_FILE" "$2" '{"direct":"failed"}' >/dev/null; log "direct failed rc=$rc $2" ;;

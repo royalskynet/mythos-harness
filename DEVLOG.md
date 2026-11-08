@@ -3,6 +3,20 @@
 開發紀錄，新的在上面。只記做了什麼、為什麼；不含本機路徑、帳號與內部計畫。
 Development log, newest first. It records what changed and why, without local paths, accounts or internal plans.
 
+## 2026-11-08 — P6h 結果防幻覺 / P6h claim guard
+
+- worker 摘要直發前新增零 LLM 檢查：commit 必須存在於工作 repo 或 Mythos，網址必須出現在該 job 工單、結果細節或工具輸出。worker session 無法唯一對應時，網址只記錄原因。
+- 查不到的 commit／網址改交 Router 轉述，附白話警示與單次告警。guard 故障保留直發並記 log。送出後背景復用 checkClaims，固定本機 cascade 的 laya-only 模式；三秒逾時、503 或錯誤記 undecided，缺程式庫記 unavailable，不影響投遞。
+- ledger 留在忽略的 runtime 目錄，摘要最多二百字。新增離線 git／SQLite／cascade 夾具，涵蓋退路與單次告警，並以移除 header／SHA 驗證的突變確認測試會紅。
+
+- 指定驗收與兩個突變檢查通過。完整回歸新增一項綠燈，四項既有失敗均在原始版本重現，沒有新增失敗；保留既有八個測試檔改動。
+
+- Worker summaries now pass a zero-LLM check before direct delivery: commits must exist in the working repository or Mythos, and URLs must appear in the job prompt, result details or tool output. Ambiguous worker sessions make URL findings observation-only with a recorded reason.
+- Missing commits or unsourced URLs route through the Router with a plain warning and one alert. Guard failures preserve delivery and log the error. After delivery, background checkClaims uses the local cascade with a fixed laya-only header; a three-second timeout, HTTP 503 or errors record undecided, and a missing library records unavailable, without affecting delivery.
+- The ledger stays in ignored runtime storage and keeps at most two hundred summary characters. Offline Git, SQLite and cascade fixtures cover fallback and single alerts; removing the header or SHA verification must fail the tests.
+
+- Required checks and both mutation checks passed. Full regression adds one passing check with no new failures; all four existing failures reproduce on the original version. The eight pre-existing test-file edits remain untouched.
+
 ## 2026-11-08 — P6g 閒聊直接回 / P6g direct small talk
 
 - Router 對閒聊與情緒話用同一個口吻直接回一兩句，不呼叫工具、不派工。判斷原則：回答需要這台機器上的事實才派工，不需要就自己回；要查、要做、問系統／專案現況、要意見或分析仍照舊派工。

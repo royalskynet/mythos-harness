@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""結果免費閘；--free-only 送前，--observe 送後。無旗標時兩層皆跑。"""
+from contextlib import closing
+import json
+import os
+from pathlib import Path
+import re
+import sqlite3
+import subprocess
+import sys
+from urllib.parse import quote
+
+ROOT = Path(__file__).resolve().parent.parent
+MYTHOS = Path(os.environ.get('MYTHOS_DIR', ROOT))
+
+
+def read(path):
+    try:
+        return Path(path).read_text()
+    except (OSError, UnicodeError):
+        return ''
+
+
+def evidence(job):
+    rows = [r.split('\t') for r in read(MYTHOS / 'state/dispatch-jobs.tsv').splitlines()]
+    rows = [r for r in rows if r and r[0] == job and len(r) >= 6]
+    if len(rows) != 1:
+        return '', False, 'job 帳本無唯一對應'
+    row = rows[0]
+    sid = job.removeprefix('bg-')
+    rk = read(MYTHOS / f'state/bg/{sid}.rkey').strip()
+    if rk and not re.fullmatch(r'[A-Za-z0-9_-]+', rk):
+        return '', False, '無效 rkey'
+    result = MYTHOS / f'state/bg/r-{rk}.result' if rk else MYTHOS / f'state/bg/{sid}.result'
+    details = read(result).partition('---細節---')[2]
+    parts = [read(row[2]), details]
+    db = Path(os.environ.get('MYTHOS_WORKER_DB', Path.home() / '.hermes/profiles/mythos-worker/state.db'))
+    # 沙箱不碰正式 worker 庫。
+    if MYTHOS.resolve() != ROOT and 'MYTHOS_WORKER_DB' not in os.environ:
+        return '\n'.join(parts), False, '沙箱未指定 worker 庫'
+    if not rk:
+        return '\n'.join(parts), False, 'job 缺 rkey，無法對應 session'
+    try:
+        with closing(sqlite3.connect('file:' + quote(str(db.resolve())) + '?mode=ro', uri=True, timeout=1)) as con:
+            sessions = con.execute("SELECT DISTINCT session_id FROM messages WHERE role='user' AND INSTR(content,?)>0", (f'r-{rk}.result',)).fetchall()
+            if len(sessions) != 1:
+                return '\n'.join(parts), False, '結果檔無唯一 session 對應'
+            tools = con.execute("SELECT content FROM messages WHERE session_id=? AND role='tool' ORDER BY id", (sessions[0][0],)).fetchall()
+            parts.extend(t[0] or '' for t in tools)
+    except sqlite3.Error as e:
+        return '\n'.join(parts), False, 'worker 庫不可用：' + type(e).__name__
+    return '\n'.join(parts), True, 'job 與 session 唯一對應'
+
+
+def urls(text):
+    return set(u.rstrip('.,;:!?。，；：！？') for u in re.findall(r'https?://[^\s<>\[\]()`"「」『』（）。，；：！？、\u3000]+', text))
+
+
+def free_check(text, cwd, ev, matched):
+    findings = []
+    # ponytail: 獨立 7–40 hex 視為 commit；未來可依語意縮小候選。
+    for sha in sorted(set(re.findall(r'(?<![\w])([a-fA-F0-9]{7,40})(?![\w])', text))):
+        found = False
+        for repo in {str(cwd), str(MYTHOS)}:
+            try:
+                p = subprocess.run(['git', '-C', repo, 'cat-file', '-e', sha + '^{commit}'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+                found = found or p.returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        if not found:
+            findings.append({'kind': 'fabricated_commit', 'value': sha, 'block': True})
+    for url in sorted(urls(text) - urls(ev)):
+        findings.append({'kind': 'unsourced_url', 'value': url, 'block': matched})
+    return findings
+
+
+OBSERVER = r'''
+import {pathToFileURL} from 'node:url';
+import {createRequire} from 'node:module';
+let input=''; for await (const c of process.stdin) input+=c;
+const p=JSON.parse(input);
+try {
+  const {checkClaims}=await import(pathToFileURL(p.lib));
+  const {runVerify}=await import(pathToFileURL(createRequire(p.lib).resolve('jevwire')));
+  const transport={evaluate:async input=>{
+    const res=await fetch(p.url+'/v1/systemone',{
+      method:'POST', headers:{'content-type':'application/json',
+        'x-jev-mode':'laya-only','x-jev-caller':'mythos-claimcheck'},
+      body:JSON.stringify({state:input.state,questions:input.questions}),
+      signal:AbortSignal.timeout(3000)});
+    if (!res.ok) throw Error('cascade '+res.status);
+    const out=await res.json();
+    if (!out.answers || typeof out.answers!=='object') throw Error('invalid answers');
+    return out;
+  }};
+  const result=await checkClaims({text:p.text,evidence:p.evidence,
+    verify:(_,input,cfg)=>runVerify(transport,input,cfg)});
+  console.log(JSON.stringify({status:result.error?'undecided':'recorded',result}));
+} catch(e) {console.log(JSON.stringify({status:'undecided',reason:String(e.message)}));}
+'''
+
+
+def observe(text, ev):
+    lib = os.environ.get('CLAIMCHECK_LIB')
+    if not lib:
+        candidate = Path.home() / 'dev/jev-gate-mcp/plugin/lib/claimcheck.js'
+        lib = str(candidate) if candidate.is_file() else ''
+    if not lib or not Path(lib).is_file():
+        return {'status': 'unavailable', 'reason': '找不到 claimcheck.js'}
+    url = os.environ.get('CLAIMCHECK_CASCADE_URL', 'http://127.0.0.1:8793').rstrip('/')
+    if not re.fullmatch(r'http://127\.0\.0\.1:\d+', url):
+        return {'status': 'unavailable', 'reason': '僅允許本機 cascade'}
+    try:
+        p = subprocess.run([os.environ.get('NODE_BIN', 'node'), '--input-type=module', '-e', OBSERVER], input=json.dumps({'lib': str(Path(lib).resolve()), 'url': url, 'text': text, 'evidence': ev}), text=True, capture_output=True, timeout=3)
+        return json.loads(p.stdout) if p.returncode == 0 else {'status': 'undecided', 'reason': 'observer 執行失敗'}
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return {'status': 'undecided', 'reason': 'observer 錯誤或逾時'}
+
+
+def main():
+    args = sys.argv[1:]
+    mode = args.pop(0) if args and args[0].startswith('--') else ''
+    if mode not in ('', '--free-only', '--observe') or len(args) != 3:
+        print(json.dumps({'error': '用法：claim-guard [--free-only|--observe] 摘要檔 job 工作目錄'}))
+        return 2
+    summary, job, cwd = args
+    if not re.fullmatch(r'[A-Za-z0-9_-]+', job):
+        raise ValueError('無效 job')
+    text = Path(summary).read_text()
+    ev, matched, reason = evidence(job)
+    findings = [] if mode == '--observe' else free_check(text, cwd, ev, matched)
+    laya = {'status': 'deferred'} if mode == '--free-only' else observe(text, ev)
+    out = {'job': job, 'phase': mode or 'combined', 'summary': text[:200], 'evidence_matched': matched, 'evidence_reason': reason, 'findings': findings, 'laya': laya, 'blocked': any(f['block'] for f in findings)}
+    ledger = MYTHOS / 'state/claimcheck/ledger.jsonl'
+    ignored = subprocess.run(['git', '-C', str(MYTHOS), 'check-ignore', '-q', 'state/claimcheck/ledger.jsonl']).returncode == 0
+    tracked = subprocess.run(['git', '-C', str(MYTHOS), 'ls-files', '--error-unmatch', 'state/claimcheck/ledger.jsonl'], capture_output=True).returncode == 0
+    if not ignored or tracked:
+        raise RuntimeError('ledger 必須 ignored 且未追蹤')
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(out, ensure_ascii=False)
+    with ledger.open('a') as f:
+        f.write(line + '\n')
+    print(line)
+    return 3 if out['blocked'] else 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except Exception as e:
+        print(json.dumps({'error': type(e).__name__ + ': ' + str(e)}, ensure_ascii=False))
+        sys.exit(2)

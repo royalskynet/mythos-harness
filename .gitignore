@@ -148,3 +148,6 @@ __pycache__/
 !/bin/lib-hermes-state.py
 !/tests/test-hermes-control-loop.py
 !/tests/test-recall-links.py
+
+!/bin/claim-guard
+!/tests/test-claim-guard.sh
