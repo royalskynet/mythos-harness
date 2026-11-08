@@ -355,6 +355,16 @@ if printf '%s' "$body" | grep -qE '單|派工|工單|未解|未收尾|dcq|帳本
 $ledger"
   fi
 fi
+# 11-08：摘要直發使用者，說話規則直接套 Genie 本體（找法、偏好檔同 Router 外掛 mythos-tools）；找不到或失敗就不附，不擋派工。
+for gd in "${MYTHOS_GENIE_DIR:-}" "$HOME/.claude/plugins/marketplaces/genie-harness" "$HOME/dev/genie-harness"; do
+  [ -n "$gd" ] && [ -f "$gd/router/prefs.py" ] || continue
+  genie="$(GENIE_PREFS="$MYTHOS_DIR/state/genie-prefs.json" python3 "$gd/router/prefs.py" context 2>/dev/null </dev/null 9>&-)"
+  [ -n "$genie" ] && body="$body
+
+【寫「摘要：」段時照這段說話規則（Genie）】
+$genie"
+  break
+done
 args+=("$body")
 "${NODE_BIN:-node}" "$ROOT_DIR/bin/lib-request.mjs" log "$MYTHOS_DIR" queued "$prompt" "" 9>&- || echo "request 紀錄寫入失敗（不擋派工）" >&2
 if [ -n "$hb" ]; then

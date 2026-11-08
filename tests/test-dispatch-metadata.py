@@ -263,6 +263,30 @@ out = tools.mythos_dispatch({"request": "唯讀", "repo": REPO_A, "readonly": Tr
 pl_prompt2 = [l for l in read(ARGV_LOG).splitlines() if l.endswith(".md")][0]
 if json.load(open(pl_prompt2 + ".meta.json", encoding="utf-8")) != {"v": 1, "repo": REPO_A, "readonly": True}:
     fail("plugin 唯讀 meta 不對")
+# 11-08：worker prompt 尾端附 Genie 說話規則（假 prefs.py）；沒設 Genie（沙箱 HOME 也沒裝）就不附
+GD = os.path.join(TMP, "genie")
+os.makedirs(os.path.join(GD, "router"), exist_ok=True)
+with open(os.path.join(GD, "router", "prefs.py"), "w", encoding="utf-8") as f:
+    f.write("import os\nprint('GENIE-FAKE', os.path.basename(os.environ['GENIE_PREFS']))\n")
+
+
+def hermes_body(thread, tag, **extra):
+    argv = os.path.join(TMP, f"argv-{tag}.log")
+    h = stub(f"hermes-{tag}", f'printf "%s" "$*" > "{argv}"\necho ok\n')
+    rc, _, err = run([DISPATCH_BG, thread, write_prompt(tag, f"{tag} 查一下")],
+                     env_for(DISPATCH_BG_HERMES_BIN=h, **extra))
+    end = time.time() + 20
+    while rc == 0 and not read(argv) and time.time() < end:
+        time.sleep(0.1)
+    if rc != 0 or not read(argv):
+        fail(f"{tag} 派不出去 rc={rc} err={err}")
+    return read(argv)
+
+
+if "GENIE-FAKE genie-prefs.json" not in hermes_body("t-genie1", "JOB-G1", MYTHOS_GENIE_DIR=GD):
+    fail("有 Genie 時 worker prompt 應附 prefs 輸出")
+if "Genie" in hermes_body("t-genie2", "JOB-G2"):
+    fail("找不到 Genie 時不應附說話規則段")
 # 收尾：放行所有占用中的 hermes stub
 for tag in ("JOB-MA1", "JOB-MB1", "JOB-MD1", "JOB-MF1", "JOB-MI2"):
     release(tag)
