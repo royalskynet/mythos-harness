@@ -34,7 +34,8 @@ def nested(r):
         print('SKIP nested-sandbox'); return True
     return False
 def jsonlines(p):
-    return [json.loads(l) for l in P(p).read_text().splitlines() if l]
+    # 沒有呼叫就是空清單：防守方（ctx-guard）依情境本來就可能一次都不送鍵（例如 capture 到使用者正在輸入）。
+    return [json.loads(l) for l in P(p).read_text().splitlines() if l] if P(p).exists() else []
 def quick():
     q = ROOT / 'bin/quick'
     (ROOT / 'bin/free-models').write_text('#!/bin/sh\necho fixture/free\n')
