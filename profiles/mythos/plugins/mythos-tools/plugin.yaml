@@ -1,0 +1,6 @@
+name: mythos-tools
+version: 0.2.0
+description: "Mythos 唯讀記憶查詢與 Genie context。"
+author: royalskynet
+provides_tools:
+  - mythos_recall

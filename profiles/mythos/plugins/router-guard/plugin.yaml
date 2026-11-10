@@ -1,0 +1,7 @@
+name: router-guard
+version: 0.1.0
+description: "Router 只放行 delegate_task／mythos_recall／mythos_full_text／Hermes 記憶工具；已登記子代理全放行。零 LLM、零網路。"
+author: royalskynet
+provides_hooks:
+  - subagent_start
+  - pre_tool_call

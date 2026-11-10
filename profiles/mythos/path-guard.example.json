@@ -1,0 +1,20 @@
+{
+  "message": "受保護路徑不可刪除、搬移或覆寫：{path}。確實要動請回報使用者。",
+  "presets": [
+    [
+      ".cache/my-index",
+      true
+    ],
+    [
+      "dev/my-app",
+      true
+    ],
+    [
+      "Library/LaunchAgents/com.example.my-app.plist",
+      false
+    ]
+  ],
+  "launchd": "com\\.example\\.my-app",
+  "plist_glob": "local\\.my-app-[^/\\s'\\\"]*",
+  "avd": "my-avd"
+}

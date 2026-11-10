@@ -1,0 +1,11 @@
+# Mythos 現役架構
+- Hermes gateway：`ai.hermes.gateway-mythos`，由 launchd 管理，異常結束自動重啟。
+- 人格與行為：`profiles/mythos/SOUL.md`。
+- `mythos-tools`：`mythos_recall` 呼叫 `bin/recall`；每回合呼叫 `bin/genie-context`。
+- `router-guard`：前台只聊天、查記憶與派工；子代理執行工具。
+- `path-guard`：誤操作防線，不是安全邊界；受保護清單讀 profile 根目錄 `path-guard.json`（本機，格式見 `path-guard.example.json`）。
+- 派工使用 Hermes 內建 `delegate_task`：追問用 steer／stop／list；router-guard 補 `output_schema`（含多 task）；改 git repo 先 `git worktree add`（AGENTS.md）。
+- 記憶寫入：`memory.provider: claude-mem`；線上 `plugins/claude-mem` symlink 到 `~/.hermes/plugins/claude-mem`；每輪注入由 gateway plist 的 `CLAUDE_MEM_HERMES_TURN_LIMIT=1`、`TURN_MAX=300` 壓低（重裝 gateway 會洗掉，要補回）。
+- 本機輔助腳本與營運筆記不進 repo：腳本放 `bin/`（gitignore），筆記放 `CLAUDE.local.md`。
+- 線上 profile：`~/.hermes/profiles/mythos`，保留其本機設定。repo 的 `AGENTS.md`、`SOUL.md` 是通用範本；線上版含個人與設備細節，部署不覆蓋（公開 repo 只放通用架構）。
+- 驗收：tests/ 與 `profiles/mythos/plugins/*/test_*`；隔離 profile 停用 Telegram。

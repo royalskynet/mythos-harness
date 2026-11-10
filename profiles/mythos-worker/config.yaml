@@ -1,0 +1,50 @@
+model:
+  default: deepseek-v4.1-flash
+  provider: opencode-go
+  base_url: https://opencode.ai/zen/go/v1
+  api_mode: chat_completions
+# Top level, NOT under `model:`（照抄 mythos；get_fallback_chain() 只讀頂層）。
+fallback_providers:
+  # 退路順序（11-08 使用者定）：先 Go 訂閱付費的 glm-5.3-flash，再 Go 免費的 beam-free
+  - provider: opencode-go
+    model: glm-5.3-flash
+  - provider: opencode-go
+    model: beam-free
+# worker 無人值守（fix 11812）：危險命令一律放行；-z 單次與 webhook 也放行。
+approvals:
+  mode: false
+  timeout: 60
+  cron_mode: approve
+  single_query_mode: approve
+  unattended_mode: approve
+# fixindex 0398：長任務要有 checkpoint 才收得了口。
+checkpoints:
+  enabled: true
+  max_snapshots: 3
+_config_version: 53
+memory:
+  memory_enabled: true
+  user_profile_enabled: true
+  memory_char_limit: 2200
+  user_char_limit: 1375
+  provider: claude-mem
+mcp_servers:
+  claude-mem:
+    command: /opt/homebrew/bin/node
+    args:
+      - ${HOME}/.claude/plugins/marketplaces/thedotmack/plugin/scripts/mcp-server.cjs
+    timeout: 30
+logging:
+  level: DEBUG
+auxiliary:
+  background_review:
+    # oneshot 一結束就殺掉背景 review（hermes-agent #126417，未修），開著只白打一次 API；記憶改由 claude-mem provider 逐步記
+    enabled: false
+providers:
+  opencode-go:
+    models:
+      deepseek-v4.1-flash:
+        # 首回兩次卡約150s（11-08 01:36、02:21），判斷是 opencode-go 個別請求卡住（Codex 報告 /tmp/codex-150s/out/REPORT.md、opencode #57270）；
+        # 90 秒沒進展就重試。樣本正常首回最長 55s。代價：健康但沉默超過 90s 的長思考會被重送
+        timeout_seconds: 90
+        stale_timeout_seconds: 90

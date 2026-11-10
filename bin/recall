@@ -1,0 +1,425 @@
+#!/usr/bin/env python3
+"""記憶快查（11-07 使用者定）：Router 自己查主 session 記憶、自己答，不派 dispatcher、不叫 LLM。
+用法：bin/recall '<關鍵字>'   一次查三處，各回索引
+      bin/recall --obs <id>    展開 claude-mem 一筆
+      bin/recall --fix <id>    展開 fixindex 一筆
+      bin/recall --id <id> [--revision N]   以 ID 查一件事（P3）：印 JSON {id,kind,summary,related_ids,revision,continuation}。
+                                            <id>＝thread 代號 t-…（預設最新一版）、任務 bg-…、或 Telegram 訊息號；只認帳本／對照表裡有的
+      bin/recall --expand <id> [--offset N] [--part request|result] [--revision N]
+                                            按 ID 分段讀長文（每段 1500 字）；continuation 給下一段 {expand,part,offset}，讀完為 null。
+                                            --part：request＝需求檔、result＝結果或全文（預設）。只收 ID，不收路徑。
+- ID 含 / 或 .. 、或不在帳本與對照表的一律拒絕（exit 2／1）。結果檔＝state/bg/<sid>.result，全文＝state/tg-full/<mid>.txt（MYTHOS_DIR 可覆寫根目錄）。
+- claude-mem：只打 worker 的 HTTP GET /api/search、/api/observation/<id>（唯讀）；不載 plugin，Mythos 對話不寫進 claude-mem。
+  紀錄多是英文標題：中文詞組沒命中就逐詞再查。
+- fixindex find --spill；主 session memory 目錄（MEMORY.md、feedback/project/reference、state/）逐行比對。
+- 全程本機，不出機，所以不過 PII 閘。
+- 三個來源都是選用：沒裝／沒開的自動略過；RECALL_SOURCES=mem,fix,md 挑要用哪幾個（預設全部）。
+exit：0 有結果｜1 都查不到｜2 用法｜6 沒有任何可用來源（呼叫端改用 delegate_task）
+"""
+import json, os, re, shutil, subprocess, sys, urllib.parse, urllib.request
+
+MEM_URL = os.environ.get("RECALL_MEM_URL") or "http://127.0.0.1:37701"
+FIXINDEX = os.environ.get("RECALL_FIXINDEX") or shutil.which("fixindex") or os.path.expanduser("~/.local/bin/fixindex")
+FIX_DIR = os.environ.get("RECALL_FIX_DIR") or os.path.expanduser("~/dev/fix-store/fixes")
+# 主 session（cwd＝家目錄）的 Claude Code auto-memory：~/.claude/projects/<家目錄路徑 / . 換成 ->/memory
+MEM_DIR = os.environ.get("RECALL_MEM_DIR") or os.path.join(
+    os.path.expanduser("~/.claude/projects"), re.sub(r"[/.]", "-", os.path.expanduser("~")), "memory")
+SOURCES = [x.strip() for x in (os.environ.get("RECALL_SOURCES") or "mem,fix,md").split(",") if x.strip()]
+LIMIT = 5
+
+
+def get(path):
+    try:
+        with urllib.request.urlopen(MEM_URL + path, timeout=8) as r:
+            return json.load(r)
+    except Exception as e:
+        return {"_err": str(e)}
+
+
+def available():
+    ok = []
+    if "mem" in SOURCES and get("/api/health").get("status") == "ok":
+        ok.append("mem")
+    if "fix" in SOURCES and os.access(FIXINDEX, os.X_OK) and os.path.isdir(FIX_DIR):
+        ok.append("fix")
+    if "md" in SOURCES and os.path.isdir(MEM_DIR):
+        ok.append("md")
+    return ok
+
+
+def mem_search(q):
+    terms = [q] + ([t for t in q.split() if len(t) > 1] if " " in q.strip() else [])
+    seen, rows, err = set(), [], None
+    for t in terms:
+        d = get(f"/api/search?format=json&limit={LIMIT}&query={urllib.parse.quote(t)}")
+        err = err or d.get("_err")
+        for o in d.get("observations") or []:
+            if o.get("id") not in seen:
+                seen.add(o.get("id"))
+                rows.append(f"  #{o.get('id')} {str(o.get('created_at', ''))[:10]} {o.get('title', '')}")
+        if rows:
+            break
+    return rows[:LIMIT], err
+
+
+def fix_search(q):
+    try:
+        out = subprocess.run([FIXINDEX, "find", q, "--spill", "--limit", "20"], capture_output=True, text=True, timeout=30).stdout
+    except Exception as e:
+        return [f"  （fixindex 失敗：{e}）"]
+    # find 是語意排序、分數正規化，亂打也回滿 → 只留內文真的含全部關鍵字的條目
+    terms = [t.lower() for t in q.split() if t]
+    rows = []
+    for l in out.splitlines():
+        m = re.match(r"\s+\d+#\d+\s+\[\w+\]\s+(\S+\.md)", l)
+        if not m:
+            continue
+        try:
+            body = open(os.path.join(FIX_DIR, m.group(1)), encoding="utf-8", errors="replace").read().lower()
+        except OSError:
+            continue
+        if all(t in body for t in terms):
+            rows.append(l.rstrip()[:200])
+    return rows[:LIMIT]
+
+
+def memdir_search(q):
+    terms = [t.lower() for t in q.split() if t]
+    rows = []
+    for root, _, files in os.walk(MEM_DIR):
+        for f in sorted(files):
+            if not f.endswith(".md"):
+                continue
+            p = os.path.join(root, f)
+            try:
+                lines = open(p, encoding="utf-8", errors="replace").read().splitlines()
+            except OSError:
+                continue
+            hits = [l.strip() for l in lines if all(t in l.lower() for t in terms)]
+            if hits:
+                rows.append(f"  {os.path.relpath(p, MEM_DIR)}：{hits[0][:160]}")
+    return rows[:LIMIT * 2]
+
+
+# ---- P3 可展開脈絡：以 ID 串 帳本（dispatch-jobs.tsv）與對照表（tg-msg-thread.tsv），不拿截斷索引當全文 ----
+MYTHOS = os.environ.get("MYTHOS_DIR") or os.path.expanduser("~/bots/mythos")
+STATE = os.path.join(MYTHOS, "state")
+ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")  # 只收這些字元：沒有 / 也沒有 .，路徑無從組出
+EXPAND_CHUNK = 1500  # ponytail: 每段字數。1500 字（JSON 跳脫後仍遠低於 mythos_recall 的 4000 字上限）；要更長就調上限或改分次送
+SUMMARY_CHARS = 300  # ponytail: 摘要字數，超過截斷；完整內容用 --expand
+RELATED_CAP = 50  # ponytail: 關聯 ID 上限（thread 很多 job 時）；超過截斷。升級＝關聯改分頁列出
+
+
+class Refuse(Exception):
+    """ID 不合規（含路徑）或用法錯：exit 2。"""
+
+
+class Missing(Exception):
+    """查不到／沒有那一版／沒有可展開的檔：exit 1。"""
+
+
+def _bad_id(s):
+    return not isinstance(s, str) or ".." in s or "/" in s or not ID_RE.fullmatch(s)
+
+
+def _check(s):
+    if _bad_id(s):
+        raise Refuse(f"ID 不合規（只收帳本或對照表裡的 t-／bg-／訊息號，不收路徑）：{str(s)[:40]}")
+
+
+def _tsv(name):
+    try:
+        with open(os.path.join(STATE, name), encoding="utf-8", errors="replace") as f:
+            return [l.rstrip("\n").split("\t") for l in f if l.strip()]
+    except OSError:
+        return []
+
+
+def _graph():
+    """帳本＋對照表 → (jobs, order, mids)。jobs：id→列；order：thread→依檔案順序的 job（＝revision 順序，帳本只追加）；
+    mids：[{mid, thread, job}]。不合規的 ID 欄直接當沒有（不進關聯、不能被查）。"""
+    jobs, order, mids = {}, {}, []
+    for r in _tsv("dispatch-jobs.tsv"):
+        if len(r) < 8 or _bad_id(r[0]) or r[0] in jobs:
+            continue
+        th = "" if _bad_id(r[6]) else r[6]
+        jobs[r[0]] = {"id": r[0], "prompt": r[2], "status": r[4], "thread": th}
+        if th:
+            order.setdefault(th, []).append(r[0])
+    for r in _tsv("tg-msg-thread.tsv"):
+        if len(r) < 4 or not r[1].isdigit() or _bad_id(r[1]):
+            continue
+        mids.append({"mid": r[1], "thread": "" if _bad_id(r[2]) else r[2], "job": "" if _bad_id(r[3]) else r[3]})
+    return jobs, order, mids
+
+
+def _related(start, jobs, order, mids):
+    """帳本與對照表當無向圖做 BFS，visited 擋循環，RELATED_CAP 封頂。start＝(kind, id)，回關聯 ID（不含起點）。"""
+    by_mid = {m["mid"]: m for m in mids}  # 同 mid 多列（不同 chat）取最後一列
+
+    def nb(node):
+        k, v = node
+        if k == "t":
+            return [("j", j) for j in order.get(v, [])] + [("m", m["mid"]) for m in mids if m["thread"] == v]
+        if k == "j":
+            return ([("t", jobs[v]["thread"])] if jobs[v]["thread"] else []) + \
+                   [("m", m["mid"]) for m in mids if m["job"] == v]
+        m = by_mid.get(v)
+        if not m:
+            return []
+        return ([("t", m["thread"])] if m["thread"] in order else []) + ([("j", m["job"])] if m["job"] in jobs else [])
+
+    seen, q, res = {start}, [start], []
+    while q and len(res) < RELATED_CAP:
+        cur = q.pop(0)
+        for n in nb(cur):
+            if n not in seen:
+                seen.add(n)
+                res.append(n[1])
+                q.append(n)
+    return res[:RELATED_CAP]
+
+
+def _resolve(ident, revision=None):
+    """ID → 目標 dict（kind、thread、job、mid、revision、revisions、row、related、expand_id）。
+    thread 取指定版（預設最新）；job 取自己那版；訊息號取對照到的 job。查不到／沒有那一版 raise Missing。"""
+    _check(ident)
+    jobs, order, mids = _graph()
+    if ident in order:
+        kind, revs = "thread", order[ident]
+        if revision is None:
+            revision = len(revs)
+        if not 1 <= revision <= len(revs):
+            raise Missing(f"{ident} 沒有第 {revision} 版（共 {len(revs)} 版）")
+        job, thread, mid = revs[revision - 1], ident, None
+    elif ident in jobs:
+        kind, job, thread, mid = "job", ident, jobs[ident]["thread"], None
+    else:
+        m = next((x for x in mids if x["mid"] == ident), None)
+        if m is None:
+            raise Missing(f"查不到 {ident}（不在帳本，也不在 tg-msg-thread.tsv）")
+        kind, mid = "message", ident
+        job = m["job"] if m["job"] in jobs else ""
+        thread = m["thread"] if m["thread"] in order else ""
+    revs = order.get(thread, []) if thread else []
+    return {
+        "kind": kind, "thread": thread or None, "job": job or None, "mid": mid,
+        "revision": (revs.index(job) + 1) if job in revs else None, "revisions": len(revs),
+        "row": jobs.get(job) if job else None,
+        "related": _related((kind[0], ident), jobs, order, mids),
+        # 展開的 ID：訊息號展開 tg-full；其餘展開任務（bg 結果或需求）
+        "expand_id": mid if kind == "message" else job,
+    }
+
+
+def _read(p):
+    with open(p, encoding="utf-8", errors="replace") as f:
+        return f.read()
+
+
+def _nonempty(p):
+    return os.path.isfile(p) and os.path.getsize(p) > 0
+
+
+def _result_path(job):
+    """bg 任務的結果檔：讀取封存結果（<sid>.result 有內容就用；否則 rkey 指向的 r-<rk>.result）。"""
+    if not job or not job.startswith("bg-") or len(job) <= 3:
+        return None
+    sid = job[3:]
+    base = os.path.join(STATE, "bg")
+    f = os.path.join(base, f"{sid}.result")
+    if _nonempty(f):
+        return f
+    try:
+        k = _read(os.path.join(base, f"{sid}.rkey")).strip()
+    except OSError:
+        k = ""
+    if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", k) and ".." not in k and _nonempty(os.path.join(base, f"r-{k}.result")):
+        return os.path.join(base, f"r-{k}.result")
+    return f
+
+
+def _doc(t, part):
+    """目標 → 要讀的檔（沒有就 None）。message＝tg-full/<mid>.txt；其餘 request＝帳本的需求檔、result＝結果檔。"""
+    if t["kind"] == "message":
+        p = os.path.join(STATE, "tg-full", f"{t['mid']}.txt") if part == "result" else None
+        return p if p and os.path.isfile(p) else None
+    if part == "request":
+        p = t["row"]["prompt"] if t["row"] else ""
+        return p if p and os.path.isfile(p) else None
+    p = _result_path(t["job"])
+    return p if p and _nonempty(p) else None
+
+
+def _head(s, n):
+    s = " ".join(s.split())
+    return s if len(s) <= n else s[:n] + "…"
+
+
+def _summary(t):
+    if t["kind"] == "message" and not t["row"]:
+        p = _doc(t, "result")
+        return _head(_read(p), SUMMARY_CHARS) if p else "（訊息沒有對應的工作，也沒有全文檔）"
+    row = t["row"]
+    rp = row["prompt"]
+    req = _head(_read(rp), 120) if os.path.isfile(rp) else "（需求檔不存在）"
+    rf = _doc(t, "result")
+    if rf:
+        body = _read(rf)
+        m = re.search(r"^摘要[:：][ \t]*(.*?)(?=^---細節---|\Z)", body, re.M | re.S)
+        res = _head(m.group(1) if m else body, SUMMARY_CHARS)
+    else:
+        res = f"（尚無結果，狀態 {row['status']}）"
+    return f"需求：{req}｜結果：{res}"
+
+
+def _id_query(ident, revision):
+    t = _resolve(ident, revision)
+    out = {"id": ident, "kind": t["kind"], "thread": t["thread"], "job": t["job"], "mid": t["mid"],
+           "revision": t["revision"], "revisions": t["revisions"],
+           "status": t["row"]["status"] if t["row"] else None,
+           "summary": _summary(t), "related_ids": t["related"],
+           "continuation": {"expand": t["expand_id"], "part": "result", "offset": 0} if _doc(t, "result") else None}
+    return json.dumps(out, ensure_ascii=False, indent=2)
+
+
+def _expand(ident, offset, part, revision):
+    t = _resolve(ident, revision)
+    p = _doc(t, part)
+    if p is None:
+        what = "需求檔" if part == "request" else "結果或全文"
+        raise Missing(f"{ident} 沒有可展開的{what}（尚未產生，或短回覆沒有全文檔）")
+    text = _read(p)
+    nxt = offset + EXPAND_CHUNK
+    out = {"id": ident, "kind": t["kind"], "job": t["job"], "revision": t["revision"], "part": part,
+           "offset": offset, "total": len(text), "text": text[offset:nxt],
+           "continuation": {"expand": t["expand_id"], "part": part, "offset": nxt} if nxt < len(text) else None}
+    return json.dumps(out, ensure_ascii=False)
+
+
+def _nat(s, lo, what):
+    if s is None:
+        return None
+    if not s.isdigit() or int(s) < lo:
+        raise Refuse(f"{what} 要是 ≥{lo} 的整數：{s[:20]}")
+    return int(s)
+
+
+def links_main(argv):
+    opt = {"--id": None, "--expand": None, "--offset": None, "--revision": None, "--part": "result"}
+    i = 0
+    while i < len(argv):
+        if argv[i] not in opt or i + 1 >= len(argv):
+            print(__doc__, file=sys.stderr)
+            return 2
+        opt[argv[i]] = argv[i + 1]
+        i += 2
+    if (opt["--id"] is None) == (opt["--expand"] is None):
+        print(__doc__, file=sys.stderr)
+        return 2
+    try:
+        rev = _nat(opt["--revision"], 1, "--revision")
+        if opt["--id"] is not None:
+            if opt["--offset"] is not None or opt["--part"] != "result":
+                raise Refuse("--offset／--part 只給 --expand 用")
+            print(_id_query(opt["--id"], rev))
+            return 0
+        if opt["--part"] not in ("request", "result"):
+            raise Refuse("--part 只認 request 或 result")
+        off = _nat(opt["--offset"], 0, "--offset") or 0
+        print(_expand(opt["--expand"], off, opt["--part"], rev))
+        return 0
+    except Refuse as e:
+        print(f"recall: {e}", file=sys.stderr)
+        return 2
+    except Missing as e:
+        print(f"recall: {e}", file=sys.stderr)
+        return 1
+
+
+def main(argv):
+    if argv and argv[0] in ("--id", "--expand"):  # P3：ID 查詢不走三來源，不打 claude-mem 健康檢查
+        return links_main(argv)
+    ok = available()
+    if len(argv) == 2 and argv[0] in ("--obs", "--fix") and argv[1].isdigit() and \
+            {"--obs": "mem", "--fix": "fix"}[argv[0]] not in ok:
+        print(f"{argv[0][2:]} 來源沒裝或沒開，改用 delegate_task", file=sys.stderr)
+        return 6
+    if len(argv) == 2 and argv[0] == "--obs" and argv[1].isdigit():
+        d = get(f"/api/observation/{argv[1]}")
+        if d.get("_err") or not d.get("id"):
+            print(f"claude-mem 查不到 #{argv[1]}：{d.get('_err', '')}")
+            return 1
+        facts = d.get("facts")
+        facts = json.loads(facts) if isinstance(facts, str) and facts.startswith("[") else facts or []
+        print(f"#{d['id']} {str(d.get('created_at', ''))[:10]} [{d.get('project')}] {d.get('title')}\n{d.get('narrative') or d.get('text') or ''}")
+        for x in facts[:8]:
+            print(f"- {x}")
+        return 0
+    if len(argv) == 2 and argv[0] == "--fix" and argv[1].isdigit():
+        r = subprocess.run([FIXINDEX, "show", argv[1]], capture_output=True, text=True, timeout=30)
+        print(r.stdout[:3000] or f"fixindex 查不到 {argv[1]}")
+        return 0 if r.stdout else 1
+    q = " ".join(argv).strip()
+    if not q or q.startswith("-"):
+        print(__doc__, file=sys.stderr)
+        return 2
+    if not ok:
+        print(f"沒有可用的記憶來源（RECALL_SOURCES={','.join(SOURCES)}；claude-mem worker／fixindex／{MEM_DIR} 都不在），改用 delegate_task", file=sys.stderr)
+        return 6
+    mem = fix = md = []
+    if "mem" in ok:
+        mem, err = mem_search(q)
+        print(f"## claude-mem（展開：bin/recall --obs <id>）" + (f"｜連線失敗：{err}" if err and not mem else ""))
+        print("\n".join(mem) or "  （無）")
+    if "fix" in ok:
+        fix = fix_search(q)
+        print("## fixindex（展開：bin/recall --fix <id>）")
+        print("\n".join(fix) or "  （無）")
+    if "md" in ok:
+        md = memdir_search(q)
+        print(f"## memory 目錄 {MEM_DIR}")
+        print("\n".join(md) or "  （無）")
+    skipped = [x for x in SOURCES if x not in ok]
+    if skipped:
+        print(f"（略過，沒裝或沒開：{','.join(skipped)}）")
+    return 0 if (mem or fix or md) else 1
+
+
+def selftest():
+    global MEM_URL, MEM_DIR
+    import tempfile
+    d = tempfile.mkdtemp()
+    open(os.path.join(d, "a.md"), "w").write("x\n訂閱＝花錢 Go 月費\n")
+    MEM_DIR, MEM_URL = d, "http://127.0.0.1:1"
+    assert memdir_search("訂閱 月費") == ["  a.md：訂閱＝花錢 Go 月費"], memdir_search("訂閱 月費")
+    assert memdir_search("訂閱 不存在") == []
+    rows, err = mem_search("x y")
+    assert rows == [] and err, (rows, err)
+    global FIXINDEX, FIX_DIR
+    open(os.path.join(d, "11.md"), "w").write("加輪 授權")
+    open(os.path.join(d, "fake"), "w").write("#!/bin/sh\necho '  11#1  [U] 11.md  t'\necho '  12#1  [U] 12.md  t'\n")
+    os.chmod(os.path.join(d, "fake"), 0o755)
+    FIXINDEX, FIX_DIR = os.path.join(d, "fake"), d
+    assert fix_search("加輪") == ["  11#1  [U] 11.md  t"], fix_search("加輪")
+    assert fix_search("不存在") == []
+    assert main([]) == 2 and main(["--obs", "abc"]) == 2
+    # 選用來源：claude-mem 不通（MEM_URL 指向 :1）→ 只用其餘；全部不在 → 6
+    global SOURCES
+    assert available() == ["fix", "md"], available()
+    assert main(["--obs", "1"]) == 6
+    assert main(["加輪"]) == 0
+    MEM_DIR, FIXINDEX = os.path.join(d, "nope"), os.path.join(d, "nope")
+    assert available() == [] and main(["加輪"]) == 6
+    SOURCES = ["md"]
+    MEM_DIR = d
+    assert available() == ["md"] and main(["加輪"]) == 0 and main(["不存在"]) == 1
+    assert main(["--ask", "removed"]) == 2
+    print("selftest ok")
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["--selftest"]:
+        selftest()
+    else:
+        sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,6 @@
+name: path-guard
+version: 0.1.0
+description: "受保護路徑（清單在本機 path-guard.json）：擋刪除、搬移、覆蓋（terminal／execute_code／write_file／patch，含子代理）。零 LLM、零網路。"
+author: royalskynet
+provides_hooks:
+  - pre_tool_call

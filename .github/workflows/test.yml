@@ -1,0 +1,18 @@
+name: test
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: macos-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: command -v timeout || command -v gtimeout || brew install coreutils
+      - run: python3 bin/recall --selftest
+      - run: python3 tests/test-genie-context.py
+      - run: python3 tests/test-recall-links.py
+      - run: python3 tests/test-claude-mem-local-patch.py
+      - run: bash tests/test-plugin-bin-exec.sh
+      - run: python3 profiles/mythos/plugins/mythos-tools/test_recall.py
+      - run: python3 profiles/mythos/plugins/router-guard/test_guard.py
