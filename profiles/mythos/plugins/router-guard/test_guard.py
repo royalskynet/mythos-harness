@@ -8,13 +8,13 @@ os.environ["MYTHOS_ROUTER_GUARD_LOG"] = os.path.join(tempfile.mkdtemp(), "guard.
 # 假的難度判定與規劃人：goal 含 HARD 判 hard，其餘照內容印（不打模型）。
 _fake = tempfile.mkdtemp()
 os.makedirs(os.path.join(_fake, "bin"))
-for _name, _body in (("triage", 'grep -q HARD "$1" && echo hard || { grep -q BROKEN "$1" && exit 9; echo easy; }'),
+for _name, _body in (("triage", 'grep -q SLOW "$1" && sleep 2; grep -q HARD "$1" && echo hard || { grep -q BROKEN "$1" && exit 9; echo easy; }'),
                      ("bin/plan-hard", "echo plan")):
     with open(os.path.join(_fake, _name), "w") as _f:
         _f.write("#!/bin/sh\n" + _body + "\n")
     os.chmod(os.path.join(_fake, _name), 0o755)
 os.environ.update(MYTHOS_HOME=_fake, MYTHOS_TRIAGE_BIN=os.path.join(_fake, "triage"),
-                  MYTHOS_TIER_LOG=os.path.join(_fake, "tier.log"))
+                  MYTHOS_TIER_LOG=os.path.join(_fake, "tier.log"), MYTHOS_DISPATCH_LOG=os.path.join(_fake, "dispatch.log"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import __init__ as guard  # noqa: E402
 
@@ -76,9 +76,27 @@ start(child_session_id="easy-1", child_goal="查天氣")
 start(child_session_id="broken-1", child_goal="BROKEN")
 for sid in ("easy-1", "broken-1"):
     assert pre(tool_name="terminal", args={"command": "ls"}, session_id=sid) is None, sid
-tiers = [l.split("\t")[1] for l in open(guard.TIER_LOG).read().splitlines()]
-assert tiers[-3:] == ["hard", "easy", "mid"], tiers
+tiers = {l.split("\t")[2]: l.split("\t")[1] for l in open(guard.TIER_LOG).read().splitlines()}
+assert (tiers["hard-1"], tiers["easy-1"], tiers["broken-1"]) == ("hard", "easy", "mid"), tiers
 os.chmod(guard.PLAN_BIN, 0o644)  # 沒有規劃人：hard 也不擋
 start(child_session_id="hard-2", child_goal="HARD 沒規劃人")
 assert pre(tool_name="terminal", args={"command": "ls"}, session_id="hard-2") is None
+# 分級不占 Router：subagent_start 立刻返回（triage 慢 2 秒也一樣），子代理第一次動工具時才等結果。
+import time  # noqa: E402
+os.chmod(guard.PLAN_BIN, 0o755)
+t0 = time.time()
+start(child_session_id="slow-1", child_goal="SLOW HARD 大重構")
+start(child_session_id="slow-2", child_goal="SLOW 查東西")
+assert time.time() - t0 < 0.5, f"subagent_start 卡住 Router {time.time() - t0:.1f}s"
+assert pre(tool_name="write_file", session_id="slow-1")["action"] == "block"
+assert pre(tool_name="write_file", session_id="slow-2") is None
+assert time.time() - t0 < 3.5, "兩個分級應平行跑"
+# 派工帳：Router 的 delegate_task 耗時、子代理起訖；子代理結束後清掉狀態。
+ctx.hooks["post_tool_call"](tool_name="delegate_task", duration_ms=42, session_id="router-1")
+ctx.hooks["post_tool_call"](tool_name="terminal", duration_ms=9, session_id="slow-2")
+ctx.hooks["subagent_stop"](child_session_id="slow-1", child_status="completed", duration_ms=1234)
+assert pre(tool_name="write_file", session_id="slow-1")["message"].startswith("Router 不動手")
+rows = [l.split("\t")[1:] for l in open(guard.DISPATCH_LOG).read().splitlines()]
+assert ["dispatch", "router-1", "42"] in rows and ["stop", "slow-1", "completed", "1234"] in rows, rows
+assert ["start", "slow-2"] in rows and not any(r[0] == "dispatch" and r[1] == "slow-2" for r in rows), rows
 print("ROUTER_GUARD_OK")

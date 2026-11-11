@@ -6,6 +6,7 @@ import os
 import subprocess
 import tempfile
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Dict, Optional
 
 LOG = os.environ.get("MYTHOS_ROUTER_GUARD_LOG", os.path.expanduser("~/bots/mythos/state/router-guard.log"))
@@ -36,6 +37,20 @@ TIER_LOG = os.environ.get("MYTHOS_TIER_LOG", os.path.join(MYTHOS, "state", "rout
 PLAN_MESSAGE = (f"這是 hard 任務：先用 terminal 跑 `{PLAN_BIN} '<任務原話＋需要的前文>'`（timeout 給 200 秒）拿計畫，"
                 "照計畫做。規劃人失敗就照實回報 failed，不自己編計畫。")
 PLAN_PENDING: set[str] = set()
+# 分級在背景執行緒跑：subagent_start 是在 Router 的回合裡呼叫的，不能讓它等 triage；子代理第一次動工具時才取結果。
+TIERS: Dict[str, Future] = {}
+_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="router-guard-tier")
+# 派工帳：dispatch＝Router 那次 delegate_task 花的毫秒（應是幾十毫秒，上千就是被卡住）；start／stop＝子代理起訖。
+DISPATCH_LOG = os.environ.get("MYTHOS_DISPATCH_LOG", os.path.join(MYTHOS, "state", "dispatch.log"))
+
+
+def _log(path: str, *cols: Any) -> None:
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("\t".join(str(c) for c in (int(time.time()), *cols)) + "\n")
+    except OSError:
+        pass
 
 
 def tier_of(goal: str) -> str:
@@ -52,19 +67,32 @@ def tier_of(goal: str) -> str:
     return out if out in ("easy", "mid", "hard") else "mid"
 
 
+def _classify(child_session_id: str, goal: str) -> str:
+    tier = tier_of(goal)
+    _log(TIER_LOG, tier, child_session_id)
+    return tier
+
+
 def _on_subagent_start(child_session_id: str = "", child_goal: str = "", **_: Any) -> None:
     if not child_session_id:
         return
     CHILD_SESSIONS.add(child_session_id)
-    tier = tier_of(child_goal)
-    if tier == "hard" and os.access(PLAN_BIN, os.X_OK):  # 沒有規劃人就不擋，照 mid 走
-        PLAN_PENDING.add(child_session_id)
-    try:
-        os.makedirs(os.path.dirname(TIER_LOG), exist_ok=True)
-        with open(TIER_LOG, "a", encoding="utf-8") as f:
-            f.write(f"{int(time.time())}\t{tier}\t{child_session_id}\n")
-    except OSError:
-        pass
+    TIERS[child_session_id] = _POOL.submit(_classify, child_session_id, child_goal)
+    _log(DISPATCH_LOG, "start", child_session_id)
+
+
+def _on_subagent_stop(child_session_id: str = "", child_status: Any = "", duration_ms: int = 0, **_: Any) -> None:
+    if not child_session_id:
+        return
+    for bag in (CHILD_SESSIONS, PLAN_PENDING):
+        bag.discard(child_session_id)
+    TIERS.pop(child_session_id, None)
+    _log(DISPATCH_LOG, "stop", child_session_id, child_status, duration_ms)
+
+
+def _on_post_tool_call(tool_name: str = "", duration_ms: int = 0, session_id: Any = "", **_: Any) -> None:
+    if tool_name == "delegate_task" and session_id not in CHILD_SESSIONS:
+        _log(DISPATCH_LOG, "dispatch", session_id or "", duration_ms)
 
 
 def check(tool_name: str) -> bool:
@@ -72,6 +100,14 @@ def check(tool_name: str) -> bool:
 
 
 def _on_pre_tool_call(tool_name: str = "", args: Optional[Dict[str, Any]] = None, session_id: str = "", **_: Any) -> Optional[dict]:
+    pending = TIERS.pop(session_id, None)
+    if pending is not None:  # 子代理第一次動工具：取分級結果（在子代理自己的執行緒等，不占 Router）
+        try:
+            tier = pending.result(timeout=15)
+        except Exception:
+            tier = "mid"
+        if tier == "hard" and os.access(PLAN_BIN, os.X_OK):  # 沒有規劃人就不擋，照 mid 走
+            PLAN_PENDING.add(session_id)
     if session_id in PLAN_PENDING:  # hard 子代理：跑過 plan-hard 才放行其他工具
         if tool_name == "terminal" and "plan-hard" in str((args or {}).get("command", "")):
             PLAN_PENDING.discard(session_id)
@@ -90,15 +126,12 @@ def _on_pre_tool_call(tool_name: str = "", args: Optional[Dict[str, Any]] = None
         return {"action": "modify", "args": new_args}
     if check(tool_name):
         return None
-    try:
-        os.makedirs(os.path.dirname(LOG), exist_ok=True)
-        with open(LOG, "a", encoding="utf-8") as f:
-            f.write(f"{int(time.time())}\t{tool_name}\n")
-    except OSError:
-        pass  # 記帳失敗也要擋
+    _log(LOG, tool_name)  # 記帳失敗也要擋
     return {"action": "block", "message": MESSAGE}
 
 
 def register(ctx) -> None:
     ctx.register_hook("subagent_start", _on_subagent_start)
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
+    ctx.register_hook("subagent_stop", _on_subagent_stop)
+    ctx.register_hook("post_tool_call", _on_post_tool_call)
