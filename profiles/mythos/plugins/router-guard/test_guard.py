@@ -99,4 +99,21 @@ assert pre(tool_name="write_file", session_id="slow-1")["message"].startswith("R
 rows = [l.split("\t")[1:] for l in open(guard.DISPATCH_LOG).read().splitlines()]
 assert ["dispatch", "router-1", "42"] in rows and ["stop", "slow-1", "completed", "1234"] in rows, rows
 assert ["start", "slow-2"] in rows and not any(r[0] == "dispatch" and r[1] == "slow-2" for r in rows), rows
+# 任務狀態：以 Router session 分帳，多件逐件列；做完的移到「剛做完」；子代理與沒任務的 session 不注入。
+llm = ctx.hooks["pre_llm_call"]
+assert llm(session_id="chat-A") is None and llm(session_id="") is None
+start(child_session_id="t1", child_goal="查 A 頻道\n出片節奏", parent_session_id="chat-A")
+start(child_session_id="t2", child_goal="跑 B 測試", parent_session_id="chat-A")
+start(child_session_id="t3", child_goal="別的聊天室的事", parent_session_id="chat-B")
+c = llm(session_id="chat-A")["context"]
+assert "進行中 2 件" in c and "1. 查 A 頻道 出片節奏（已跑" in c and "2. 跑 B 測試" in c and "別的聊天室" not in c, c
+assert llm(session_id="t1") is None, "子代理不注入"
+ctx.hooks["subagent_stop"](child_session_id="t1", child_status="completed", duration_ms=5)
+c = llm(session_id="chat-A")["context"]
+assert "進行中 1 件" in c and "1. 跑 B 測試（已跑" in c and "剛做完" in c and "查 A 頻道 出片節奏（0 秒前，完成）" in c, c
+ctx.hooks["subagent_stop"](child_session_id="t2", child_status="failed", duration_ms=5)
+c = llm(session_id="chat-A")["context"]
+assert "進行中 0 件（都做完了）" in c and "failed" in c and "不說「沒進展」" in c, c
+assert "進行中 1 件" in llm(session_id="chat-B")["context"]
+assert guard.task_status("chat-A", now=time.time() + guard.DONE_KEEP_S + 5) == "", "做完超過保留時間就不再提"
 print("ROUTER_GUARD_OK")
