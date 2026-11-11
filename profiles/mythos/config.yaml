@@ -64,6 +64,9 @@ delegation:
   provider: opencode-go
   model: deepseek-v4.1-flash
   max_iterations: 40
+  # 11-11：interim_assistant_messages 關掉後，gateway_mode 預設 auto 會把派工改成同回合等待
+  # （tools/delegate_tool_config.py gateway_delegation_inline），Router 整回合卡住、新訊息排隊。明寫 background。
+  gateway_mode: background
 tools:
   tool_search:
     enabled: false
