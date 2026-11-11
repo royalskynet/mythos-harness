@@ -1,0 +1,229 @@
+#!/usr/bin/env bash
+# deep-lint <task.md> — pre-dispatch contract check before handing a task to deep-run.
+#   A task file must carry one runnable 驗收 shell block plus an out-of-fence 預期 line.
+#   The line budget is 40 lines for one task, then +20 per additional ### task.
+#   wo-verify --dry only checks the 驗收 block parses; this is the prose-side gate.
+# exit 0 = OK (or warn-only), 1 = no runnable 驗收 block.
+set -u
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"
+  exit 0
+fi
+wo="${1:?用法: deep-lint <task.md>}"
+[ -f "$wo" ] || { echo "deep-lint: 檔案不存在 $wo"; exit 1; }
+# DEEP_LINT_STRICT=1：WARN 級契約瑕疵升 FAIL（不設變數時行為完全不變）。
+strict=; [ "${DEEP_LINT_STRICT:-}" = 1 ] && strict=1
+# ponytail: WARN→FAIL 只是切標籤；只升「缺預期／缺斷言」與 strict 專屬的缺範圍／缺禁止段，
+# 正文禁令、長度超標、其餘啟發式仍 WARN。要全升得逐條加 second arg，沒需求就不做。
+L() { [ -n "$strict" ] && echo "LINT FAIL: $1" || echo "LINT WARN: $1"; }
+# deep-lint is reached through a ~/.local/bin symlink; resolve it so the vendored
+# wo-verify in this same directory is found even when PATH hides it.
+self=$0
+if [ -L "$self" ]; then
+  link_dir="$(cd "$(dirname "$self")" && pwd)"
+  tgt="$(readlink "$self")"
+  case "$tgt" in /*) real="$tgt" ;; *) real="$link_dir/$tgt" ;; esac
+  self="$real"
+fi
+WV="$(cd "$(dirname "$self")" && pwd)/wo-verify"
+command -v "$WV" >/dev/null || WV="$(command -v wo-verify || true)"
+if [ -z "$WV" ]; then
+  # 沒檢查 ≠ 檢查了而且不符：明確降級，不印 LINT FAIL、不 exit 非零。
+  if [ -n "$strict" ]; then
+    echo "LINT FAIL: PATH 找不到 wo-verify，驗收區塊無法機械檢查"
+    exit 1
+  fi
+  echo "wo-verify absent; acceptance block not machine-checked" >&2
+  echo "LINT OK (unchecked)"
+  exit 0
+fi
+if ! "$WV" "$wo" --dry >/dev/null 2>&1; then
+  fail_block=1
+  fail_syntax=1
+fi
+# 驗收章節的 bash fence 數（wo-verify 會串成一支腳本跑，兩塊＝兩套 setup 互相污染）。
+nbash=$(awk '
+  /^```/ { if (inblk) { inblk = 0 } else { inblk = 1; if (insec && $0 ~ /^```(bash|sh|zsh|shell)?[[:space:]]*$/) c++ }; next }
+  inblk { next }
+  /^#+ / {
+    lvl = index($0, " ") - 1
+    if (insec && lvl <= seclvl) insec = 0
+    if (!insec && ($0 ~ /^#+[[:space:]]*驗收/ || $0 ~ /^#+[[:space:]]*[Vv]erif/)) { insec = 1; seclvl = lvl }
+  }
+  END { print c + 0 }
+' "$wo")
+warn=0
+
+expected=$(awk '
+  /^```/ { fence = !fence; next }
+  !fence && /^[[:space:]]*預期[：:][[:space:]]*[^[:space:]]/ { found = 1 }
+  END { exit !found }
+' "$wo")
+if [ "$?" -ne 0 ]; then
+  L '缺少 fence 外的「預期：」行'
+  warn=1; [ -n "$strict" ] && fail_strict=1
+fi
+
+# writes: 範圍行（strict 專屬）：dc 派工靠它判 scope，缺了就只能事後看 diff。
+if [ -n "$strict" ] && ! awk '
+  /^```/ { fence = !fence; next }
+  !fence && /^[[:space:]]*writes[：:][[:space:]]*[^[:space:]]/ { found = 1 }
+  END { exit !found }
+' "$wo"; then
+  echo 'LINT FAIL: 缺少 fence 外的 writes: 範圍行（dc 派工無法判 scope）'
+  fail_strict=1
+fi
+
+# deep only treats the "## 禁止" section as a hard constraint; a prohibition left in
+# the prose gets walked past (2026-09-21: "不要手改 settings.json" in the body, deep
+# hand-edited it anyway and reported success). Flag prose prohibitions so they get
+# moved. Warn-only: the 派工 side still judges the prose.
+loose=$(awk '
+  /^##+[[:space:]]*禁止/ { inban = 1; next }
+  /^##[[:space:]]/       { inban = 0 }
+  /^#/                   { next }            # a heading is not a prohibition
+  /^```/                 { fence = !fence; next }
+  !inban && !fence && /不要|禁止|不得|禁用|勿/ { printf "  L%d: %s\n", NR, $0 }
+' "$wo")
+if [ -n "$loose" ]; then
+  echo "LINT WARN: 禁令寫在正文，deep 只認「## 禁止」段——搬過去："
+  printf '%s\n' "$loose"
+  warn=1
+fi
+
+n=$(wc -l < "$wo")
+tasks=$(awk '
+  /^##[[:space:]]+任務[[:space:]]*$/ { in_task = 1; next }
+  /^##[[:space:]]/ { in_task = 0 }
+  in_task && /^###[[:space:]]/ { count++ }
+  END { print count ? count : 1 }
+' "$wo")
+# 一張單 ≤3 個 ### 子任務：10-23～11-05 派deep 48 張，### ≥3 失敗 14/19、≤2 失敗 11/29。
+h3=$(awk '/^```/ { f = !f; next } !f && /^###[[:space:]]/ { c++ } END { print c + 0 }' "$wo")
+if [ "$h3" -gt 3 ]; then
+  echo "LINT WARN: $h3 個 ### 子任務（> 3）——拆成多張單，每張 ≤3 項，依序派、前一張 verify=pass 才派下一張"
+  warn=1
+fi
+
+limit=$((40 + (tasks - 1) * 20))
+if [ "$n" -gt "$limit" ]; then
+  echo "LINT WARN: $n lines (> $limit; tasks=$tasks, formula=40+20*(tasks-1))"
+  warn=1
+fi
+
+# 斷言閘門：驗收區塊若全是唯讀指令，deep 什麼都沒做
+# wo-verify 也會 rc=0 → verify=pass（2026-09-24 實證）。
+if ! "$WV" "$wo" --dump 2>/dev/null | grep -qE '(^|[;&|[:space:](])(test|\[|\[\[|diff|cmp)[[:space:]]|grep[[:space:]]+-[A-Za-z]*q'; then
+  L "驗收區塊無任何會非零退出的斷言（test／[ ]／grep -q／diff）——deep 什麼都沒做也會 verify=pass"
+  warn=1; [ -n "$strict" ] && fail_strict=1
+fi
+
+# 否定斷言閘門：`! cmd` 在 set -e 下被明確豁免（bash 手冊：return value
+# inverted with !），永遠不會讓驗收失敗——2026-09-24 實證假過。
+# 2026-11-04 由 WARN 升 FAIL：沒有任何情況是對的，警告擋不住 dc 派工。
+if "$WV" "$wo" --dump 2>/dev/null | grep -qE '^[[:space:]]*![[:space:]]'; then
+  echo "LINT FAIL: 驗收區塊有 \`! cmd\` 否定斷言——set -e 豁免反轉退出碼，這行永遠不會失敗。改寫成 test -z \"\$(...)\" 或 if cmd; then exit 1; fi"
+  fail_bang=1
+fi
+
+# 綁死 HEAD 閘門（fix 11496）：重驗在完工後才跑，那時常已再 commit，git log -1／show HEAD／HEAD~ 會誤判失敗。
+# 與 delegate-guard hooks/ledger.mjs fakeAcceptance 同一條規則；這裡涵蓋不經 Claude hook 的派工。
+if "$WV" "$wo" --dump 2>/dev/null | grep -qE 'git[[:space:]].*(log([[:space:]]+[^|;&]*)?[[:space:]]-(1|n[[:space:]]*1)([^0-9]|$)|show([[:space:]]+[^|;&]*)?[[:space:]]HEAD([^~^]|$)|HEAD~)'; then
+  echo "LINT WARN: 驗收綁死最新一筆 commit（git log -1／git show HEAD／HEAD~）——完工後再有 commit 就會誤判（fix 11496）。改查檔案內容，或 git log --format=%s -20 | grep"
+  warn=1
+fi
+
+# 探針閘門：工單若描述 API 請求形狀（URL 含 vN / POST / 請求形狀 / wire shape）卻無
+# 探針證據（探針： 行或 http=NNN），警告先跑 api-probe 貼 4xx 錯誤體（fix 9356）。
+# 形狀是 zod 錯誤體不是 struct 欄位名；硬要寫形狀就必須有實打過的證據。
+probe=$(awk '
+  /^```/ { fence = !fence; next }
+  /^[[:space:]]*探針[：:]/ { has_probe = 1; next }
+  /http=[0-9][0-9][0-9]/ { has_probe = 1; next }
+  !fence && /https?:\/\/[^ ]+\/v[0-9]|POST \/|請求形狀|wire shape/ { shaped = 1 }
+  END { if (shaped && !has_probe) print 1 }
+' "$wo")
+if [ -n "$probe" ]; then
+  echo "LINT WARN: 工單含 API 請求形狀但無探針證據——先 api-probe <url> <keyfile> 貼 http=<code>＋錯誤體（fix 9356）"
+  warn=1
+fi
+
+# clean-tree 斷言閘門：驗收有 git status --porcelain 但工單沒寫 scratch 放哪，
+# deep 把草稿留在 repo 內會讓 clean-tree 假紅（fix 9620）。
+dump=$("$WV" "$wo" --dump 2>/dev/null)
+if printf '%s' "$dump" | grep -q 'git status --porcelain' \
+   && ! grep -Eq 'TMPDIR|mktemp|scratch|草稿' "$wo"; then
+  echo 'LINT WARN: 驗收有 clean-tree 斷言但工單沒寫 scratch 放哪——「## 不動」段明寫 scratch 放 ${TMPDIR}，不進 repo（fix 9620）'
+  warn=1
+fi
+
+# reporter 閘門：驗收 grep 測試框架輸出但沒固定 reporter，node ≥20 預設 spec 無
+# 「# fail」行，grep 必空回 1 → 假紅（fix 9617）。
+if printf '%s' "$dump" | grep -Eq 'npm test|node --test' \
+   && ! printf '%s' "$dump" | grep -q -- '--test-reporter'; then
+  echo 'LINT WARN: 驗收 grep 測試輸出但未指定 --test-reporter——node≥20 預設 spec 格式無「# fail」行，加 --test-reporter=tap（fix 9617）'
+  warn=1
+fi
+
+# grep -c 閘門：零命中回 1，set -e 下整段中止（fix 9215/9624）。
+# 包進 $( ) 或行尾加 || true 才算安全寫法。
+if printf '%s\n' "$dump" | grep -E 'grep[[:space:]]+-[A-Za-z]*c' \
+   | grep -Ev '\$\(' | grep -Ev '[|][|][[:space:]]*true$' | grep -q .; then
+  echo 'LINT WARN: grep -c 零命中回 1，set -e 下整段中止——包進 $( ) 或加 || true（fix 9215/9624）'
+  warn=1
+fi
+
+# pipefail 閘門：驗收自開 pipefail，cmd | grep -q 命中即關管回 141 假紅（fix 9341）。
+if printf '%s\n' "$dump" | grep -q pipefail; then
+  echo 'LINT WARN: 驗收區塊自開 pipefail，cmd | grep -q 命中即關管回 141 假紅——wo-verify 故意不開，刪掉（fix 9341）'
+  warn=1
+fi
+
+# <佔位符> 閘門：bash 當重導向解析（fix 9471）。<< <& < / 2> &> 這類真重導向不含 <word>
+# 所以不會誤中。
+if printf '%s\n' "$dump" | grep -Eq '<[A-Za-z_][A-Za-z0-9_-]*>'; then
+  echo 'LINT WARN: 驗收含 <佔位符>，bash 當重導向解析——填成真值（fix 9471）'
+  warn=1
+fi
+
+# 憑證洩漏閘門：echo／printf 行印出疑似憑證變數（fix 9216）。
+if printf '%s\n' "$dump" | grep -E '^[[:space:]]*(echo|printf)[[:space:]]' \
+   | grep -Eq '\$[A-Za-z0-9_]*(TOK|KEY|TOKEN|SECRET|PASS)[A-Za-z0-9_]*'; then
+  echo 'LINT WARN: 驗收印出疑似憑證變數，會洩進 transcript——改印布林／計數（fix 9216）'
+  warn=1
+fi
+
+# 一級標題閘門：段落標題用了 #，deep-lint 只認 ##（fix 9478）。
+h1=$(awk '
+  /^```/ { fence = !fence; next }
+  !fence && /^# (任務|驗收|不動|禁)/ { print 1 }
+' "$wo")
+# 禁止段閘門（strict 專屬）：deep 只認「## 禁止」段為硬約束。
+if [ -n "$strict" ] && ! awk '
+  /^```/ { fence = !fence; next }
+  !fence && /^##+[[:space:]]*禁止/ { print 1 }
+' "$wo" | grep -q .; then
+  echo 'LINT FAIL: 缺「## 禁止」段——deep 只認該段為硬約束'
+  fail_strict=1
+fi
+
+if [ -n "$h1" ]; then
+  echo 'LINT WARN: 段落標題用了一級 #，deep-lint 只認 ##——改成 ##（fix 9478）'
+  warn=1
+fi
+
+# UTC 日期閘門：驗收用 date -u 組路徑，本機日誌檔名是本地時區（fix 9206/9208）。
+if printf '%s\n' "$dump" | grep -q 'date -u'; then
+  echo 'LINT WARN: 驗收用 UTC 日期組路徑，本機日誌檔名是本地時區——改 date +%F（fix 9206）'
+  warn=1
+fi
+
+[ "${fail_block:-0}" = 1 ] && { echo "LINT FAIL: no runnable 驗收 block"; exit 1; }
+if [ -n "$strict" ]; then
+  [ "${fail_syntax:-0}" = 1 ] && echo 'LINT FAIL: 驗收區塊 bash -n 語法錯（或無可跑驗收區塊）' && fail_strict=1
+  [ "$nbash" -gt 1 ] && echo "LINT FAIL: 驗收章節有 $nbash 個 bash fence——wo-verify 串成一支腳本跑，合成一塊" && fail_strict=1
+  [ "${fail_strict:-0}" = 1 ] && exit 1
+fi
+[ "${fail_bang:-0}" = 1 ] && exit 1
+[ "$warn" -eq 0 ] && echo "LINT OK"
+exit 0

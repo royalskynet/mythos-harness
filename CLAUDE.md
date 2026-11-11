@@ -8,4 +8,5 @@
 - 記憶寫入：`memory.provider: claude-mem`；線上 `plugins/claude-mem` symlink 到 `~/.hermes/plugins/claude-mem`；每輪注入由 gateway plist 的 `CLAUDE_MEM_HERMES_TURN_LIMIT=1`、`TURN_MAX=300` 壓低（重裝 gateway 會洗掉，要補回）。
 - 本機輔助腳本與營運筆記不進 repo：腳本放 `bin/`（gitignore），筆記放 `CLAUDE.local.md`。
 - 線上 profile：`~/.hermes/profiles/mythos`，保留其本機設定。repo 的 `AGENTS.md`、`SOUL.md` 是通用範本；線上版含個人與設備細節，部署不覆蓋（公開 repo 只放通用架構）。
+- 派工前 lint：worker 交出長任務前先跑 `bin/deep-lint <工單>`（移植自 royalskynet/orchestrator，連同 `bin/wo-verify`）；沒有可跑驗收區塊或有 `! cmd` 否定斷言就 rc=1，不派。上游改了要同步這兩支。
 - 驗收：tests/ 與 `profiles/mythos/plugins/*/test_*`；隔離 profile 停用 Telegram。
