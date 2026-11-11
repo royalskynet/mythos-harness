@@ -4,7 +4,7 @@
 claude-mem 升版會蓋掉 ~/.hermes/plugins/claude-mem，重裝 gateway 會洗掉 plist 環境變數。
 1. on_memory_write 第一句是 return（10-31 LGL：原生 memory 不複製進 claude-mem）
 2. 每輪注入仍讀 CLAUDE_MEM_HERMES_TURN_LIMIT／TURN_MAX（11-07 本機 patch）
-3. gateway plist 設 TURN_LIMIT=1、TURN_MAX=300
+3. gateway plist 不設 TURN_LIMIT／TURN_MAX（11-11：改用完整 claude-mem，每輪注入走外掛預設 5 筆／4000 字）
 4. 線上 profile 用 claude-mem provider，plugins/claude-mem 連得到
 ponytail: 沒有 ~/.hermes（CI）就 SKIP；只在本機跑時守得住。
 """
@@ -34,8 +34,8 @@ for var, name in (("TURN_NOTES_LIMIT", "CLAUDE_MEM_HERMES_TURN_LIMIT"), ("TURN_N
     assert envs.get(var) == name, f"{var} 不再讀 {name}：plist 的壓低設定失效"
 
 env = plistlib.load(open(PLIST, "rb")).get("EnvironmentVariables", {})
-assert env.get("CLAUDE_MEM_HERMES_TURN_LIMIT") == "1", "plist 少 CLAUDE_MEM_HERMES_TURN_LIMIT=1"
-assert env.get("CLAUDE_MEM_HERMES_TURN_MAX") == "300", "plist 少 CLAUDE_MEM_HERMES_TURN_MAX=300"
+left = sorted(k for k in env if k.startswith("CLAUDE_MEM_HERMES_TURN_"))
+assert not left, f"plist 還在壓低 claude-mem 每輪注入：{left}"
 
 cfg = open(f"{PROFILE}/config.yaml", encoding="utf-8").read()
 assert "\n  provider: claude-mem\n" in cfg, "線上 config 沒有 memory.provider: claude-mem"
