@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# wo-verify <WO.md> [--dry|--dump|--pinned <script>] — 機械驗收（裁判不是 LLM）：
+#   抽出工單「驗收／Verify」章節（含其子標題）裡所有 shell 型 ``` 區塊（無語言標記或 bash/sh/zsh/shell），
+#   串成一支腳本以 `set -e` 跑（無 pipefail，見下；timeout WO_VERIFY_TIMEOUT 秒，預設 600），印全部輸出。
+#   exit：0 = 全過；2 = 工單沒有可跑驗收區塊；3 = 驗收區塊與 pin 不一致（判篡改）；其它 = 腳本首個失敗指令的 rc。
+#   --dry：只抽出並 bash -n 語法檢查（wo-lint 用）。
+#   --dump：只印抽出的腳本（dc 派工前拍 pin 用）。
+#   --pinned <script>：跑 <script>，並比對工單當下抽出的結果；不一致即 exit 3，絕不跑被改過的版本。
+#     評分器只要執行人碰得到，他早晚會改它過關（本機前例：偽造 git status 輸出、
+#     在快照腳本裡植入刪檔後門並附上偽造的解釋註解）。
+#     執行人規則第 8 條「不修改驗收區塊」是文字，這條是機械偵測。
+# 規則（dispatch skill 六條檢查 #2）：驗收區塊必須唯讀、失敗要非零退出（test／grep -q／diff），
+#   「預期：…」這種給人看的文字放區塊外。行首 `$ ` 提示符會被剝掉。
+set -u
+# 全身包進 main()：bash 一次解析完整個函式才執行，工單就地改寫本檔時剩下的腳本
+# 不會依舊位元組偏移續讀而錯位（fix-store 9499）。
+main() {
+case "${1:-}" in
+  -h|--help)
+    awk 'NR==1 && /^#!/ { next } /^#/ { sub(/^# /, ""); print; next } { exit }' "${BASH_SOURCE[0]}"
+    exit 0
+    ;;
+  --dry|--dump|--pinned)
+    echo "旗標要放在檔名之後：wo-verify <WO.md> --dry" >&2
+    exit 2
+    ;;
+esac
+wo="${1:?用法: wo-verify <WO.md> [--dry|--dump|--pinned <script>]}"; dry=0; [ "${2:-}" = "--dry" ] && dry=1
+pin=""; [ "${2:-}" = "--pinned" ] && pin="${3:?--pinned 需要 pin 腳本路徑}"
+[ -f "$wo" ] || { echo "wo-verify: 檔案不存在 $wo"; exit 2; }
+script=$(awk '
+  # fence 狀態先判，全文追蹤（不限驗收章節）：fence 內的 "### xxx" 是內容不是標題
+  /^```/ { if (inblk) { inblk = 0 } else { inblk = 1; take = insec && ($0 ~ /^```(bash|sh|zsh|shell)?[[:space:]]*$/) }; next }
+  inblk { if (take) { sub(/^\$ /, ""); print }; next }
+  /^#+ / {
+    lvl = index($0, " ") - 1
+    if (insec && lvl <= seclvl) insec = 0
+    # 錨到行首：`### 2. bin/wo-verify` 這種標題不是驗收章節
+    if (!insec && ($0 ~ /^#+[[:space:]]*驗收/ || $0 ~ /^#+[[:space:]]*[Vv]erif/)) { insec = 1; seclvl = lvl }
+  }
+' "$wo")
+# 篡改比對擺在「空區塊」判定之前：整段驗收被刪掉要報篡改（3），不是報 none（2）——
+# dcq 的 exit 2 是 FATAL 不重試不罰模型，把後門算成工單瑕疵正好幫兇手脫身。
+if [ -n "$pin" ]; then
+  [ -f "$pin" ] || { echo "wo-verify: pin 檔不存在 $pin"; exit 2; }
+  if ! printf '%s\n' "$script" | diff -q "$pin" - >/dev/null 2>&1; then
+    echo "wo-verify: 驗收區塊與派工前的 pin 不一致 —— 判篡改，不跑被改過的版本"
+    printf '%s\n' "$script" | diff -u "$pin" - | head -40
+    echo "--- wo-verify rc=3 (tamper)"
+    exit 3
+  fi
+  script=$(cat "$pin")
+fi
+[ -n "$script" ] || { echo "wo-verify: 沒有可跑的驗收區塊（none）"; exit 2; }
+[ "${2:-}" = "--dump" ] && { printf '%s\n' "$script"; exit 0; }
+# 驗收不准真的發訊息給 bot：每次重驗都會在使用者手機多一則（11-05 一條「連線測試」被重跑 4 次）。
+# 要證明送得出去，改測 OMB health 或用假 CLI。exit 2＝工單瑕疵。
+if printf '%s\n' "$script" | grep -qE 'openmausbot[[:space:]]+run|wake\.(turn|wake)\(|notify\.(notify|turn|post)\(|omb_post\.post\(|python[0-9.]*[[:space:]][^|;&]*notify\.py|(^|[[:space:];&|])(sh[[:space:]]+)?[^[:space:]]*(omb-ask|egg-send)\.sh'; then
+  echo "wo-verify: 驗收會真的發訊息給 bot（openmausbot run／wake／notify）—— 改測 OMB health 或假 CLI"; exit 2
+fi
+if [ "$dry" -eq 1 ]; then printf '%s\n' "$script" | bash -n; exit $?; fi
+# 不開 pipefail：`cmd | grep -q` 命中即關管，cmd 續寫吃 SIGPIPE → 141 假失敗（09-22 實證 launchctl print/claude mcp get）
+# 逾時可調：dc 的 do-nothing 負向對照在派工前跑同一支腳本，不該為此等 10 分鐘。
+printf 'set -e\ntrap '\''echo "wo-verify FAIL line $((LINENO-2)): $BASH_COMMAND"'\'' ERR\n%s\n' "$script" | timeout "${WO_VERIFY_TIMEOUT:-600}" bash 2>&1
+rc=${PIPESTATUS[1]}
+echo "--- wo-verify rc=$rc"
+exit "$rc"
+}
+main "$@"

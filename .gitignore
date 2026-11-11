@@ -13,6 +13,8 @@
 !/bin/genie-context
 !/bin/recall
 !/bin/plan-hard
+!/bin/deep-lint
+!/bin/wo-verify
 !/profiles/
 /profiles/*
 !/profiles/mythos-worker/
@@ -52,6 +54,7 @@
 !/tests/test-recall-links.py
 !/tests/test-claude-mem-local-patch.py
 !/tests/test-delegation-background.sh
+!/tests/test-deep-lint.sh
 !/CLAUDE.md
 *.bak*
 __pycache__/
