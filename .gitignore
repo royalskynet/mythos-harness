@@ -12,6 +12,7 @@
 /bin/*
 !/bin/genie-context
 !/bin/recall
+!/bin/plan-hard
 !/profiles/
 /profiles/*
 !/profiles/mythos-worker/

@@ -5,6 +5,16 @@ import sys
 import tempfile
 
 os.environ["MYTHOS_ROUTER_GUARD_LOG"] = os.path.join(tempfile.mkdtemp(), "guard.log")
+# 假的難度判定與規劃人：goal 含 HARD 判 hard，其餘照內容印（不打模型）。
+_fake = tempfile.mkdtemp()
+os.makedirs(os.path.join(_fake, "bin"))
+for _name, _body in (("triage", 'grep -q HARD "$1" && echo hard || { grep -q BROKEN "$1" && exit 9; echo easy; }'),
+                     ("bin/plan-hard", "echo plan")):
+    with open(os.path.join(_fake, _name), "w") as _f:
+        _f.write("#!/bin/sh\n" + _body + "\n")
+    os.chmod(os.path.join(_fake, _name), 0o755)
+os.environ.update(MYTHOS_HOME=_fake, MYTHOS_TRIAGE_BIN=os.path.join(_fake, "triage"),
+                  MYTHOS_TIER_LOG=os.path.join(_fake, "tier.log"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import __init__ as guard  # noqa: E402
 
@@ -52,4 +62,23 @@ ctx.hooks["subagent_start"](child_session_id=None)
 ctx.hooks["subagent_start"](child_session_id="")
 assert blocked("terminal")
 assert guard._on_pre_tool_call(tool_name="terminal", session_id="unknown")["action"] == "block"
+# hard 子代理：跑過 plan-hard 才准動手；mid 以下、判定失敗的直接放行。
+pre, start = ctx.hooks["pre_tool_call"], ctx.hooks["subagent_start"]
+start(child_session_id="hard-1", child_goal="HARD 重構排程")
+for name in ("terminal", "write_file", "read_file", "delegate_task"):
+    r = pre(tool_name=name, args={"command": "ls"}, session_id="hard-1")
+    assert r and r["action"] == "block" and "plan-hard" in r["message"], (name, r)
+assert pre(tool_name="mythos_recall", session_id="hard-1") is None
+assert pre(tool_name="terminal", args={"command": guard.PLAN_BIN + " '任務'"}, session_id="hard-1") is None
+for name in ("terminal", "write_file"):
+    assert pre(tool_name=name, args={"command": "ls"}, session_id="hard-1") is None, name
+start(child_session_id="easy-1", child_goal="查天氣")
+start(child_session_id="broken-1", child_goal="BROKEN")
+for sid in ("easy-1", "broken-1"):
+    assert pre(tool_name="terminal", args={"command": "ls"}, session_id=sid) is None, sid
+tiers = [l.split("\t")[1] for l in open(guard.TIER_LOG).read().splitlines()]
+assert tiers[-3:] == ["hard", "easy", "mid"], tiers
+os.chmod(guard.PLAN_BIN, 0o644)  # 沒有規劃人：hard 也不擋
+start(child_session_id="hard-2", child_goal="HARD 沒規劃人")
+assert pre(tool_name="terminal", args={"command": "ls"}, session_id="hard-2") is None
 print("ROUTER_GUARD_OK")

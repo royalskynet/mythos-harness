@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# plan-hard — hard 任務的規劃人：唯讀跑一次強模型，印出計畫給執行人照做。
+# 用法：plan-hard '<任務原話＋需要的前文>'（在要動手的目錄裡跑）
+# router-guard 判成 hard 的子代理要先跑過這支才准動其他工具。
+# 環境變數：MYTHOS_PLANNER_BIN（預設 claude）、MYTHOS_PLANNER_MODEL（預設 claude-opus-5-5）、
+#           MYTHOS_PLANNER_TIMEOUT_S（預設 170）、MYTHOS_PLAN_LOG（預設 state/plan-hard.log）
+# 退出碼：0 有計畫｜2 用法｜3 找不到規劃人｜其他＝規劃人失敗（照實回報，不自己編計畫）
+set -u
+task="${1:-}"
+[ -n "$task" ] || { echo "用法：plan-hard '<任務>'" >&2; exit 2; }
+bin="${MYTHOS_PLANNER_BIN:-claude}"
+command -v "$bin" >/dev/null 2>&1 || bin="$HOME/.local/bin/claude"
+command -v "$bin" >/dev/null 2>&1 || { echo "plan-hard: 找不到規劃人 ${MYTHOS_PLANNER_BIN:-claude}" >&2; exit 3; }
+model="${MYTHOS_PLANNER_MODEL:-claude-opus-5-5}"
+log="${MYTHOS_PLAN_LOG:-$(cd "$(dirname "$0")/.." && pwd)/state/plan-hard.log}"
+to=""; command -v timeout >/dev/null 2>&1 && to="timeout ${MYTHOS_PLANNER_TIMEOUT_S:-170}"
+prompt="你是規劃人，只規劃不動手。讀需要的檔案後，為下面的任務寫一份執行人可以照做的計畫：
+1. 目標一句。 2. 步驟（每步一個動作，寫明檔案絕對路徑與指令）。 3. 一條會失敗的驗收指令。 4. 風險與不可逆的地方。
+計畫直接印出來、不寫檔，60 行以內，不寫客套話。
+
+任務：
+$task"
+start=$(date +%s)
+# 只載專案層設定：使用者層的 hook／外掛不跟著跑；唯讀工具，動不了檔。
+$to "$bin" -p --model "$model" --setting-sources project --tools Read Grep Glob <<<"$prompt"
+rc=$?
+mkdir -p "$(dirname "$log")" 2>/dev/null && printf '%s\t%s\trc=%s\t%ss\n' "$(date +%s)" "$model" "$rc" "$(( $(date +%s) - start ))" >> "$log" 2>/dev/null
+exit "$rc"
