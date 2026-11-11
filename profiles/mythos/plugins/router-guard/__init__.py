@@ -26,7 +26,8 @@ OUTPUT_SCHEMA = {
 
 # Hermes tools/delegate_tool.py:368-373 → hermes_cli/lifecycle.py:25-37
 # → plugins.invoke_hook；ctx.register_hook 可收到 child_session_id。
-ALLOWED = frozenset({"delegate_task", "mythos_recall", "memory", "session_search"})
+# session_search 查的是 state.db（7 天就清），不當記憶用；記憶走 memory 與 mythos_recall（claude-mem）。
+ALLOWED = frozenset({"delegate_task", "mythos_recall", "memory"})
 CHILD_SESSIONS: set[str] = set()
 
 # hard 任務：子代理先跑 bin/plan-hard（強模型唯讀規劃）才放行其他工具；mid 以下自己規劃自己做。

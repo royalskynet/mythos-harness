@@ -22,6 +22,14 @@ plugins:
     mythos-tools:
       allow_gateway_injection: true
 _config_version: 53
+# 11-11：state.db 是 Hermes 的對話紀錄庫，預設不清（auto_prune 關），子代理每跑一次就多一批工具輸出，只增不減。
+# 不拿它當記憶：結束超過 7 天的 session 自動刪、刪完壓縮。長期記憶走 memories/（MEMORY.md、USER.md）＋ claude-mem。
+sessions:
+  auto_prune: true
+  retention_days: 7
+  min_interval_hours: 24
+  vacuum_after_prune: true
+  min_vacuum_interval_days: 7
 memory:
   memory_enabled: true
   user_profile_enabled: true

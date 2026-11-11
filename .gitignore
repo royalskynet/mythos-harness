@@ -52,6 +52,7 @@
 !/tests/test-recall-links.py
 !/tests/test-claude-mem-local-patch.py
 !/tests/test-delegation-background.sh
+!/tests/test-session-retention.sh
 !/CLAUDE.md
 *.bak*
 __pycache__/

@@ -25,9 +25,9 @@ def blocked(name):
 
 
 for n in ("terminal", "write_file", "mythos_dispatch", "mythos_full_text", "browser_navigate", "read_file", "web_search", "",
-          "todo_list", "tool_search"):
+          "todo_list", "tool_search", "session_search"):
     assert blocked(n), f"應 block：{n!r}"
-for n in ("delegate_task", "mythos_recall", "memory", "session_search"):
+for n in ("delegate_task", "mythos_recall", "memory"):
     assert not blocked(n), f"應放行：{n!r}"
 r = guard._on_pre_tool_call(tool_name="delegate_task", args={"tasks": [{"goal": "g"}]}, session_id="router-1")
 assert r["action"] == "modify" and r["args"]["background"] is True, r
