@@ -21,6 +21,8 @@ plugins:
   entries:
     mythos-tools:
       allow_gateway_injection: true
+    router-guard:  # /hard <任務> 要把任務送進對話
+      allow_gateway_injection: true
 _config_version: 53
 # 11-11：state.db 是 Hermes 的對話紀錄庫，預設不清（auto_prune 關），子代理每跑一次就多一批工具輸出，只增不減。
 # 不拿它當記憶：結束超過 7 天的 session 自動刪、刪完壓縮。長期記憶走 memories/（MEMORY.md、USER.md）＋ claude-mem。

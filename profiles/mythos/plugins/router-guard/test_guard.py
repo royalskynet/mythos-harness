@@ -8,7 +8,7 @@ os.environ["MYTHOS_ROUTER_GUARD_LOG"] = os.path.join(tempfile.mkdtemp(), "guard.
 # 假的難度判定與規劃人：goal 含 HARD 判 hard，其餘照內容印（不打模型）。
 _fake = tempfile.mkdtemp()
 os.makedirs(os.path.join(_fake, "bin"))
-for _name, _body in (("triage", 'grep -q SLOW "$1" && sleep 2; grep -q HARD "$1" && echo hard || { grep -q BROKEN "$1" && exit 9; echo easy; }'),
+for _name, _body in (("triage", 'echo "$TRIAGE_CONFIG" >> "$(dirname "$0")/triage-config.seen"; cat "$1" >> "$(dirname "$0")/triage-goals.seen"; grep -q SLOW "$1" && sleep 2; grep -q HARD "$1" && echo hard || { grep -q BROKEN "$1" && exit 9; echo easy; }'),
                      ("bin/plan-hard", "echo plan")):
     with open(os.path.join(_fake, _name), "w") as _f:
         _f.write("#!/bin/sh\n" + _body + "\n")
@@ -50,6 +50,13 @@ class Context:
 
     def register_hook(self, name, callback):
         self.hooks[name] = callback
+
+    def register_command(self, name, handler, **_):
+        self.commands = {**getattr(self, "commands", {}), name: handler}
+
+    def inject_message(self, content, session_key=None):
+        self.injected = getattr(self, "injected", []) + [(content, session_key)]
+        return bool(session_key)
 
 
 ctx = Context()
@@ -116,4 +123,24 @@ c = llm(session_id="chat-A")["context"]
 assert "進行中 0 件（都做完了）" in c and "failed" in c and "不說「沒進展」" in c, c
 assert "進行中 1 件" in llm(session_id="chat-B")["context"]
 assert guard.task_status("chat-A", now=time.time() + guard.DONE_KEEP_S + 5) == "", "做完超過保留時間就不再提"
+# Mythos 專用門檻有傳給分級器（只算最高一級）。
+import json  # noqa: E402
+seen = open(os.path.join(_fake, "triage-config.seen")).read().splitlines()
+assert seen and all(json.loads(l) == {"hard_score_at": 2.5, "hard_needs_probability": 0.3} for l in seen), seen[:2]
+# /hard：下一件派工不問分級器直接算 hard，只管一件；帶任務就送進對話；過期不算。
+hard = ctx.commands["hard"]
+assert "10 分鐘" in hard("")
+start(child_session_id="forced-1", child_goal="FORCEDGOAL")
+start(child_session_id="after-1", child_goal="AFTERGOAL")
+assert pre(tool_name="write_file", session_id="forced-1")["action"] == "block"
+assert pre(tool_name="write_file", session_id="after-1") is None, "/hard 只管下一件"
+rows = [l.split("\t")[1:] for l in open(guard.TIER_LOG).read().splitlines()]
+assert ["hard", "forced-1", "forced"] in rows and ["easy", "after-1"] in rows, rows[-3:]
+goals = open(os.path.join(_fake, "triage-goals.seen")).read()
+assert "AFTERGOAL" in goals and "FORCEDGOAL" not in goals, "/hard 那件不該叫分級器"
+assert hard("重構排程", session_key="tg:1") == "收到，這件走 hard。" and ctx.injected == [("重構排程", "tg:1")]
+assert "再發一次" in hard("重構排程", session_key="")
+guard.FORCE_HARD_UNTIL = time.time() - 1
+start(child_session_id="expired-1", child_goal="查天氣")
+assert pre(tool_name="write_file", session_id="expired-1") is None, "/hard 過期不算"
 print("ROUTER_GUARD_OK")

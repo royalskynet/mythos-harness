@@ -35,6 +35,14 @@ MYTHOS = os.environ.get("MYTHOS_HOME", os.path.expanduser("~/bots/mythos"))
 PLAN_BIN = os.path.join(MYTHOS, "bin", "plan-hard")
 TRIAGE = os.environ.get("MYTHOS_TRIAGE_BIN", os.path.expanduser("~/dev/dispatch-router/bin/triage"))
 TIER_LOG = os.environ.get("MYTHOS_TIER_LOG", os.path.join(MYTHOS, "state", "router-tier.log"))
+# 分級器預設把「中等」也算進 hard，11-12 重播 42 筆實際派工有 21 筆判 hard（多數是唯讀查詢）。
+# Mythos 只算最高一級、機率過 0.3 才算 hard（同一批剩 3 筆）；漏掉的用 /hard 手動指定。
+TRIAGE_CONFIG = os.environ.get("MYTHOS_TRIAGE_CONFIG", '{"hard_score_at": 2.5, "hard_needs_probability": 0.3}')
+# /hard：之後 10 分鐘內的下一件派工直接算 hard，不問分級器。
+# ponytail: 全域一個旗標（只有一個聊天室）；多聊天室要改成按 Router session 分帳。
+FORCE_HARD_S = 600
+FORCE_HARD_UNTIL = 0.0
+_CTX: Any = None
 PLAN_MESSAGE = (f"這是 hard 任務：先用 terminal 跑 `{PLAN_BIN} '<任務原話＋需要的前文>'`（timeout 給 200 秒）拿計畫，"
                 "照計畫做。規劃人失敗就照實回報 failed，不自己編計畫。")
 PLAN_PENDING: set[str] = set()
@@ -98,23 +106,43 @@ def tier_of(goal: str) -> str:
         with tempfile.NamedTemporaryFile("w", suffix=".md", encoding="utf-8") as f:
             f.write(goal)
             f.flush()
-            out = subprocess.run([TRIAGE, f.name], capture_output=True, text=True, timeout=10).stdout.strip()
+            out = subprocess.run([TRIAGE, f.name], capture_output=True, text=True, timeout=10,
+                                 env={**os.environ, "TRIAGE_CONFIG": TRIAGE_CONFIG}).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return "mid"
     return out if out in ("easy", "mid", "hard") else "mid"
 
 
-def _classify(child_session_id: str, goal: str) -> str:
-    tier = tier_of(goal)
-    _log(TIER_LOG, tier, child_session_id)
+def _classify(child_session_id: str, goal: str, forced: bool = False) -> str:
+    tier = "hard" if forced else tier_of(goal)
+    _log(TIER_LOG, tier, child_session_id, *(["forced"] if forced else []))
     return tier
+
+
+def _take_force_hard() -> bool:
+    global FORCE_HARD_UNTIL
+    armed, FORCE_HARD_UNTIL = time.time() < FORCE_HARD_UNTIL, 0.0
+    return armed
+
+
+def _cmd_hard(raw_args: str = "", session_key: str = "", **_: Any) -> str:
+    global FORCE_HARD_UNTIL
+    FORCE_HARD_UNTIL = time.time() + FORCE_HARD_S
+    task = (raw_args or "").strip()
+    if not task:
+        return "下一件派工走 hard（先規劃再動手），10 分鐘內有效。"
+    try:
+        sent = bool(_CTX and session_key and _CTX.inject_message(task, session_key=session_key))
+    except Exception:
+        sent = False
+    return "收到，這件走 hard。" if sent else "已設成 hard，但任務沒送進對話：把任務再發一次（10 分鐘內有效）。"
 
 
 def _on_subagent_start(child_session_id: str = "", child_goal: str = "", parent_session_id: Any = "", **_: Any) -> None:
     if not child_session_id:
         return
     CHILD_SESSIONS.add(child_session_id)
-    TIERS[child_session_id] = _POOL.submit(_classify, child_session_id, child_goal)
+    TIERS[child_session_id] = _POOL.submit(_classify, child_session_id, child_goal, _take_force_hard())
     TASKS[child_session_id] = {"parent": parent_session_id or "", "start": time.time(),
                                "goal": " ".join(str(child_goal or "").split())[:80]}
     _log(DISPATCH_LOG, "start", child_session_id)
@@ -172,6 +200,9 @@ def _on_pre_tool_call(tool_name: str = "", args: Optional[Dict[str, Any]] = None
 
 
 def register(ctx) -> None:
+    global _CTX
+    _CTX = ctx
+    ctx.register_command("hard", _cmd_hard, description="這件任務走 hard：先規劃再動手", args_hint="<任務>")
     ctx.register_hook("subagent_start", _on_subagent_start)
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
     ctx.register_hook("subagent_stop", _on_subagent_stop)

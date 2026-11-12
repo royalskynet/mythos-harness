@@ -3,6 +3,7 @@
 - 人格與行為：`profiles/mythos/SOUL.md`。
 - `mythos-tools`：`mythos_recall` 呼叫 `bin/recall`；每回合呼叫 `bin/genie-context`。
 - `router-guard`：前台只聊天、查記憶與派工；子代理執行工具。
+- hard 判定：本機分級器只算最高一級、機率過 0.3（`MYTHOS_TRIAGE_CONFIG`，11-12 用 42 筆派工重播校準，21→3）；手動用 `/hard [任務]`（10 分鐘內下一件派工）。hard 子代理先跑 `bin/plan-hard`（回合上限 `MYTHOS_PLANNER_MAX_TURNS`，預設 6）。
 - `path-guard`：誤操作防線，不是安全邊界；受保護清單讀 profile 根目錄 `path-guard.json`（本機，格式見 `path-guard.example.json`）。
 - 派工使用 Hermes 內建 `delegate_task`：追問用 steer／stop／list；router-guard 補 `output_schema`（含多 task）；改 git repo 先 `git worktree add`（AGENTS.md）。
 - 記憶寫入：`memory.provider: claude-mem`；線上 `plugins/claude-mem` symlink 到 `~/.hermes/plugins/claude-mem`；每輪 prefetch 關掉（plist `CLAUDE_MEM_HERMES_TURN_LIMIT=0`，11-12 起；`hermes gateway install` 重產 plist 會洗掉，`tests/test-claude-mem-local-patch.py` 會抓到）。
