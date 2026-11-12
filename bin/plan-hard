@@ -29,6 +29,8 @@ prompt="你是規劃人，只規劃不動手。讀需要的檔案後，為下面
 $task"
 start=$(date +%s)
 # 只載專案層設定：使用者層的 hook／外掛不跟著跑；唯讀工具，動不了檔。
+# 從 Claude Code session 裡被叫起時會繼承 CLAUDE_CODE_ENTRYPOINT（如 remote_mobile），API key 的請求帶著它會被回 Credit balance is too low。
+unset CLAUDE_CODE_ENTRYPOINT
 # 回合上限：23 次實測中位 2 回合，一次離群跑到 9 次工具；碰到上限 claude 印 Reached max turns、rc=1。
 $to "$bin" -p --model "$model" --max-turns "${MYTHOS_PLANNER_MAX_TURNS:-6}" --max-budget-usd "${MYTHOS_PLANNER_MAX_USD:-1}" --setting-sources project --tools Read Grep Glob <<<"$prompt"
 rc=$?
