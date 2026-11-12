@@ -5,7 +5,8 @@
 - `router-guard`：前台只聊天、查記憶與派工；子代理執行工具。
 - `path-guard`：誤操作防線，不是安全邊界；受保護清單讀 profile 根目錄 `path-guard.json`（本機，格式見 `path-guard.example.json`）。
 - 派工使用 Hermes 內建 `delegate_task`：追問用 steer／stop／list；router-guard 補 `output_schema`（含多 task）；改 git repo 先 `git worktree add`（AGENTS.md）。
-- 記憶寫入：`memory.provider: claude-mem`；線上 `plugins/claude-mem` symlink 到 `~/.hermes/plugins/claude-mem`；每輪注入用外掛預設（5 筆、4000 字），plist 不再設 `CLAUDE_MEM_HERMES_TURN_*`（11-11 起）。
+- 記憶寫入：`memory.provider: claude-mem`；線上 `plugins/claude-mem` symlink 到 `~/.hermes/plugins/claude-mem`；每輪 prefetch 關掉（plist `CLAUDE_MEM_HERMES_TURN_LIMIT=0`，11-12 起；`hermes gateway install` 重產 plist 會洗掉，`tests/test-claude-mem-local-patch.py` 會抓到）。
+- 省 token：`compression.threshold_tokens`、`compression.proactive_prune_tokens`、`delegation.max_summary_chars`、`delegation.compression_threshold_tokens`（config.yaml，11-12 起）。
 - 記憶分工：長期記憶＝Hermes 內建 `memories/`（MEMORY.md、USER.md）＋claude-mem；`state.db` 只是對話紀錄庫，`sessions.auto_prune` 保留 7 天，Router 不用 `session_search`。
 - 本機輔助腳本與營運筆記不進 repo：腳本放 `bin/`（gitignore），筆記放 `CLAUDE.local.md`。
 - 線上 profile：`~/.hermes/profiles/mythos`，保留其本機設定。repo 的 `AGENTS.md`、`SOUL.md` 是通用範本；線上版含個人與設備細節，部署不覆蓋（公開 repo 只放通用架構）。

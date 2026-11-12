@@ -11,5 +11,11 @@ days="$(val sessions retention_days)"
 [ "$(val sessions vacuum_after_prune)" = true ] || { echo "FAIL: sessions.vacuum_after_prune 不是 true"; fail=1; }
 [ "$(val memory memory_enabled)" = true ] || { echo "FAIL: memory.memory_enabled 不是 true"; fail=1; }
 [ "$(val memory provider)" = claude-mem ] || { echo "FAIL: memory.provider 不是 claude-mem"; fail=1; }
+# 省 token（11-12 實測 Router 每次呼叫 8 萬、子代理跑滿 40 輪到 6 萬）：壓縮要有絕對門檻，回流給 Router 的結果要有上限。
+num() { v="$(val "$1" "$2")"; { [ -n "$v" ] && [ "$v" -ge "$3" ] && [ "$v" -le "$4" ]; } || { echo "FAIL: $1.$2=${v:-未設}，要 $3–$4"; fail=1; }; }
+num compression threshold_tokens 8000 32000
+num compression proactive_prune_tokens 4000 32000
+num delegation max_summary_chars 1000 6000
+num delegation compression_threshold_tokens 16000 48000
 [ "$fail" = 0 ] && echo "SESSION-RETENTION PASS"
 exit "$fail"
