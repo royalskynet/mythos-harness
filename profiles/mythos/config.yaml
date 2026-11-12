@@ -100,4 +100,5 @@ terminal:
   cwd: /Users/me/.hermes/profiles/mythos
 compression:
   proactive_prune_tokens: 16000  # 11-12 省 token：超過就先剪掉舊的大型工具輸出（不叫模型）
-  threshold_tokens: 24000  # 11-12 省 token：對話超過這個量就壓縮，不等到視窗的 75%
+  # 11-12：24000 太低——壓完還剩約 24000～25000（系統提示＋工具＋保留的尾段），9 分鐘連壓 5 次；要明顯高於這個底。
+  threshold_tokens: 48000  # 省 token：對話超過這個量就壓縮，不等到視窗的 75%
