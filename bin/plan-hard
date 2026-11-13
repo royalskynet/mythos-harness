@@ -15,11 +15,20 @@ command -v "$bin" >/dev/null 2>&1 || { echo "plan-hard: 找不到規劃人 ${MYT
 model="${MYTHOS_PLANNER_MODEL:-claude-opus-5-5}"
 root="$(cd "$(dirname "$0")/.." && pwd)"
 log="${MYTHOS_PLAN_LOG:-$root/state/plan-hard.log}"
-# 有 API key 就走 Anthropic API（按量計費），沒有就走 claude 訂閱登入。key 只從檔案讀進這個行程，不印出來。
-# 11-12 實測這把 key 回 Credit balance is too low，所以本機 state/plan-hard.env 先停用（改名 .off）。
-[ -r "$root/state/plan-hard.env" ] && . "$root/state/plan-hard.env"
-if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -r "${MYTHOS_PLANNER_KEY_FILE:-}" ]; then ANTHROPIC_API_KEY="$(tr -d '\r\n' < "$MYTHOS_PLANNER_KEY_FILE")"; fi
-auth=sub; [ -n "${ANTHROPIC_API_KEY:-}" ] && { export ANTHROPIC_API_KEY; auth=api; }
+# 認證：預設走 claude 訂閱登入（oauth，Keychain 的 Claude Code-credentials）。
+# MYTHOS_PLANNER_AUTH=api 才讀 key 檔、走 Anthropic API（按量計費）。
+# 11-12 實測 API key 回 Credit balance is too low；11-13 改預設 oauth。
+auth_pref="${MYTHOS_PLANNER_AUTH:-oauth}"
+if [ "$auth_pref" = api ]; then
+  [ -r "$root/state/plan-hard.env" ] && . "$root/state/plan-hard.env"
+  if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -r "${MYTHOS_PLANNER_KEY_FILE:-}" ]; then ANTHROPIC_API_KEY="$(tr -d '\r\n' < "$MYTHOS_PLANNER_KEY_FILE")"; fi
+fi
+if [ "$auth_pref" = api ] && [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  export ANTHROPIC_API_KEY; auth=api
+else
+  # 父行程（Happy／bot）若帶了 API key 環境變數，會蓋掉訂閱登入，這裡清掉。
+  unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN; auth=oauth
+fi
 to=""; command -v timeout >/dev/null 2>&1 && to="timeout ${MYTHOS_PLANNER_TIMEOUT_S:-170}"
 prompt="你是規劃人，只規劃不動手。讀需要的檔案後，為下面的任務寫一份執行人可以照做的計畫：
 1. 目標一句。 2. 步驟（每步一個動作，寫明檔案絕對路徑與指令）。 3. 一條會失敗的驗收指令。 4. 風險與不可逆的地方。
