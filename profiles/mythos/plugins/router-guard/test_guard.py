@@ -143,4 +143,30 @@ assert "再發一次" in hard("重構排程", session_key="")
 guard.FORCE_HARD_UNTIL = time.time() - 1
 start(child_session_id="expired-1", child_goal="查天氣")
 assert pre(tool_name="write_file", session_id="expired-1") is None, "/hard 過期不算"
+
+# 靜默攔截：派工回合不准沉默、結果回合不准沉默、子代理與一般回覆不動。
+llm, out = guard._on_pre_llm_call, guard._on_transform_llm_output
+llm(session_id="loud-1", turn_id="t1", user_message="幫我查 M2 磁碟")
+guard._on_post_tool_call(tool_name="delegate_task", session_id="loud-1")
+assert out(response_text="[SILENT]", session_id="loud-1", turn_id="t1") == guard.DISPATCH_ACK
+assert out(response_text="好，我看看", session_id="loud-1", turn_id="t1") is None, "有講話就不動"
+llm(session_id="loud-1", turn_id="t2", user_message="哈囉")
+assert out(response_text="[SILENT]", session_id="loud-1", turn_id="t2") is None, "沒派工的回合交給 Hermes 原本的處理"
+done_msg = ("[ASYNC DELEGATION BATCH COMPLETE — deleg_x]\nheader\n\n"
+            "--- ⚠ TASK 1/2: 查 nightnav 佇列  (status=completed, api_calls=40, TRUNCATED: hit max_iterations) ---\n"
+            "[TRUNCATED — subagent hit its iteration cap]\n"
+            '{"status": "done", "evidence": "佇列只有一支 sunset.sh"}\n\n'
+            "--- ✓ TASK 2/2: 比對 plan  (status=completed, api_calls=5) ---\n"
+            '```json\n{"status":"failed","evidence":"x","remaining":"缺 M2 權限"}\n```\n'
+            "Full live transcript: /tmp/x.log\n")
+llm(session_id="loud-1", turn_id="t3", user_message=done_msg)
+r = out(response_text="[SILENT]", session_id="loud-1", turn_id="t3")
+assert r and "查 nightnav 佇列" in r and "沒做完" in r and "sunset.sh" in r, r
+assert "比對 plan" in r and "失敗" in r and "缺 M2 權限" in r, r
+assert "deleg_" not in r and "status=" not in r, "不貼內部代號"
+assert out(response_text="SILENT", session_id="loud-1", turn_id="t3"), "無括號標記也算沉默"
+llm(session_id="child-loud", turn_id="c1", user_message=done_msg)
+guard.CHILD_SESSIONS.add("child-loud")
+assert out(response_text="[SILENT]", session_id="child-loud", turn_id="c1") is None, "子代理不動"
+assert out(response_text="[SILENT]", session_id="loud-1", turn_id="stale") is None, "turn 對不上不動"
 print("ROUTER_GUARD_OK")

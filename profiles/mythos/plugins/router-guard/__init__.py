@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -82,9 +84,84 @@ def task_status(parent_session_id: str, now: Optional[float] = None) -> str:
     return "\n".join(lines)
 
 
-def _on_pre_llm_call(session_id: str = "", **_: Any) -> Optional[Dict[str, str]]:
+# 11-13 Fail loud：Router 回 [SILENT] 時，派工回合換成短句、結果回合換成結果原文摘要。
+# 結果回流屬 machinery 回合，Hermes 一律准沉默（response_filters.silence_allowed），只能在這裡攔。
+DISPATCH_ACK = "我看看。"
+RESULT_HEAD = "[ASYNC DELEGATION BATCH COMPLETE"
+TURNS: Dict[str, Dict[str, Any]] = {}
+_SILENT = {"[SILENT]", "SILENT", "NO_REPLY", "NO REPLY", "[NO_REPLY]", "[NO REPLY]"}
+_TASK_RE = re.compile(r"^--- \S+ TASK \d+/\d+: (.*?)\s+\(status=([^,)]+)[^\n]*$", re.M)
+_STATUS_ZH = {"done": "完成", "needs_human": "要你決定", "failed": "失敗"}
+
+
+def _is_silent(text: str) -> bool:
+    try:
+        from gateway.response_filters import is_intentional_silence_response
+        return bool(is_intentional_silence_response(text))
+    except Exception:
+        return text.strip().strip(".。!！ ").upper() in _SILENT
+
+
+def _cut(text: Any, n: int) -> str:
+    s = " ".join(str(text or "").split())
+    return s if len(s) <= n else s[:n] + "…"
+
+
+def result_digest(message: str) -> str:
+    heads = list(_TASK_RE.finditer(message))
+    lines = ["做完了，結果原文摘要（我剛才沒轉述）："]
+    for i, m in enumerate(heads, 1):
+        body = message[m.end(): heads[i].start() if i < len(heads) else len(message)]
+        data: Dict[str, Any] = {}
+        j = re.search(r"\{.*\}", body, re.S)
+        if j:
+            try:
+                data = json.loads(j.group(0))
+            except ValueError:
+                data = {}
+        if not data:  # 截斷的 JSON：個別欄位照抓
+            for k in ("status", "evidence", "question", "remaining"):
+                f = re.search(rf'"{k}"\s*:\s*"((?:[^"\\]|\\.)*)', body)
+                if f:
+                    try:
+                        data[k] = json.loads(f'"{f.group(1)}"')
+                    except ValueError:
+                        data[k] = f.group(1)
+            body = "\n".join(ln for ln in body.splitlines()
+                             if not ln.startswith(("[TRUNCATED", "Full live transcript", "[INTERNAL NOTIFICATION")))
+        label = _STATUS_ZH.get(str(data.get("status")), m.group(2))
+        if "TRUNCATED" in m.group(0) or "[TRUNCATED" in body:
+            label = "沒做完（步數用盡）"
+        detail = data.get("question") or data.get("remaining") or data.get("evidence") or body
+        if data.get("remaining") and data.get("evidence"):
+            detail = f"{data['remaining']}；{data['evidence']}"
+        lines.append(f"{i}. {_cut(m.group(1), 40)}｜{label}")
+        lines.append(f"   {_cut(detail, 220)}")
+    if not heads:
+        lines.append(_cut(message.split("\n", 2)[-1], 600))
+    return "\n".join(lines)[:1500]
+
+
+def _on_transform_llm_output(response_text: Any = "", session_id: str = "", turn_id: Any = "", **_: Any) -> Optional[str]:
+    turn = TURNS.get(session_id)
+    if not session_id or session_id in CHILD_SESSIONS or not turn or turn["turn_id"] != turn_id:
+        return None
+    if not isinstance(response_text, str) or not _is_silent(response_text):
+        return None
+    msg = turn["user_message"]
+    if msg.lstrip().startswith(RESULT_HEAD):
+        _log(LOG, "loud-result", session_id)
+        return result_digest(msg)
+    if turn["dispatched"]:
+        _log(LOG, "loud-dispatch", session_id)
+        return DISPATCH_ACK
+    return None
+
+
+def _on_pre_llm_call(session_id: str = "", turn_id: Any = "", user_message: Any = "", **_: Any) -> Optional[Dict[str, str]]:
     if not session_id or session_id in CHILD_SESSIONS:
         return None
+    TURNS[session_id] = {"turn_id": turn_id, "user_message": str(user_message or ""), "dispatched": False}
     text = task_status(session_id)
     return {"context": text} if text else None
 
@@ -161,6 +238,8 @@ def _on_subagent_stop(child_session_id: str = "", child_status: Any = "", durati
 
 def _on_post_tool_call(tool_name: str = "", duration_ms: int = 0, session_id: Any = "", **_: Any) -> None:
     if tool_name == "delegate_task" and session_id not in CHILD_SESSIONS:
+        if session_id in TURNS:
+            TURNS[session_id]["dispatched"] = True
         _log(DISPATCH_LOG, "dispatch", session_id or "", duration_ms)
 
 
@@ -202,9 +281,10 @@ def _on_pre_tool_call(tool_name: str = "", args: Optional[Dict[str, Any]] = None
 def register(ctx) -> None:
     global _CTX
     _CTX = ctx
-    ctx.register_command("hard", _cmd_hard, description="這件任務走 hard：先規劃再動手", args_hint="<任務>")
+    ctx.register_command("hard", _cmd_hard, description="這件任務走 hard：先規劃再動手", args_hint="[任務]")
     ctx.register_hook("subagent_start", _on_subagent_start)
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
     ctx.register_hook("subagent_stop", _on_subagent_stop)
     ctx.register_hook("post_tool_call", _on_post_tool_call)
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
+    ctx.register_hook("transform_llm_output", _on_transform_llm_output)

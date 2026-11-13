@@ -53,11 +53,6 @@ approvals:
 platforms:
   telegram:
     enabled: true
-    # 11-11：派工走背景後 Router 當回合只回 [SILENT]；Hermes 預設把真人訊息的靜默換成警告
-    # （gateway/response_filters.py silence_allowed），這個聊天室明寫允許。
-    channel_overrides:
-      '${MYTHOS_TG_CHAT_ID}':
-        allow_silence: true
     home_channel:
       platform: telegram
       chat_id: '${MYTHOS_TG_CHAT_ID}'
