@@ -56,3 +56,13 @@ providers:
         # 90 秒沒進展就重試。樣本正常首回最長 55s。代價：健康但沉默超過 90s 的長思考會被重送
         timeout_seconds: 90
         stale_timeout_seconds: 90
+# 11-25：fallback 鏈的 provider: omniroute 要在 custom_providers 註冊才 bind 得到
+# （route_binding.py resolve_provider_client 找不到名 → "provider not configured"）。
+custom_providers:
+  - name: omniroute
+    api_key: ${OMNIROUTE_API_KEY}
+    api_mode: chat_completions
+    base_url: http://127.0.0.1:20130/v1
+    models:
+      - nim-pool
+      - nim-first

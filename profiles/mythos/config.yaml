@@ -8,6 +8,16 @@ fallback_providers:
     model: deepseek-v4.1-flash
   - provider: opencode-go
     model: glm-5.3-flash
+  - provider: opencode-go
+    model: beam-free
+  - provider: opencode-go
+    model: iceman-contributor-free
+  # 11-25：429 會把 Go 憑證標 exhausted、同 provider 棒全被 _candidate_pool_exhausted 跳過；
+  # 配額死時只有非 Go 腿活得下來。
+  - provider: omniroute
+    model: nim-pool
+    base_url: http://127.0.0.1:20130/v1
+    key_env: OMNIROUTE_API_KEY
 model_catalog:
   excluded_providers:
     - openrouter
@@ -111,3 +121,13 @@ compression:
   proactive_prune_tokens: 16000  # 11-12 省 token：超過就先剪掉舊的大型工具輸出（不叫模型）
   # 11-12：24000 太低——壓完還剩約 24000～25000（系統提示＋工具＋保留的尾段），9 分鐘連壓 5 次；要明顯高於這個底。
   threshold_tokens: 48000  # 省 token：對話超過這個量就壓縮，不等到視窗的 75%
+# 11-25：fallback 鏈的 provider: omniroute 要在 custom_providers 註冊才 bind 得到
+# （route_binding.py resolve_provider_client 找不到名 → "provider not configured"）。
+custom_providers:
+  - name: omniroute
+    api_key: ${OMNIROUTE_API_KEY}
+    api_mode: chat_completions
+    base_url: http://127.0.0.1:20130/v1
+    models:
+      - nim-pool
+      - nim-first

@@ -2,7 +2,14 @@
 # Router 派工的子代理要有自己的 fallback 鏈：pinned 子代理（delegation.provider/model 明寫）
 # 不繼承頂層 fallback_providers（hermes scoped_fallback_chain pinned → 不用 parent 鏈），
 # 鏈要寫在 delegation 底下。11-25 00:23 實例：OpenCode Go 月配額 429，兩個子代理各 1.2 秒陣亡、
-# 一棒都沒走。鏈至少要有一棒 *-free（不吃月配額）與一棒非 opencode-go（Go 全掛時的活路）。
+# 一棒都沒走。
+#
+# E2E 驗屍補充（同晚 /tmp/hermes-e2e 實跑）：
+# - 429 會把該 provider 的憑證標成 exhausted（auth.json credential_pool），
+#   _candidate_pool_exhausted 讓同 provider 的後續棒全被跳過——Go 月配額死時，
+#   *-free 棒也走不了，只有非 Go 腿活得下來。所以鏈必須有一棒非 opencode-go。
+# - provider: omniroute 這種自訂名要出現在 custom_providers 才 bind 得到，
+#   否則 "provider not configured" 整棒作廢。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 fail=0 n=0
@@ -11,23 +18,53 @@ for f in profiles/mythos/config.yaml; do
   python3 - "$f" <<'PY' || fail=1
 import sys, yaml
 cfg = yaml.safe_load(open(sys.argv[1]))
-chain = ((cfg.get("delegation") or {}).get("fallback_providers")) or []
 f = sys.argv[1]
-if not chain:
-    print(f"FAIL: {f} delegation.fallback_providers 沒設：pinned 子代理沒有鏈，主模型 429 直接死"); sys.exit(1)
-go_free = [e for e in chain if e.get("provider") == "opencode-go" and str(e.get("model","")).endswith("-free")]
-non_go = [e for e in chain if e.get("provider") != "opencode-go"]
-if not go_free:
-    print(f"FAIL: {f} delegation 鏈沒有 opencode-go *-free 棒（月配額 429 時全鏈同死）"); sys.exit(1)
-if not non_go:
-    print(f"FAIL: {f} delegation 鏈全是 opencode-go（Go 全掛時沒有活路）"); sys.exit(1)
-# 同 provider+model 重複會被正規化去重，等於少一棒
-seen = set()
-for e in chain:
-    k = (e.get("provider"), e.get("model"), str(e.get("base_url","")).rstrip("/"))
-    if k in seen:
-        print(f"FAIL: {f} delegation 鏈重複 {k}"); sys.exit(1)
-    seen.add(k)
+named = {p.get("name") for p in (cfg.get("custom_providers") or []) if isinstance(p, dict)}
+core = {"opencode-go", "openrouter", "anthropic", "openai", "google", "copilot", "nous", "ollama"}
+
+def check_chain(chain, where):
+    ok = True
+    if not chain:
+        print(f"FAIL: {f} {where} 沒有 fallback 鏈"); return False
+    go_free = [e for e in chain if e.get("provider") == "opencode-go" and str(e.get("model","")).endswith("-free")]
+    non_go = [e for e in chain if e.get("provider") not in ("opencode-go", None)]
+    if not go_free:
+        print(f"FAIL: {f} {where} 沒有 opencode-go *-free 棒"); ok = False
+    if not non_go:
+        print(f"FAIL: {f} {where} 全是 opencode-go：429 毒憑證池時全鏈同死"); ok = False
+    seen = set()
+    for e in chain:
+        prov = e.get("provider")
+        k = (prov, e.get("model"), str(e.get("base_url","")).rstrip("/"))
+        if k in seen:
+            print(f"FAIL: {f} {where} 重複 {k}"); ok = False
+        seen.add(k)
+        if prov and prov not in core and prov not in named:
+            print(f"FAIL: {f} {where} 的 {prov} 沒在 custom_providers 註冊（bind 不到 → 棒作廢）"); ok = False
+        if prov in named and prov in core:
+            print(f"FAIL: {f} {where} 的 {prov} 撞名 core provider"); ok = False
+    return ok
+
+ok = True
+ok &= check_chain((cfg.get("delegation") or {}).get("fallback_providers"), "delegation.fallback_providers")
+ok &= check_chain(cfg.get("fallback_providers"), "頂層 fallback_providers")
+sys.exit(0 if ok else 1)
+PY
+done
+# mythos-worker 也要：它的 fallback 照樣引用 omniroute
+for f in profiles/mythos-worker/config.yaml; do
+  n=$((n+1))
+  python3 - "$f" <<'PY' || fail=1
+import sys, yaml
+cfg = yaml.safe_load(open(sys.argv[1]))
+f = sys.argv[1]
+named = {p.get("name") for p in (cfg.get("custom_providers") or []) if isinstance(p, dict)}
+chain = cfg.get("fallback_providers") or []
+missing = [e.get("provider") for e in chain
+           if e.get("provider") not in ("opencode-go","openrouter","anthropic","openai","google","copilot","nous","ollama")
+           and e.get("provider") not in named]
+if missing:
+    print(f"FAIL: {f} fallback 引用未註冊 provider：{missing}"); sys.exit(1)
 PY
 done
 # 行為層：router-guard 的 ALLOWED 白名單是純聊天的機械邊界（派工＋查記憶＋memory，其他全擋）
