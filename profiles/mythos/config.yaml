@@ -81,6 +81,20 @@ delegation:
   # 11-11：interim_assistant_messages 關掉後，gateway_mode 預設 auto 會把派工改成同回合等待
   # （tools/delegate_tool_config.py gateway_delegation_inline），Router 整回合卡住、新訊息排隊。明寫 background。
   gateway_mode: background
+  # 11-25：pinned 子代理（delegation.provider/model 明寫）不繼承頂層 fallback_providers
+  # （scoped_fallback_chain pinned → 不用 parent 鏈），鏈要寫在 delegation 自己底下。
+  # 沒寫時 429 一跳就死（11-25 00:23 兩個子代理各 1.2s 陣亡）。階梯照 worker：of 免費層 → oo 自有 key。
+  fallback_providers:
+    - provider: opencode-go
+      model: hy4-flash-free
+    - provider: opencode-go
+      model: beam-free
+    - provider: opencode-go
+      model: iceman-contributor-free
+    - provider: omniroute
+      model: nim-pool
+      base_url: http://127.0.0.1:20130/v1
+      key_env: OMNIROUTE_API_KEY
 tools:
   tool_search:
     enabled: false
