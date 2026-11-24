@@ -51,6 +51,7 @@
 !/tests/test-plugin-bin-exec.sh
 !/tests/test-recall-links.py
 !/tests/test-claude-mem-local-patch.py
+!/tests/test-worker-soul-contract.sh
 !/tests/test-delegation-background.sh
 !/tests/test-session-retention.sh
 !/CLAUDE.md
