@@ -5,14 +5,12 @@ model:
   api_mode: chat_completions
 # Top level, NOT under `model:`（照抄 mythos；get_fallback_chain() 只讀頂層）。
 fallback_providers:
-  # 退路順序（11-08 使用者定）：先 Go 訂閱付費的 glm-5.3-flash，再 Go 免費的 beam-free；
-  # 11-24 加第三棒 OmniRoute nim-pool——Go 整站掛／月配額爆時還有非 Go 腿（beam-free 實測不吃月配額，glm 會）
+  # 11-24 階梯對齊派o分層：od（Go 訂閱）→ of（o 免費池）→ oo（自有 key 免費層）。
+  # glm-5.3-flash 移除：跟主模型同月配額，配額爆時保證死、只多浪費一跳。
   - provider: opencode-go
-    model: glm-5.3-flash
-  - provider: opencode-go
-    model: beam-free
+    model: beam-free        # of 層：Go 免費模型，不吃月配額（11-24 實測 ds/glm 429 時仍 200）
   - provider: omniroute
-    model: nim-pool
+    model: nim-pool         # oo 層：OmniRoute → 自有 NIM key 池，非 Go 腿
     base_url: http://127.0.0.1:20130/v1
     key_env: OMNIROUTE_API_KEY  # inline ${VAR} is NOT expanded by resolve_entry_api_key
 # worker 無人值守（fix 11812）：危險命令一律放行；-z 單次與 webhook 也放行。
