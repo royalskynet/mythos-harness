@@ -86,7 +86,9 @@ delegation:
   compression_threshold_tokens: 32000  # 11-12 省 token：子代理自己的壓縮門檻
   max_summary_chars: 3000  # 11-12 省 token：子代理回報給主對話的上限，全文另存磁碟
   provider: opencode-go
-  model: deepseek-v4.1-flash
+  # 11-25b：主棒改免費層（跟 Router 同路）。deepseek 配額死時子代理不再先白撞 429、
+  # 也不會落到 nim-pool 等幾分鐘；配額恢復後 deepseek 在鏈裡仍當品質腿。
+  model: hy4-flash-free
   max_iterations: 40
   # 11-11：interim_assistant_messages 關掉後，gateway_mode 預設 auto 會把派工改成同回合等待
   # （tools/delegate_tool_config.py gateway_delegation_inline），Router 整回合卡住、新訊息排隊。明寫 background。
@@ -96,13 +98,13 @@ delegation:
   # 沒寫時 429 一跳就死（11-25 00:23 兩個子代理各 1.2s 陣亡）。階梯照 worker：of 免費層 → oo 自有 key。
   fallback_providers:
     - provider: opencode-go
-      model: hy4-flash-free
-    - provider: opencode-go
       model: beam-free
     - provider: opencode-go
       model: iceman-contributor-free
+    - provider: opencode-go
+      model: deepseek-v4.1-flash
     - provider: omniroute
-      model: nim-pool
+      model: nim-pool      # 殿後：跨 provider 活路，但 NIM 池冷啟動可能幾分鐘，只當最後手段
       base_url: http://127.0.0.1:20130/v1
       key_env: OMNIROUTE_API_KEY
 tools:

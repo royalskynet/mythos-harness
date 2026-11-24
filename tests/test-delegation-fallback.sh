@@ -47,6 +47,10 @@ def check_chain(chain, where):
 
 ok = True
 ok &= check_chain((cfg.get("delegation") or {}).get("fallback_providers"), "delegation.fallback_providers")
+primary = str((cfg.get("delegation") or {}).get("model") or "")
+if not primary.endswith("-free"):
+    print(f"FAIL: {f} delegation.model 是 {primary}（要 *-free：配額死時子代理先白撞 429、再落到慢的 oo 腿）"); ok = False
+
 ok &= check_chain(cfg.get("fallback_providers"), "頂層 fallback_providers")
 sys.exit(0 if ok else 1)
 PY
