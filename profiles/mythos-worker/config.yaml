@@ -5,10 +5,15 @@ model:
   api_mode: chat_completions
 # Top level, NOT under `model:`（照抄 mythos；get_fallback_chain() 只讀頂層）。
 fallback_providers:
-  # 11-24 階梯對齊派o分層：od（Go 訂閱）→ of（o 免費池）→ oo（自有 key 免費層）。
+  # 11-24 階梯對齊派o分層：od（Go 訂閱）→ of（Go *-free 系列，API 可直打、不吃月配額）→ oo（自有 key 免費層）。
   # glm-5.3-flash 移除：跟主模型同月配額，配額爆時保證死、只多浪費一跳。
+  # of 層只收 opencode-go/*-free（Zen 免費層禁 API 直打）；名單對齊 dispatch-router catalog 未移除者。
   - provider: opencode-go
-    model: beam-free        # of 層：Go 免費模型，不吃月配額（11-24 實測 ds/glm 429 時仍 200）
+    model: hy4-flash-free            # of；mythos router 生產預設，11-24 實測 200
+  - provider: opencode-go
+    model: beam-free                 # of；catalog ok（gaps 12跑8過），11-24 實測 200
+  - provider: opencode-go
+    model: iceman-contributor-free   # of；catalog ok，11-24 實測 200
   - provider: omniroute
     model: nim-pool         # oo 層：OmniRoute → 自有 NIM key 池，非 Go 腿
     base_url: http://127.0.0.1:20130/v1
