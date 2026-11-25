@@ -81,10 +81,24 @@ def _mini_load(text):
             out[k.strip()] = scalar(v) if v.strip() else parse(ind0 + 1)
         return out
 
-    return parse(0) or {}
+    r = parse(0) or {}
+    assert pos[0] == len(toks), "mini yaml: 未吃完（不支援的語法）"
+    return r
 
 
-cfg = _mini_load(open(sys.argv[1]).read())
+try:
+    import yaml
+except ImportError:
+    yaml = None
+# 自測：block scalar 等未支援語法必須丟例外，不能靜默吃一半
+try:
+    _mini_load("note: |\n  block scalar\n")
+except AssertionError:
+    pass
+else:
+    print("FAIL: 迷你 parser 吃下 block scalar 沒丟例外")
+    sys.exit(1)
+cfg = yaml.safe_load(open(sys.argv[1])) if yaml else _mini_load(open(sys.argv[1]).read())
 f = sys.argv[1]
 named = {p.get("name") for p in (cfg.get("custom_providers") or []) if isinstance(p, dict)}
 core = {"opencode-go", "openrouter", "anthropic", "openai", "google", "copilot", "nous", "ollama"}
@@ -191,10 +205,24 @@ def _mini_load(text):
             out[k.strip()] = scalar(v) if v.strip() else parse(ind0 + 1)
         return out
 
-    return parse(0) or {}
+    r = parse(0) or {}
+    assert pos[0] == len(toks), "mini yaml: 未吃完（不支援的語法）"
+    return r
 
 
-cfg = _mini_load(open(sys.argv[1]).read())
+try:
+    import yaml
+except ImportError:
+    yaml = None
+# 自測：block scalar 等未支援語法必須丟例外，不能靜默吃一半
+try:
+    _mini_load("note: |\n  block scalar\n")
+except AssertionError:
+    pass
+else:
+    print("FAIL: 迷你 parser 吃下 block scalar 沒丟例外")
+    sys.exit(1)
+cfg = yaml.safe_load(open(sys.argv[1])) if yaml else _mini_load(open(sys.argv[1]).read())
 f = sys.argv[1]
 named = {p.get("name") for p in (cfg.get("custom_providers") or []) if isinstance(p, dict)}
 chain = cfg.get("fallback_providers") or []

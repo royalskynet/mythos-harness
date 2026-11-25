@@ -170,4 +170,38 @@ llm(session_id="child-loud", turn_id="c1", user_message=done_msg)
 guard.CHILD_SESSIONS.add("child-loud")
 assert out(response_text="[SILENT]", session_id="child-loud", turn_id="c1") is None, "子代理不動"
 assert out(response_text="[SILENT]", session_id="loud-1", turn_id="stale") is None, "turn 對不上不動"
+
+# fail-closed 包裝：_policy 丟例外時，Router 擋、一般子代理放、hard 子代理照擋。
+_orig_policy = guard._policy
+
+
+def _boom_runtime(*_a, **_kw):
+    raise RuntimeError("boom")
+
+
+def _boom_exit(*_a, **_kw):
+    raise SystemExit(3)
+
+
+try:
+    guard._policy = _boom_runtime
+    r = guard._on_pre_tool_call(tool_name="terminal", args={}, session_id="")
+    assert r and r.get("action") == "block" and r.get("message") == guard.MESSAGE, r
+    r = guard._on_pre_tool_call(tool_name="terminal", args={}, session_id="router-exc")
+    assert r and r.get("action") == "block" and r.get("message") == guard.MESSAGE, r
+    guard.CHILD_SESSIONS.add("child-exc")
+    assert guard._on_pre_tool_call(tool_name="terminal", args={}, session_id="child-exc") is None
+    guard.CHILD_SESSIONS.add("child-hard-exc")
+    guard.PLAN_PENDING.add("child-hard-exc")
+    r = guard._on_pre_tool_call(tool_name="terminal", args={}, session_id="child-hard-exc")
+    assert r and r.get("action") == "block" and r.get("message") == guard.PLAN_MESSAGE, r
+    guard._policy = _boom_exit
+    r = guard._on_pre_tool_call(tool_name="terminal", args={}, session_id="router-exit")
+    assert r and r.get("action") == "block" and r.get("message") == guard.MESSAGE, r
+finally:
+    guard._policy = _orig_policy
+    guard.CHILD_SESSIONS.discard("child-exc")
+    guard.CHILD_SESSIONS.discard("child-hard-exc")
+    guard.PLAN_PENDING.discard("child-hard-exc")
+
 print("ROUTER_GUARD_OK")
