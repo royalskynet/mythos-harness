@@ -5,7 +5,11 @@
 欄位：calls=成功 API call 數、p50/p95=latency 秒（nearest-rank）、
       err429=「API call failed ... summary=HTTP 429」數、pool-skip=「Fallback skip: P/M credential pool is exhausted」數。
 
-用法：bin/delegation-latency [--logdir DIR] [--selftest]
+歸屬：每行 [<tag>] 對到最近一次同 tag 的
+      agent.turn_context「conversation turn ... platform=<p>」；
+      沒對到 turn 的行 platform 視為 "?"。
+
+用法：bin/delegation-latency [--logdir DIR] [--platform {all,subagent,telegram,cli}] [--since "YYYY-MM-DD HH:MM"] [--selftest]
 """
 from __future__ import annotations
 
@@ -21,6 +25,10 @@ RE_CALL = re.compile(r"API call #\d+: model=(\S+) provider=(\S+).*?\blatency=([\
 RE_FAIL = re.compile(r"API call failed \(attempt .*?\).*?\bprovider=(\S+).*?\bmodel=(\S+).*?\bsummary=HTTP (\d{3})\b")
 RE_FB_ON = re.compile(r"Fallback activated: (\S+) (?:→|->) (\S+) \((\S+)\)")
 RE_FB_SKIP = re.compile(r"Fallback skip: (\S+)/(\S+) credential pool is exhausted")
+RE_TURN = re.compile(r"agent\.turn_context: conversation turn: .*?\bplatform=(\S+)")
+RE_TAG = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}\s+\w+\s+\[([^\]]+)\]")
+RE_TS = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}")
+RE_SINCE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}")
 
 SAMPLE = """\
 2026-11-25 00:00:01,000 INFO [s1] agent.conversation_loop: API call #1: model=hy4-flash-free provider=opencode-go in=100 out=50 total=150 latency=2.0s id=a
@@ -32,14 +40,40 @@ SAMPLE = """\
 2026-11-25 00:00:08,000 INFO [s2] agent.conversation_loop: API call #1: model=nim-pool provider=omniroute in=100 out=50 total=150 latency=1.3s id=d
 """
 
+# 帶 platform 歸屬與跨日時間點的樣本：t1=telegram、w1=subagent、zz 無對應 turn。
+SAMPLE2 = """\
+2026-11-25 00:00:01,000 INFO [t1] agent.turn_context: conversation turn: session=s1 model=m provider=p platform=telegram history=0 msg=hi
+2026-11-25 00:00:02,000 INFO [t1] agent.conversation_loop: API call #1: model=rt provider=opencode-go in=1 out=1 total=2 latency=1.0s id=a
+2026-11-25 00:00:03,000 WARNING [t1] agent.conversation_loop: API call failed (attempt 1/1) error_type=RateLimitError thread=t provider=opencode-go base_url=https://x model=rt summary=HTTP 429: quota
+2026-11-25 00:00:04,000 INFO [w1] agent.turn_context: conversation turn: session=s2 model=m provider=p platform=subagent history=0 msg=go
+2026-11-25 00:00:05,000 INFO [w1] agent.conversation_loop: API call #1: model=sub provider=omniroute in=1 out=1 total=2 latency=2.0s id=b
+2026-11-25 00:00:06,000 WARNING [w1] agent.conversation_loop: API call failed (attempt 1/1) error_type=RateLimitError thread=t provider=omniroute base_url=https://x model=sub summary=HTTP 429: quota
+2026-11-26 10:00:00,000 INFO [w1] agent.conversation_loop: API call #2: model=sub provider=omniroute in=1 out=1 total=2 latency=4.0s id=c
+2026-11-26 10:00:01,000 INFO [zz] agent.conversation_loop: API call #1: model=untag provider=opencode-go in=1 out=1 total=2 latency=9.0s id=d
+"""
+
 
 def percentile(vals, q):
     s = sorted(vals)
     return s[max(0, math.ceil(q * len(s)) - 1)]
 
 
-def parse_lines(lines, legs, fb_activated):
+def parse_lines(lines, legs, fb_activated, platform="all", since=None, tag_platform=None):
+    if tag_platform is None:
+        tag_platform = {}
     for line in lines:
+        m = RE_TURN.search(line)
+        if m:
+            t = RE_TAG.match(line)
+            if t:
+                tag_platform[t.group(1)] = m.group(1)
+            continue
+        if since and RE_TS.match(line) and line[:16] < since:
+            continue
+        if platform != "all":
+            t = RE_TAG.match(line)
+            if tag_platform.get(t.group(1) if t else None, "?") != platform:
+                continue
         m = RE_CALL.search(line)
         if m:
             legs[(m.group(2), m.group(1))]["latency"].append(float(m.group(3)))
@@ -58,7 +92,15 @@ def parse_lines(lines, legs, fb_activated):
             legs[(m.group(1), m.group(2))]["pool_skip"] += 1
 
 
-def report(legs, fb_activated, out=sys.stdout):
+def collect(lines, platform="all", since=None):
+    legs = defaultdict(lambda: {"latency": [], "err429": 0, "pool_skip": 0})
+    fb = Counter()
+    parse_lines(lines, legs, fb, platform=platform, since=since)
+    return legs, fb
+
+
+def report(legs, fb_activated, platform="all", since=None, out=sys.stdout):
+    print(f"filter: platform={platform} since={since or '-'}", file=out)
     print(f"{'leg (provider/model)':44s} {'calls':>5s} {'p50s':>6s} {'p95s':>6s} {'429':>4s} {'pool-skip':>9s}", file=out)
     for (prov, model), d in sorted(legs.items(), key=lambda kv: (-len(kv[1]["latency"]), kv[0])):
         lat = d["latency"]
@@ -71,16 +113,27 @@ def report(legs, fb_activated, out=sys.stdout):
             print(f"  {old} → {new} ({prov}): {n}", file=out)
 
 
+def rot_key(path):
+    base = os.path.basename(path)
+    if base == "agent.log":
+        return -1
+    m = re.match(r"agent\.log\.(\d+)$", base)
+    return int(m.group(1)) if m else 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--logdir", default=os.path.expanduser("~/.hermes/profiles/mythos/logs"))
+    ap.add_argument("--platform", choices=["all", "subagent", "telegram", "cli"], default="all")
+    ap.add_argument("--since", default=None, help='只計 "YYYY-MM-DD HH:MM"（本機時間）之後的行')
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
 
+    if a.since and not RE_SINCE.fullmatch(a.since):
+        ap.error("--since 需為 'YYYY-MM-DD HH:MM'")
+
     if a.selftest:
-        legs = defaultdict(lambda: {"latency": [], "err429": 0, "pool_skip": 0})
-        fb = Counter()
-        parse_lines(SAMPLE.splitlines(), legs, fb)
+        legs, fb = collect(SAMPLE.splitlines())
         assert sorted(legs[("opencode-go", "hy4-flash-free")]["latency"]) == [2.0, 4.0, 8.0]
         assert percentile(legs[("opencode-go", "hy4-flash-free")]["latency"], 0.5) == 4.0
         assert percentile(legs[("opencode-go", "hy4-flash-free")]["latency"], 0.95) == 8.0
@@ -88,22 +141,40 @@ def main():
         assert legs[("opencode-go", "beam-free")]["pool_skip"] == 1
         assert fb[("deepseek-v4.1-flash", "nim-pool", "omniroute")] == 1
         assert legs[("omniroute", "nim-pool")]["latency"] == [1.3]
+
+        legs, _ = collect(SAMPLE2.splitlines(), platform="subagent")
+        assert sorted(legs[("omniroute", "sub")]["latency"]) == [2.0, 4.0]
+        assert legs[("omniroute", "sub")]["err429"] == 1
+        assert ("opencode-go", "rt") not in legs
+        assert ("opencode-go", "untag") not in legs
+        legs, _ = collect(SAMPLE2.splitlines(), platform="telegram")
+        assert legs[("opencode-go", "rt")]["latency"] == [1.0]
+        assert legs[("opencode-go", "rt")]["err429"] == 1
+        assert ("omniroute", "sub") not in legs
+        legs, _ = collect(SAMPLE2.splitlines(), since="2026-11-26 00:00")
+        assert legs[("omniroute", "sub")]["latency"] == [4.0]
+        assert legs[("omniroute", "sub")]["err429"] == 0
+        assert legs[("opencode-go", "untag")]["latency"] == [9.0]
+        assert ("opencode-go", "rt") not in legs
+        legs, _ = collect(SAMPLE2.splitlines())
+        assert legs[("opencode-go", "untag")]["latency"] == [9.0]
         print("DELEGATION-LATENCY SELFTEST PASS")
         return 0
 
-    files = sorted(glob.glob(os.path.join(a.logdir, "agent.log*")))
+    files = sorted(glob.glob(os.path.join(a.logdir, "agent.log*")), key=rot_key, reverse=True)
     legs = defaultdict(lambda: {"latency": [], "err429": 0, "pool_skip": 0})
     fb = Counter()
+    tag_platform = {}
     for path in files:
         try:
             with open(path, encoding="utf-8", errors="replace") as fh:
-                parse_lines(fh, legs, fb)
+                parse_lines(fh, legs, fb, platform=a.platform, since=a.since, tag_platform=tag_platform)
         except OSError:
             pass
     if not legs and not fb:
         print(f"no data in {a.logdir}", file=sys.stderr)
         return 1
-    report(legs, fb)
+    report(legs, fb, platform=a.platform, since=a.since)
     return 0
 
 
