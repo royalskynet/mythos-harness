@@ -16,8 +16,75 @@ fail=0 n=0
 for f in profiles/mythos/config.yaml; do
   n=$((n+1))
   python3 - "$f" <<'PY' || fail=1
-import sys, yaml
-cfg = yaml.safe_load(open(sys.argv[1]))
+import re
+import sys
+
+
+def _mini_load(text):
+    # 最小 YAML 子集：本 repo config 只用 map、scalar list、map list（CI 乾淨環境沒有 PyYAML）
+    toks = []
+    for raw in text.splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        cut = raw.find(" #")
+        line = (raw[:cut] if cut != -1 else raw).rstrip()
+        toks.append((len(line) - len(line.lstrip(" ")), line.strip()))
+    pos = [0]
+
+    def scalar(v):
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            return v[1:-1]
+        if v in ("true", "yes"):
+            return True
+        if v in ("false", "no"):
+            return False
+        if v in ("", "null", "~"):
+            return None
+        try:
+            return int(v)
+        except ValueError:
+            try:
+                return float(v)
+            except ValueError:
+                return v
+
+    def parse(min_indent):
+        if pos[0] >= len(toks) or toks[pos[0]][0] < min_indent:
+            return None
+        ind0, c0 = toks[pos[0]]
+        if c0.startswith("- "):
+            out = []
+            while pos[0] < len(toks):
+                ind, c = toks[pos[0]]
+                if ind != ind0 or not c.startswith("- "):
+                    break
+                pos[0] += 1
+                item = c[2:]
+                if re.match(r"^[^\s:]+:\s*", item):
+                    k, _, v = item.partition(":")
+                    d = {k.strip(): scalar(v)}
+                    sub = parse(ind0 + 2)
+                    if isinstance(sub, dict):
+                        d.update(sub)
+                    out.append(d)
+                else:
+                    out.append(scalar(item))
+            return out
+        out = {}
+        while pos[0] < len(toks):
+            ind, c = toks[pos[0]]
+            if ind != ind0 or c.startswith("- ") or ":" not in c:
+                break
+            k, _, v = c.partition(":")
+            pos[0] += 1
+            out[k.strip()] = scalar(v) if v.strip() else parse(ind0 + 1)
+        return out
+
+    return parse(0) or {}
+
+
+cfg = _mini_load(open(sys.argv[1]).read())
 f = sys.argv[1]
 named = {p.get("name") for p in (cfg.get("custom_providers") or []) if isinstance(p, dict)}
 core = {"opencode-go", "openrouter", "anthropic", "openai", "google", "copilot", "nous", "ollama"}
@@ -59,8 +126,75 @@ done
 for f in profiles/mythos-worker/config.yaml; do
   n=$((n+1))
   python3 - "$f" <<'PY' || fail=1
-import sys, yaml
-cfg = yaml.safe_load(open(sys.argv[1]))
+import re
+import sys
+
+
+def _mini_load(text):
+    # 最小 YAML 子集：本 repo config 只用 map、scalar list、map list（CI 乾淨環境沒有 PyYAML）
+    toks = []
+    for raw in text.splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        cut = raw.find(" #")
+        line = (raw[:cut] if cut != -1 else raw).rstrip()
+        toks.append((len(line) - len(line.lstrip(" ")), line.strip()))
+    pos = [0]
+
+    def scalar(v):
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            return v[1:-1]
+        if v in ("true", "yes"):
+            return True
+        if v in ("false", "no"):
+            return False
+        if v in ("", "null", "~"):
+            return None
+        try:
+            return int(v)
+        except ValueError:
+            try:
+                return float(v)
+            except ValueError:
+                return v
+
+    def parse(min_indent):
+        if pos[0] >= len(toks) or toks[pos[0]][0] < min_indent:
+            return None
+        ind0, c0 = toks[pos[0]]
+        if c0.startswith("- "):
+            out = []
+            while pos[0] < len(toks):
+                ind, c = toks[pos[0]]
+                if ind != ind0 or not c.startswith("- "):
+                    break
+                pos[0] += 1
+                item = c[2:]
+                if re.match(r"^[^\s:]+:\s*", item):
+                    k, _, v = item.partition(":")
+                    d = {k.strip(): scalar(v)}
+                    sub = parse(ind0 + 2)
+                    if isinstance(sub, dict):
+                        d.update(sub)
+                    out.append(d)
+                else:
+                    out.append(scalar(item))
+            return out
+        out = {}
+        while pos[0] < len(toks):
+            ind, c = toks[pos[0]]
+            if ind != ind0 or c.startswith("- ") or ":" not in c:
+                break
+            k, _, v = c.partition(":")
+            pos[0] += 1
+            out[k.strip()] = scalar(v) if v.strip() else parse(ind0 + 1)
+        return out
+
+    return parse(0) or {}
+
+
+cfg = _mini_load(open(sys.argv[1]).read())
 f = sys.argv[1]
 named = {p.get("name") for p in (cfg.get("custom_providers") or []) if isinstance(p, dict)}
 chain = cfg.get("fallback_providers") or []

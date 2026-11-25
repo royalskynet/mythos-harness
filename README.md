@@ -16,6 +16,7 @@ A Telegram assistant shell on [Hermes](https://github.com/NousResearch/Hermes-Ag
   - 隔離修改 / Isolated edits：子代理改 git repo 前先 `git worktree add`，驗過再合回（寫在 `AGENTS.md`，未開 Hermes 原生 `worktree_isolation`）。/ Subagents edit git repos in a `git worktree` first (rule in `AGENTS.md`; Hermes native `worktree_isolation` stays off).
 - **記憶 / Memory**：`memory.provider: claude-mem`；線上 `plugins/claude-mem` symlink 到 `~/.hermes/plugins/claude-mem`。每輪注入由 gateway plist 的 `CLAUDE_MEM_HERMES_TURN_LIMIT=1`、`TURN_MAX=300` 壓低。/ Turn injection throttled by gateway plist env vars.
 - **線上 profile / Live profile**：`~/.hermes/profiles/mythos`，保留本機設定。/ Local settings preserved.
+- **`profiles/mythos-worker/`**：deprecated，保留當 one-shot 參考；派工走 mythos 的 `delegate_task`。/ Retired; kept for one-shot reference.
 
 ## 外掛 / Plugins (`profiles/mythos/plugins/`)
 

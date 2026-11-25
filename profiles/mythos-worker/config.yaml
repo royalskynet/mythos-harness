@@ -56,6 +56,9 @@ providers:
         # 90 秒沒進展就重試。樣本正常首回最長 55s。代價：健康但沉默超過 90s 的長思考會被重送
         timeout_seconds: 90
         stale_timeout_seconds: 90
+compression:
+  proactive_prune_tokens: 16000  # 11-12 省 token：超過就先剪掉舊的大型工具輸出（不叫模型）
+  threshold_tokens: 32000  # 11-12 省 token：對話超過這個量就壓縮，不等到視窗的 75%
 # 11-25：fallback 鏈的 provider: omniroute 要在 custom_providers 註冊才 bind 得到
 # （route_binding.py resolve_provider_client 找不到名 → "provider not configured"）。
 custom_providers:

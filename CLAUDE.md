@@ -11,4 +11,5 @@
 - 記憶分工：長期記憶＝Hermes 內建 `memories/`（MEMORY.md、USER.md）＋claude-mem；`state.db` 只是對話紀錄庫，`sessions.auto_prune` 保留 7 天，Router 不用 `session_search`。
 - 本機輔助腳本與營運筆記不進 repo：腳本放 `bin/`（gitignore），筆記放 `CLAUDE.local.md`。
 - 線上 profile：`~/.hermes/profiles/mythos`，保留其本機設定。repo 的 `AGENTS.md`、`SOUL.md` 是通用範本；線上版含個人與設備細節，部署不覆蓋（公開 repo 只放通用架構）。
+- `profiles/mythos-worker/`：已退役（deprecated），保留當 one-shot 參考；派工走 mythos 的 `delegate_task`＋`delegation.fallback_providers`。
 - 驗收：tests/ 與 `profiles/mythos/plugins/*/test_*`；隔離 profile 停用 Telegram。

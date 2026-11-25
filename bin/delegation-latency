@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""delegation-latency — 依腿（provider/model）統計 Hermes 日誌的 API call 延遲與 429。
+
+讀 <logdir>/agent.log 與 agent.log.*（輪轉檔），唯讀、零 token。
+欄位：calls=成功 API call 數、p50/p95=latency 秒（nearest-rank）、
+      err429=「API call failed ... summary=HTTP 429」數、pool-skip=「Fallback skip: P/M credential pool is exhausted」數。
+
+用法：bin/delegation-latency [--logdir DIR] [--selftest]
+"""
+from __future__ import annotations
+
+import argparse
+import glob
+import math
+import os
+import re
+import sys
+from collections import Counter, defaultdict
+
+RE_CALL = re.compile(r"API call #\d+: model=(\S+) provider=(\S+).*?\blatency=([\d.]+)s\b")
+RE_FAIL = re.compile(r"API call failed \(attempt .*?\).*?\bprovider=(\S+).*?\bmodel=(\S+).*?\bsummary=HTTP (\d{3})\b")
+RE_FB_ON = re.compile(r"Fallback activated: (\S+) (?:→|->) (\S+) \((\S+)\)")
+RE_FB_SKIP = re.compile(r"Fallback skip: (\S+)/(\S+) credential pool is exhausted")
+
+SAMPLE = """\
+2026-11-25 00:00:01,000 INFO [s1] agent.conversation_loop: API call #1: model=hy4-flash-free provider=opencode-go in=100 out=50 total=150 latency=2.0s id=a
+2026-11-25 00:00:02,000 INFO [s1] agent.conversation_loop: API call #2: model=hy4-flash-free provider=opencode-go in=100 out=50 total=150 latency=4.0s id=b
+2026-11-25 00:00:03,000 INFO [s1] agent.conversation_loop: API call #3: model=hy4-flash-free provider=opencode-go in=100 out=50 total=150 latency=8.0s id=c
+2026-11-25 00:00:04,000 WARNING [s2] agent.conversation_loop: API call failed (attempt 1/1) error_type=RateLimitError thread=t provider=opencode-go base_url=https://x model=deepseek-v4.1-flash summary=HTTP 429: quota
+2026-11-25 00:00:05,000 WARNING [s2] agent.chat_completion_helpers: Fallback skip: opencode-go/beam-free credential pool is exhausted (every entry in cooldown)
+2026-11-25 00:00:06,000 INFO [s2] agent.chat_completion_helpers: Fallback activated: deepseek-v4.1-flash → nim-pool (omniroute)
+2026-11-25 00:00:08,000 INFO [s2] agent.conversation_loop: API call #1: model=nim-pool provider=omniroute in=100 out=50 total=150 latency=1.3s id=d
+"""
+
+
+def percentile(vals, q):
+    s = sorted(vals)
+    return s[max(0, math.ceil(q * len(s)) - 1)]
+
+
+def parse_lines(lines, legs, fb_activated):
+    for line in lines:
+        m = RE_CALL.search(line)
+        if m:
+            legs[(m.group(2), m.group(1))]["latency"].append(float(m.group(3)))
+            continue
+        m = RE_FAIL.search(line)
+        if m:
+            if m.group(3) == "429":
+                legs[(m.group(1), m.group(2))]["err429"] += 1
+            continue
+        m = RE_FB_ON.search(line)
+        if m:
+            fb_activated[(m.group(1), m.group(2), m.group(3))] += 1
+            continue
+        m = RE_FB_SKIP.search(line)
+        if m:
+            legs[(m.group(1), m.group(2))]["pool_skip"] += 1
+
+
+def report(legs, fb_activated, out=sys.stdout):
+    print(f"{'leg (provider/model)':44s} {'calls':>5s} {'p50s':>6s} {'p95s':>6s} {'429':>4s} {'pool-skip':>9s}", file=out)
+    for (prov, model), d in sorted(legs.items(), key=lambda kv: (-len(kv[1]["latency"]), kv[0])):
+        lat = d["latency"]
+        p50 = f"{percentile(lat, 0.5):.1f}" if lat else "-"
+        p95 = f"{percentile(lat, 0.95):.1f}" if lat else "-"
+        print(f"{prov}/{model:33s} {len(lat):5d} {p50:>6s} {p95:>6s} {d['err429']:4d} {d['pool_skip']:9d}", file=out)
+    if fb_activated:
+        print("fallback activated:", file=out)
+        for (old, new, prov), n in sorted(fb_activated.items()):
+            print(f"  {old} → {new} ({prov}): {n}", file=out)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--logdir", default=os.path.expanduser("~/.hermes/profiles/mythos/logs"))
+    ap.add_argument("--selftest", action="store_true")
+    a = ap.parse_args()
+
+    if a.selftest:
+        legs = defaultdict(lambda: {"latency": [], "err429": 0, "pool_skip": 0})
+        fb = Counter()
+        parse_lines(SAMPLE.splitlines(), legs, fb)
+        assert sorted(legs[("opencode-go", "hy4-flash-free")]["latency"]) == [2.0, 4.0, 8.0]
+        assert percentile(legs[("opencode-go", "hy4-flash-free")]["latency"], 0.5) == 4.0
+        assert percentile(legs[("opencode-go", "hy4-flash-free")]["latency"], 0.95) == 8.0
+        assert legs[("opencode-go", "deepseek-v4.1-flash")]["err429"] == 1
+        assert legs[("opencode-go", "beam-free")]["pool_skip"] == 1
+        assert fb[("deepseek-v4.1-flash", "nim-pool", "omniroute")] == 1
+        assert legs[("omniroute", "nim-pool")]["latency"] == [1.3]
+        print("DELEGATION-LATENCY SELFTEST PASS")
+        return 0
+
+    files = sorted(glob.glob(os.path.join(a.logdir, "agent.log*")))
+    legs = defaultdict(lambda: {"latency": [], "err429": 0, "pool_skip": 0})
+    fb = Counter()
+    for path in files:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                parse_lines(fh, legs, fb)
+        except OSError:
+            pass
+    if not legs and not fb:
+        print(f"no data in {a.logdir}", file=sys.stderr)
+        return 1
+    report(legs, fb)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

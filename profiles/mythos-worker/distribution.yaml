@@ -1,6 +1,6 @@
 name: mythos-worker
 version: 1.0.0
-description: "Mythos worker：hermes -z 無人值守跑 Router 派下的工"
+description: "deprecated：Mythos worker：hermes -z 無人值守跑 Router 派下的工"
 hermes_requires: ">=0.21.0"
 author: "royalskynet"
 license: "MIT"

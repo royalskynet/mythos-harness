@@ -42,7 +42,8 @@ r2 = guard._on_pre_tool_call(tool_name="delegate_task", args={"goal": "x", "outp
 assert r2["action"] == "modify" and r2["args"]["background"] is True, r2
 assert r2["args"]["output_schema"] is mine, r2
 assert guard._on_pre_tool_call(tool_name="terminal", args={})["message"].startswith("Router 不動手")
-assert open(guard.LOG).read().count("\tterminal\n") == 2
+assert open(guard.LOG).read().count("\tterminal\tunknown\n") == 2
+assert all(len(l.split("\t")) == 3 for l in open(guard.LOG).read().splitlines()), "每行都要 時間／工具／session 三欄"
 # 真正 register 的 lifecycle callback 必須記下 child id，空 id 不可放行。
 class Context:
     def __init__(self):
