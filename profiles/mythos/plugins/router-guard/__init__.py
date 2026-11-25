@@ -247,7 +247,7 @@ def check(tool_name: str) -> bool:
     return tool_name in ALLOWED
 
 
-def _on_pre_tool_call(tool_name: str = "", args: Optional[Dict[str, Any]] = None, session_id: str = "", **_: Any) -> Optional[dict]:
+def _policy(tool_name: str = "", args: Optional[Dict[str, Any]] = None, session_id: str = "", **_: Any) -> Optional[dict]:
     pending = TIERS.pop(session_id, None)
     if pending is not None:  # 子代理第一次動工具：取分級結果（在子代理自己的執行緒等，不占 Router）
         try:
@@ -274,8 +274,30 @@ def _on_pre_tool_call(tool_name: str = "", args: Optional[Dict[str, Any]] = None
         return {"action": "modify", "args": new_args}
     if check(tool_name):
         return None
-    _log(LOG, tool_name)  # 記帳失敗也要擋
+    _log(LOG, tool_name or "unknown", session_id or "unknown")  # 記帳失敗也要擋；3 欄：時間／工具／session
     return {"action": "block", "message": MESSAGE}
+
+
+def _on_pre_tool_call(tool_name: str = "", args: Optional[Dict[str, Any]] = None, session_id: str = "", **_: Any) -> Optional[dict]:
+    """守門入口：任何例外一律 fail-closed，不讓它冒成放行。
+
+    本體 hermes_cli/plugins_dispatch.py 對 hook 例外已否決，但 model_tools.py:799-811
+    那圈是 fail-open（logger.debug 後照做），所以這裡自己再包一層。
+    hard 子代理還沒拿計畫時，例外也照擋；一般子代理例外則放行（避免卡死派工）。
+    """
+    try:
+        return _policy(tool_name, args, session_id)
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 寧可擋錯也不可放行
+        sid = str(session_id or "") or "unknown"
+        try:
+            _log(LOG, f"{tool_name or 'unknown'}!{type(exc).__name__}", sid)
+        except Exception:  # 記帳自己再炸就別連累判斷
+            pass
+        if sid in CHILD_SESSIONS:
+            if sid in PLAN_PENDING:  # hard 子代理還沒拿計畫：例外也照擋，且要它先去規劃
+                return {"action": "block", "message": PLAN_MESSAGE}
+            return None
+        return {"action": "block", "message": MESSAGE}
 
 
 def register(ctx) -> None:

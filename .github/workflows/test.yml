@@ -17,3 +17,7 @@ jobs:
       - run: bash tests/test-delegation-background.sh
       - run: python3 profiles/mythos/plugins/mythos-tools/test_recall.py
       - run: python3 profiles/mythos/plugins/router-guard/test_guard.py
+      - run: bash tests/test-delegation-fallback.sh
+      - run: bash tests/test-session-retention.sh
+      - run: bash tests/test-worker-soul-contract.sh
+      - run: bash tests/test-delegation-latency.sh

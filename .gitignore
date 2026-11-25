@@ -13,6 +13,7 @@
 !/bin/genie-context
 !/bin/recall
 !/bin/plan-hard
+!/bin/delegation-latency
 !/profiles/
 /profiles/*
 !/profiles/mythos-worker/
@@ -58,3 +59,9 @@
 *.bak*
 __pycache__/
 !/tests/test-delegation-fallback.sh
+!/tests/test-delegation-latency.sh
+!/docs/
+/docs/*
+!/docs/gap/
+/docs/gap/*
+!/docs/gap/2026-11-25-go-free-bucket.md
