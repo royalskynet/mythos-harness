@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""delegation-pick — 主棒機械建議：比免費棒與品質棒的 calls/p50/p95/429。
+
+治標（mythos-harness#4）：配額重置後該不該把 delegation.model 翻回品質棒，
+先由日誌數據給機械建議；品質 vs 免費的最終取捨仍由人裁，本腳本不改設定。
+唯讀、零 token、不連外網；日誌解析重用 delegation-latency。
+
+判定順序：品質腿重置後仍有 429 且成功 calls 不足 → 維持免費棒；
+      任一眼 calls < --min → 樣本不足；品質腿有 429 → 維持；
+      品質腿 p50 ≤ 免費腿 p50 × --slow → 可翻回；否則維持（太慢）。
+exit 0＝有結論（可翻回／維持）、1＝樣本不足或無資料、2＝參數或讀檔錯。
+
+用法：bin/delegation-pick [--logdir DIR] [--platform P] [--since "YYYY-MM-DD HH:MM"]
+      [--free MODEL] [--paid MODEL] [--min N] [--slow X] [--selftest]
+"""
+from __future__ import annotations
+
+import argparse
+import glob
+import os
+import re
+import sys
+from collections import Counter, defaultdict
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
+
+_DL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "delegation-latency")
+_spec = spec_from_loader("delegation_latency", SourceFileLoader("delegation_latency", _DL_PATH))
+dl = module_from_spec(_spec)
+_spec.loader.exec_module(dl)
+
+# c=乾淨快腿（可翻回）、e=品質腿仍 429、f=免費腿樣本少、n=兩腿都夠但品質腿慢。
+SAMPLE_FLIP = """\
+2026-11-26 11:00:01,000 INFO [s1] agent.conversation_loop: API call #1: model=hy4-flash-free provider=opencode-go in=1 out=1 total=2 latency=4.0s id=a
+2026-11-26 11:00:02,000 INFO [s1] agent.conversation_loop: API call #2: model=deepseek-v4.1-flash provider=opencode-go in=1 out=1 total=2 latency=2.0s id=b
+"""
+SAMPLE_429 = """\
+2026-11-26 11:00:01,000 INFO [s1] agent.conversation_loop: API call #1: model=hy4-flash-free provider=opencode-go in=1 out=1 total=2 latency=2.0s id=a
+2026-11-26 11:00:02,000 WARNING [s1] agent.conversation_loop: API call failed (attempt 1/1) error_type=RateLimitError thread=t provider=opencode-go base_url=https://x model=deepseek-v4.1-flash summary=HTTP 429: quota
+"""
+SAMPLE_SLOW = """\
+2026-11-26 11:00:01,000 INFO [s1] agent.conversation_loop: API call #1: model=hy4-flash-free provider=opencode-go in=1 out=1 total=2 latency=1.0s id=a
+2026-11-26 11:00:02,000 INFO [s1] agent.conversation_loop: API call #2: model=deepseek-v4.1-flash provider=opencode-go in=1 out=1 total=2 latency=5.0s id=b
+"""
+
+
+def leg_stats(legs, model):
+    lat, e429, pskip = [], 0, 0
+    for (_prov, m), d in legs.items():
+        if m == model:
+            lat += d["latency"]
+            e429 += d["err429"]
+            pskip += d["pool_skip"]
+    return lat, e429, pskip
+
+
+def decide(flat, f429, plat, p429, free, paid, min_calls, slow):
+    """回 (exit_code, 一行結論)。"""
+    calls = f"{paid} {len(plat)} calls／{free} {len(flat)} calls"
+    if len(plat) < min_calls or len(flat) < min_calls:
+        if p429:
+            return 0, f"維持 {free}：{paid} 重置後仍見 {p429} 筆 429，{calls}"
+        return 1, f"樣本不足：{calls}（各需 ≥{min_calls}）"
+    fp50, pp50 = dl.percentile(flat, 0.5), dl.percentile(plat, 0.5)
+    fp95, pp95 = dl.percentile(flat, 0.95), dl.percentile(plat, 0.95)
+    stat = f"p50 {pp50:.1f}s/{fp50:.1f}s、p95 {pp95:.1f}s/{fp95:.1f}s（{paid}/{free}），{calls}"
+    if p429:
+        return 0, f"維持 {free}：{paid} 重置後見 {p429} 筆 429，{stat}"
+    if pp50 <= fp50 * slow:
+        return 0, f"可翻回 {paid}：品質腿 p50 在免費腿 {slow}x 內且 429=0，{stat}"
+    return 0, f"維持 {free}：{paid} 明顯慢且只有免費優勢，{stat}"
+
+
+def load_legs(logdir, platform, since):
+    files = sorted((p for p in glob.glob(os.path.join(logdir, "agent.log*"))
+                    if re.fullmatch(r"agent\.log(\.\d+)?", os.path.basename(p))),
+                   key=dl.rot_key, reverse=True)
+    legs = defaultdict(lambda: {"latency": [], "err429": 0, "pool_skip": 0})
+    fb = Counter()
+    tag_platform = {}
+    for path in files:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                dl.parse_lines(fh, legs, fb, platform=platform, since=since, tag_platform=tag_platform)
+        except OSError as e:
+            print(f"warn: 讀不到 {path}: {e}", file=sys.stderr)
+    return legs
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--logdir", default=os.path.expanduser("~/.hermes/profiles/mythos/logs"))
+    ap.add_argument("--platform", choices=["all", "subagent", "telegram", "cli"], default="subagent")
+    ap.add_argument("--since", default=None, help='只計 "YYYY-MM-DD HH:MM"（本機時間）之後的行')
+    ap.add_argument("--free", default="hy4-flash-free")
+    ap.add_argument("--paid", default="deepseek-v4.1-flash")
+    ap.add_argument("--min", type=int, default=5, help="兩腿各自最少成功 calls 才比")
+    ap.add_argument("--slow", type=float, default=1.5, help="品質腿 p50 容忍為免費腿幾倍")
+    ap.add_argument("--selftest", action="store_true")
+    a = ap.parse_args()
+
+    if a.since and not dl.RE_SINCE.fullmatch(a.since):
+        ap.error("--since 需為 'YYYY-MM-DD HH:MM'")
+
+    if a.selftest:
+        for text, want_code, want_word in (
+            (SAMPLE_FLIP, 0, "可翻回"), (SAMPLE_429, 0, "維持"), (SAMPLE_SLOW, 0, "維持"), ("", 1, "樣本不足"),
+        ):
+            legs, _ = dl.collect(text.splitlines(), platform="all")
+            flat, f429, _ = leg_stats(legs, a.free)
+            plat, p429, _ = leg_stats(legs, a.paid)
+            code, line = decide(flat, f429, plat, p429, a.free, a.paid, 1, a.slow)
+            assert code == want_code and want_word in line, (want_code, code, line)
+        # 429 但成功 calls 不足：仍判維持不判樣本不足
+        legs, _ = dl.collect(SAMPLE_429.splitlines(), platform="all")
+        flat, f429, _ = leg_stats(legs, a.free)
+        plat, p429, _ = leg_stats(legs, a.paid)
+        code, line = decide(flat, f429, plat, p429, a.free, a.paid, 5, a.slow)
+        assert code == 0 and "維持" in line and "429" in line, line
+        print("DELEGATION-PICK SELFTEST PASS")
+        return 0
+
+    legs = load_legs(a.logdir, a.platform, a.since)
+    flat, f429, _ = leg_stats(legs, a.free)
+    plat, p429, _ = leg_stats(legs, a.paid)
+    code, line = decide(flat, f429, plat, p429, a.free, a.paid, a.min, a.slow)
+    print(line)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
