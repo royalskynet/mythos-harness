@@ -189,6 +189,9 @@ try:
     assert r and r.get("action") == "block" and r.get("message") == guard.MESSAGE, r
     r = guard._on_pre_tool_call(tool_name="terminal", args={}, session_id="router-exc")
     assert r and r.get("action") == "block" and r.get("message") == guard.MESSAGE, r
+    r = guard._on_pre_tool_call(tool_name="delegate_task", args={}, session_id="router-exc")
+    assert r and r.get("action") == "block" and r.get("message") == guard.ERROR_MESSAGE, r
+    assert "delegate_task" not in r["message"], "例外訊息不能再叫 Router 去打 delegate_task"
     guard.CHILD_SESSIONS.add("child-exc")
     assert guard._on_pre_tool_call(tool_name="terminal", args={}, session_id="child-exc") is None
     guard.CHILD_SESSIONS.add("child-hard-exc")
@@ -203,5 +206,30 @@ finally:
     guard.CHILD_SESSIONS.discard("child-exc")
     guard.CHILD_SESSIONS.discard("child-hard-exc")
     guard.PLAN_PENDING.discard("child-hard-exc")
+
+# 分級套用在記進 PLAN_PENDING 前丟例外：TIERS 要留著重取，不能讓 hard 永久漏成一般子代理。
+class _FlakySet(set):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    def add(self, x):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("add boom")
+        return super().add(x)
+
+
+_orig_pp = guard.PLAN_PENDING
+try:
+    guard.PLAN_PENDING = _FlakySet()
+    start(child_session_id="flaky-1", child_goal="HARD 會炸一次")
+    assert pre(tool_name="write_file", session_id="flaky-1") is None, "add 炸那次子代理照 fail-open 放行"
+    r = pre(tool_name="write_file", session_id="flaky-1")
+    assert r and r["action"] == "block" and "plan-hard" in r["message"], r
+finally:
+    guard.PLAN_PENDING = _orig_pp
+    guard.TIERS.pop("flaky-1", None)
+    guard.CHILD_SESSIONS.discard("flaky-1")
 
 print("ROUTER_GUARD_OK")
