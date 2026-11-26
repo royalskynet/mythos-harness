@@ -13,6 +13,8 @@ from typing import Any, Dict, Optional
 
 LOG = os.environ.get("MYTHOS_ROUTER_GUARD_LOG", os.path.expanduser("~/bots/mythos/state/router-guard.log"))
 MESSAGE = "Router 不動手：改呼叫 delegate_task"
+# 守門自己出錯時不能回 MESSAGE：「改呼叫 delegate_task」會誘導 Router 重送剛炸掉的那次 delegate_task。
+ERROR_MESSAGE = "守門出錯，這次沒守住，稍後再試"
 
 OUTPUT_SCHEMA = {
     "type": "object",
@@ -248,7 +250,7 @@ def check(tool_name: str) -> bool:
 
 
 def _policy(tool_name: str = "", args: Optional[Dict[str, Any]] = None, session_id: str = "", **_: Any) -> Optional[dict]:
-    pending = TIERS.pop(session_id, None)
+    pending = TIERS.get(session_id)
     if pending is not None:  # 子代理第一次動工具：取分級結果（在子代理自己的執行緒等，不占 Router）
         try:
             tier = pending.result(timeout=15)
@@ -256,6 +258,7 @@ def _policy(tool_name: str = "", args: Optional[Dict[str, Any]] = None, session_
             tier = "mid"
         if tier == "hard" and os.access(PLAN_BIN, os.X_OK):  # 沒有規劃人就不擋，照 mid 走
             PLAN_PENDING.add(session_id)
+        TIERS.pop(session_id, None)  # 分級記完才移除；中途丟例外留著下次重取，不讓 hard 漏成一般子代理
     if session_id in PLAN_PENDING:  # hard 子代理：跑過 plan-hard 才放行其他工具
         if tool_name == "terminal" and "plan-hard" in str((args or {}).get("command", "")):
             PLAN_PENDING.discard(session_id)
@@ -297,7 +300,7 @@ def _on_pre_tool_call(tool_name: str = "", args: Optional[Dict[str, Any]] = None
             if sid in PLAN_PENDING:  # hard 子代理還沒拿計畫：例外也照擋，且要它先去規劃
                 return {"action": "block", "message": PLAN_MESSAGE}
             return None
-        return {"action": "block", "message": MESSAGE}
+        return {"action": "block", "message": ERROR_MESSAGE if tool_name == "delegate_task" else MESSAGE}
 
 
 def register(ctx) -> None:

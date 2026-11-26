@@ -106,7 +106,8 @@ def report(legs, fb_activated, platform="all", since=None, out=sys.stdout):
         lat = d["latency"]
         p50 = f"{percentile(lat, 0.5):.1f}" if lat else "-"
         p95 = f"{percentile(lat, 0.95):.1f}" if lat else "-"
-        print(f"{prov}/{model:33s} {len(lat):5d} {p50:>6s} {p95:>6s} {d['err429']:4d} {d['pool_skip']:9d}", file=out)
+        leg = f"{prov}/{model}"
+        print(f"{leg:44s} {len(lat):5d} {p50:>6s} {p95:>6s} {d['err429']:4d} {d['pool_skip']:9d}", file=out)
     if fb_activated:
         print("fallback activated:", file=out)
         for (old, new, prov), n in sorted(fb_activated.items()):
@@ -161,7 +162,9 @@ def main():
         print("DELEGATION-LATENCY SELFTEST PASS")
         return 0
 
-    files = sorted(glob.glob(os.path.join(a.logdir, "agent.log*")), key=rot_key, reverse=True)
+    # 只收 agent.log 與 agent.log.N：.gz 等壓縮輪轉檔不能當文字讀，且 rot_key 本來就只懂數字輪轉。
+    files = sorted((p for p in glob.glob(os.path.join(a.logdir, "agent.log*"))
+                    if re.fullmatch(r"agent\.log(\.\d+)?", os.path.basename(p))), key=rot_key, reverse=True)
     legs = defaultdict(lambda: {"latency": [], "err429": 0, "pool_skip": 0})
     fb = Counter()
     tag_platform = {}
@@ -169,8 +172,8 @@ def main():
         try:
             with open(path, encoding="utf-8", errors="replace") as fh:
                 parse_lines(fh, legs, fb, platform=a.platform, since=a.since, tag_platform=tag_platform)
-        except OSError:
-            pass
+        except OSError as e:
+            print(f"warn: 讀不到 {path}: {e}", file=sys.stderr)
     if not legs and not fb:
         print(f"no data in {a.logdir}", file=sys.stderr)
         return 1
