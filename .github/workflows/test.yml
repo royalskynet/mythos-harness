@@ -21,3 +21,4 @@ jobs:
       - run: bash tests/test-session-retention.sh
       - run: bash tests/test-worker-soul-contract.sh
       - run: bash tests/test-delegation-latency.sh
+      - run: bash tests/test-delegation-pick.sh
