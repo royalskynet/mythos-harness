@@ -8,8 +8,8 @@
 # - 429 會把該 provider 的憑證標成 exhausted（auth.json credential_pool），
 #   _candidate_pool_exhausted 讓同 provider 的後續棒全被跳過——Go 月配額死時，
 #   *-free 棒也走不了，只有非 Go 腿活得下來。所以鏈必須有一棒非 opencode-go。
-# - provider: omniroute 這種自訂名要出現在 custom_providers 才 bind 得到，
-#   否則 "provider not configured" 整棒作廢。
+# - provider: omniroute 這種自訂名要出現在 providers/custom_providers 才 bind 得到，
+#   否則 "provider not configured" 整棒作廢；active mythos 正本是 v12 providers dict。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 fail=0 n=0
@@ -100,8 +100,16 @@ else:
     sys.exit(1)
 cfg = yaml.safe_load(open(sys.argv[1])) if yaml else _mini_load(open(sys.argv[1]).read())
 f = sys.argv[1]
-named = {p.get("name") for p in (cfg.get("custom_providers") or []) if isinstance(p, dict)}
+legacy_named = {p.get("name") for p in (cfg.get("custom_providers") or []) if isinstance(p, dict)}
+providers_cfg = cfg.get("providers") or {}
+providers_named = set(providers_cfg) if isinstance(providers_cfg, dict) else set()
+named = legacy_named | providers_named
 core = {"opencode-go", "openrouter", "anthropic", "openai", "google", "copilot", "nous", "ollama"}
+if f == "profiles/mythos/config.yaml":
+    if cfg.get("custom_providers") is not None:
+        print(f"FAIL: {f} 仍用退役的 custom_providers list（active mythos 要用 v12 providers dict）"); sys.exit(1)
+    if "omniroute" not in providers_named:
+        print(f"FAIL: {f} providers dict 未註冊 omniroute"); sys.exit(1)
 
 def check_chain(chain, where):
     ok = True
@@ -121,7 +129,7 @@ def check_chain(chain, where):
             print(f"FAIL: {f} {where} 重複 {k}"); ok = False
         seen.add(k)
         if prov and prov not in core and prov not in named:
-            print(f"FAIL: {f} {where} 的 {prov} 沒在 custom_providers 註冊（bind 不到 → 棒作廢）"); ok = False
+            print(f"FAIL: {f} {where} 的 {prov} 沒在 providers/custom_providers 註冊（bind 不到 → 棒作廢）"); ok = False
         if prov in named and prov in core:
             print(f"FAIL: {f} {where} 的 {prov} 撞名 core provider"); ok = False
     return ok
@@ -224,7 +232,10 @@ else:
     sys.exit(1)
 cfg = yaml.safe_load(open(sys.argv[1])) if yaml else _mini_load(open(sys.argv[1]).read())
 f = sys.argv[1]
-named = {p.get("name") for p in (cfg.get("custom_providers") or []) if isinstance(p, dict)}
+legacy_named = {p.get("name") for p in (cfg.get("custom_providers") or []) if isinstance(p, dict)}
+providers_cfg = cfg.get("providers") or {}
+providers_named = set(providers_cfg) if isinstance(providers_cfg, dict) else set()
+named = legacy_named | providers_named
 chain = cfg.get("fallback_providers") or []
 missing = [e.get("provider") for e in chain
            if e.get("provider") not in ("opencode-go","openrouter","anthropic","openai","google","copilot","nous","ollama")
